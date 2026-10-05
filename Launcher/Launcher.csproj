@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>HytaleAccounts</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="NativeDropdown.js" LogicalName="HytaleAccounts.NativeDropdown.js" />
+    <EmbeddedResource Include="../Install.ps1" LogicalName="HytaleAccounts.Install.ps1" />
+    <EmbeddedResource Include="../Uninstall.ps1" LogicalName="HytaleAccounts.Uninstall.ps1" />
+    <EmbeddedResource Include="../InstallerSafety.ps1" LogicalName="HytaleAccounts.InstallerSafety.ps1" />
+  </ItemGroup>
+</Project>
