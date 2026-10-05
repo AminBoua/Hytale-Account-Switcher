@@ -1,207 +1,290 @@
 # Hytale Account Switcher
 
-An account-switching addon for the Windows Hytale launcher. Keep using your existing **Hytale Launcher** desktop shortcut or Start-menu search entry. Saved accounts appear in the launcher's existing profile dropdown; there is no second visible launcher.
+Switch between multiple Hytale accounts directly from the existing **Hytale Launcher** on Windows.
 
-- Switch saved accounts in the same launcher window.
-- **Add account** opens Hytale's own login website in your normal default browser.
-- Keep the current account selected until a new native login succeeds.
-- Log out of the selected account and restore another usable saved account without restarting.
-- Show native sign-in when no usable account remains, without extra sign-in controls.
-- Remove the addon through **Windows Settings > Apps** to restore normal launcher shortcuts.
+No separate launcher window and no custom login page. Saved accounts appear in Hytale's existing profile dropdown, and **Add account** uses Hytale's own browser-based login flow.
 
-This is an unofficial addon. Its download contains the addon and .NET runtime, not Hytale's launcher executable or game files.
+> **Unofficial addon:** This project is not affiliated with or endorsed by Hypixel Studios. The download contains the addon and its .NET runtime — not Hytale's launcher executable or game files.
 
-## Contents
+## Features
 
-- [Download and install](#download-and-install)
-- [Compatibility](#compatibility)
-- [Using accounts and uninstalling](#using-accounts-and-uninstalling)
-- [Build from source: complete tutorial](#build-from-source-complete-tutorial)
-- [Run checks individually](#run-checks-individually)
-- [Publish manually](#publish-manually)
-- [Test your build](#test-your-build)
-- [Troubleshooting](#troubleshooting)
-- [How it works](#how-it-works)
-- [Source layout](#source-layout)
+- **Switch accounts without restarting** the Hytale Launcher.
+- **Use the existing profile dropdown** instead of a separate account manager.
+- **Add accounts through Hytale's own login flow** in your default browser.
+- **Keep your current account active** until a new login succeeds.
+- **Fall back to another saved account** when logging out, when possible.
+- **Return to Hytale's normal sign-in screen** when no usable account remains.
+- **Uninstall through Windows Settings** and restore the original launcher shortcuts.
 
-## Download and install
+## Download
 
-To use the ready-built addon, you do **not** need Git, Node.js, Visual Studio, a separate .NET installation, or the source archive.
+Download the latest **`HytaleAccounts-Setup.exe`** from the [Releases](https://github.com/AminBoua/Hytale-Account-Switcher/releases) page.
 
-1. Install the official Hytale launcher and open it once to confirm it works.
-2. Close any running Hytale game. Setup can close the launcher normally, but never forcibly terminates the game.
-3. Download [HytaleAccounts-Setup.exe](https://github.com/AminBoua/Hytale-Account-Switcher/releases/download/v0.1.0/HytaleAccounts-Setup.exe) from [Releases](https://github.com/AminBoua/Hytale-Account-Switcher/releases).
-4. Double-click **HytaleAccounts-Setup.exe**. Keep that filename so the executable enters setup mode.
-5. Approve Windows' administrator prompt. Setup needs permission to add files to the existing launcher installation and update its original system-wide shortcuts.
-6. Setup opens Hytale with the addon. Afterwards, keep opening your original **Hytale Launcher** shortcut or Start-menu entry.
+### Compatibility
 
-Setup creates no second launcher entry and no addon uninstall shortcut. The addon appears as **Hytale Accounts addon** in Windows Settings > Apps. Only installation/removal is elevated; the launcher starts with your normal Windows user profile.
+| Requirement | Supported value |
+| --- | --- |
+| Platform | Windows x64 |
+| Hytale Launcher build | `2026.09.30-326a0c2` |
+| Launcher location | `C:\Program Files\Hypixel Studios\Hytale Launcher\hytale-launcher.exe` |
+| Original executable SHA-256 | `e34e33bf28271cb2647c37624591e6e588ea5d55619deadc18f8e67491f2fafe` |
+| Original publisher | Hypixel Studios Canada Inc |
 
-Updating the earlier per-user package automatically removes its duplicate launcher and uninstall shortcuts before integrating with the original shortcuts.
+> [!IMPORTANT]
+> Compatibility is tied to the **Hytale Launcher build**, not the game version shown beside the Play button.
+>
+> The addon verifies the original launcher executable and publisher before running. If Hytale updates the launcher, a compatible addon release may be required.
 
-### Verify the download
+## Installation
 
-Download [SHA256SUMS.txt](https://github.com/AminBoua/Hytale-Account-Switcher/releases/download/v0.1.0/SHA256SUMS.txt) from the same release. Open PowerShell in the download folder and run:
+You do **not** need Git, Node.js, Visual Studio, a separate .NET runtime, or the source code to use the ready-built addon.
+
+1. Install the official Hytale Launcher and open it once to make sure it works.
+2. Close any running Hytale game.
+3. Download **`HytaleAccounts-Setup.exe`** from [Releases](https://github.com/AminBoua/Hytale-Account-Switcher/releases).
+4. Double-click the installer.
+5. Approve the Windows administrator prompt.
+6. Setup will open Hytale with the addon installed.
+
+After installation, continue opening Hytale through your normal **Hytale Launcher** desktop shortcut or Start-menu entry.
+
+The addon does **not** create a second launcher shortcut.
+
+> [!NOTE]
+> The executable is currently unsigned, so Windows may display its standard reputation/SmartScreen warning.
+>
+> You can verify the downloaded executable against the `SHA256SUMS.txt` included with the release.
+
+### Verify your download
+
+Download `SHA256SUMS.txt` from the same release and open PowerShell in your download folder:
 
 ```powershell
 Get-FileHash -LiteralPath .\HytaleAccounts-Setup.exe -Algorithm SHA256
 Get-Content -LiteralPath .\SHA256SUMS.txt
 ```
 
-The two SHA-256 values must match; letter case does not matter. This verifies that the file matches the release artifact. The executable is unsigned and can show Windows' standard reputation prompt.
+The two SHA-256 values should match. Letter case does not matter.
 
-## Compatibility
+This confirms that your executable matches the published release artifact.
 
-| Requirement | Supported value |
+## Usage
+
+### Add another account
+
+Sign into Hytale normally if you aren't already signed in.
+
+Open Hytale's existing profile dropdown and select **Add account**.
+
+Your default browser will open Hytale's own login flow. Complete the login there.
+
+Your current account remains selected until Hytale successfully verifies the new login.
+
+### Switch accounts
+
+Open the profile dropdown and select one of your saved accounts.
+
+The launcher switches to that account in the **same window**, without requiring another browser login or launcher restart.
+
+> [!IMPORTANT]
+> Close the game before switching accounts.
+
+### Log out
+
+Hytale's normal **Logout** action applies to the currently selected account.
+
+If another usable saved account exists, the addon restores it instead of unnecessarily returning you to the login screen.
+
+If no usable account remains, Hytale's normal sign-in page appears.
+
+## Security and privacy
+
+The addon is designed to leave authentication under Hytale's control.
+
+**Hytale still handles:**
+
+- Browser authentication
+- The active encrypted `account.dat`
+- Encryption keys
+- Token refresh
+- Logout
+- Starting the game
+
+The addon does **not** implement its own OAuth flow and does **not** decrypt your Hytale credentials.
+
+Saved accounts are stored as opaque snapshots of Hytale's native account state. Account metadata and snapshots are stored beneath Hytale's existing data directory.
+
+The original signed `hytale-launcher.exe` is left intact.
+
+At runtime, the addon verifies the supported original executable and its publisher before creating a temporary launcher copy containing the integration needed for account switching.
+
+The temporary executable is removed after normal launcher exit.
+
+### Local communication
+
+The addon uses a loopback HTTP bridge between the helper and Hytale's native frontend.
+
+Requests require a per-launch capability and the expected native Wails origin, and request sizes are limited.
+
+The bridge does not expose a separate credential vault or replacement Play action.
+
+## Uninstall
+
+1. Close the Hytale game.
+2. Open **Windows Settings > Apps**.
+3. Find **Hytale Accounts addon**.
+4. Select **Uninstall**.
+5. Approve the administrator prompt.
+
+After uninstalling, open your normal **Hytale Launcher** shortcut again.
+
+The uninstaller restores launcher shortcuts that still belong to the addon and removes addon-owned files.
+
+Uninstalling does **not** delete:
+
+- Your Hytale installation
+- Worlds or settings
+- Your current native login
+- Hytale session keys
+- Saved account snapshots
+
+It also does not intentionally log you out.
+
+> [!WARNING]
+> Use the Windows uninstaller instead of manually deleting the addon files. The uninstaller also restores launcher shortcuts that were changed during installation.
+
+## Troubleshooting
+
+| Problem | What to check |
 | --- | --- |
-| Platform | Windows x64 |
-| Official launcher path | `C:\Program Files\Hypixel Studios\Hytale Launcher\hytale-launcher.exe` |
-| Official launcher build | `2026.09.30-326a0c2` |
-| Original executable SHA-256 | `e34e33bf28271cb2647c37624591e6e588ea5d55619deadc18f8e67491f2fafe` |
-| Original publisher | Hypixel Studios Canada Inc |
+| Unsupported launcher build/hash/signature | Check the compatibility table above. You may need a newer addon release after a Hytale Launcher update. |
+| Setup cannot write files or shortcuts | Close Hytale and the game, approve the administrator prompt, and check access to the Hytale installation. |
+| No launcher shortcut found | Reinstall the official Hytale Launcher so its original shortcuts exist, then retry setup. |
+| Account switching is blocked | Close the running game before switching accounts or logging out. |
+| Add account is waiting for authentication | Complete Hytale's login flow in your browser. Your previous account stays active until it succeeds. |
+| Saved account cannot be restored | Sign into that account again through Hytale. Logout or session expiry can make a saved native session unusable. |
+| Launcher updated and the addon stopped working | Wait for/use an addon release supporting the new launcher build. Do not replace the updated launcher with an older executable. |
 
-The supported **launcher build** differs from the game version displayed beside Play. Setup and every addon launch verify the exact original executable and its publisher signature. A launcher update requires a compatible addon release; rebuilding this source alone does not support different native bytes.
+### Check your launcher version
 
-Inspect your launcher in PowerShell:
+You can inspect the installed launcher from PowerShell:
 
 ```powershell
 $launcher = Join-Path $env:ProgramFiles 'Hypixel Studios\Hytale Launcher\hytale-launcher.exe'
+
 (Get-Item -LiteralPath $launcher).VersionInfo.ProductVersion
 Get-FileHash -LiteralPath $launcher -Algorithm SHA256
-Get-AuthenticodeSignature -LiteralPath $launcher | Select-Object Status, SignerCertificate
+Get-AuthenticodeSignature -LiteralPath $launcher |
+    Select-Object Status, SignerCertificate
 ```
 
-## Using accounts and uninstalling
+## How it works
 
-If no usable native login exists, Hytale shows its normal sign-in page. After signing in, open the existing profile dropdown and choose **Add account**. Complete Hytale's login yourself in your default browser. The current account is kept until Hytale's native callback verifies the new account.
+### Launcher integration
 
-Choose a saved account in the dropdown to switch without a browser login or launcher restart. Hytale's normal **Logout** action applies to the currently selected account. Another usable saved session is restored before sign-in is shown; if none remain, native sign-in appears in the same window.
+The addon helper and removal scripts are installed under:
 
-Close the game before switching accounts or logging out. Play remains Hytale's own action and is blocked while account verification is pending.
+```text
+C:\Program Files\Hypixel Studios\Hytale Launcher\.hytale-accounts-addon
+```
 
-To remove the addon:
+Setup updates the targets of the existing Hytale Launcher shortcuts and stores their original state so they can be restored later.
 
-1. Close the game.
-2. Open **Windows Settings > Apps**, find **Hytale Accounts addon**, and choose **Uninstall**.
-3. Approve Windows' administrator prompt.
-4. Open your usual **Hytale Launcher** shortcut again.
+The signed original `hytale-launcher.exe` remains intact.
 
-Removal closes the addon launcher normally, restores original shortcut bytes, removes addon files, and unregisters the Apps entry. Later changes you made to shortcuts are preserved. Hytale's signed executable, current native login, session keys, saved snapshots, game installation, settings and worlds are kept. Removal does not log you out or delete accounts.
+Opening that executable directly bypasses the shortcut integration. Normal desktop and Start-menu shortcuts launch through the addon.
 
-Use the uninstaller rather than simply deleting the helper executable: removal also restores shortcuts that point to the helper.
+At runtime, the helper:
 
-## Build from source: complete tutorial
+1. Verifies the original Hytale Launcher.
+2. Creates a temporary native launcher copy.
+3. Adds the frontend bootstrap and native session adapter.
+4. Starts the launcher normally.
+5. Removes the temporary executable after normal exit.
 
-The recommended build validates the source and produces a self-contained, double-click setup executable like the one in Releases.
+The native adapter targets functions and binary offsets belonging to the exact supported launcher build. For that reason, arbitrary launcher versions are intentionally rejected.
 
-### 1. Prepare the machine
+### Account switching
 
-Use Windows x64 with the supported official launcher installed in its standard location. The native checks use that executable as a binary fixture. Ordinary automated checks do not require a Hytale login or multiple saved accounts.
+The addon works with Hytale's existing account state rather than implementing a replacement authentication system.
 
-Close the Hytale launcher and game before building. The standard build uses temporary test fixtures; it does not run the optional live browser-login/account checks.
+When switching accounts, it:
 
-### 2. Install development tools
+1. Pauses relevant native account activity.
+2. Restores the selected opaque account snapshot.
+3. Asks Hytale to load the account.
+4. Verifies the native identity.
+5. Resumes normal launcher activity.
 
-| Tool | Install | Purpose |
+If activation or verification fails, the previous account state is restored.
+
+When adding an account, the current account remains active until Hytale's native login succeeds.
+
+When logging out, native logout is used for the selected account. The addon then attempts to restore another usable saved account before falling back to Hytale's sign-in screen.
+
+## Development
+
+The recommended build process validates the project and produces the same self-contained installer format distributed through Releases.
+
+### Requirements
+
+| Tool | Requirement | Purpose |
 | --- | --- | --- |
-| [.NET 10 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/10.0) | Windows **x64 SDK**, from the SDK section | Compile C# and publish the self-contained executable |
-| [Node.js](https://nodejs.org/en/download) | Windows x64 LTS; checks have been tested with Node 22 | Run frontend checks using built-in Node modules |
-| [Git for Windows](https://git-scm.com/install/windows) | Normal Windows installer, if cloning | Download source and check out release tags |
+| .NET SDK | .NET 10 x64 SDK | Build and publish the C# launcher helper |
+| Node.js | Node 22 tested | Run frontend checks |
+| Git | Optional | Clone the repository and check out releases |
+| Windows | x64 | Required for launcher integration and native checks |
 
-Install the .NET **SDK**, not just the runtime. The runtime alone cannot compile the project. Visual Studio is optional. Windows PowerShell is included with Windows. There are no third-party NuGet or npm package dependencies and no `npm install` step.
+Visual Studio is optional.
 
-Open a **new** PowerShell window after installing tools so PATH changes take effect:
+There are no third-party NuGet or npm package dependencies, and there is no `npm install` step.
 
-```powershell
-dotnet --version
-dotnet --list-sdks
-node --version
-git --version
-```
+The supported official Hytale Launcher must also be installed in its standard location because native validation uses it as a binary fixture.
 
-The SDK list should include a `10.0.x` SDK. If a command is missing, confirm the installation and reopen PowerShell. The first .NET restore/publish needs internet access to download any missing Microsoft targeting/runtime packs; later builds can reuse the local cache.
-
-### 3. Get the source
-
-With Git:
+### Clone
 
 ```powershell
 git clone https://github.com/AminBoua/Hytale-Account-Switcher.git
 Set-Location .\Hytale-Account-Switcher
 ```
 
-For the source corresponding to the downloadable release:
+To build the source corresponding to a particular release, check out its tag:
 
 ```powershell
 git checkout v0.1.0
 ```
 
-Alternatively, use GitHub's **Code > Download ZIP**, extract the archive, and open PowerShell in the extracted folder. Git is not required to build an extracted archive.
+### Build and validate
 
-Your current directory must contain `Build-Installer.ps1`, `README.md`, `Launcher`, and `Checks`:
-
-```powershell
-Get-ChildItem
-```
-
-### 4. Build and validate
-
-From the repository root:
+Close the Hytale Launcher and game, then run:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Installer.ps1
 ```
 
-The execution-policy option applies to this launched PowerShell process; it does not change Windows' persistent policy. Run the build as a normal user. Installing the result needs administrator approval, but compiling and fixture checks do not.
+The build performs:
 
-The script runs these steps in order:
+1. C# checks covering native storage, rollback, logout fallback, bridge validation and binary integration.
+2. Frontend checks against the embedded JavaScript.
+3. Installation/removal tests using temporary fixtures.
+4. A self-contained `win-x64` publish.
+5. Installer packaging and SHA-256 generation.
 
-1. C# checks in Release configuration: native storage, rollback, logout fallback, bridge validation, embedded setup resources and binary adapter/restoration checks.
-2. Frontend checks against the actual embedded JavaScript using Node's built-in modules.
-3. Installation/removal checks using temporary launcher files, shortcuts and a temporary registry entry.
-4. Publishing for `win-x64`, bundling the .NET runtime and native libraries into a single executable with debug symbols omitted.
-5. Copying the helper to the setup filename and writing its SHA-256 checksum.
-
-A failed step stops the build. Read the first failure and fix its cause before distributing an output file. An executable left from an earlier successful build does not mean the current checks passed.
-
-A successful run ends with:
+A successful build produces:
 
 ```text
 Ready: dist/HytaleAccounts-Setup.exe
 ```
 
-### 5. Find and verify the output
+### Build output
 
 | Output | Purpose |
 | --- | --- |
-| `dist/HytaleAccounts-Setup.exe` | Finished double-click installer; distribute this file |
-| `dist/SHA256SUMS.txt` | SHA-256 of that exact setup executable |
-| `dist/build/HytaleAccounts.exe` | Published helper before copying to the setup filename |
+| `dist/HytaleAccounts-Setup.exe` | Finished installer |
+| `dist/SHA256SUMS.txt` | Installer SHA-256 |
+| `dist/build/HytaleAccounts.exe` | Published helper before installer naming |
 
-The frontend and installation/removal scripts are embedded into the executable. End users do not need these source files next to setup. The bundled runtime makes the executable much larger than the source, but removes the need for a separate .NET runtime installation.
-
-Verify your output:
-
-```powershell
-Get-FileHash -LiteralPath .\dist\HytaleAccounts-Setup.exe -Algorithm SHA256
-Get-Content -LiteralPath .\dist\SHA256SUMS.txt
-```
-
-### 6. Install your build
-
-Double-click `dist\HytaleAccounts-Setup.exe` and approve the administrator prompt. Keep opening **Hytale Launcher** as usual.
-
-To explicitly enter setup mode using the published helper:
-
-```powershell
-.\dist\build\HytaleAccounts.exe --install
-```
-
-Avoid running `Install.ps1` directly as a normal user. The setup entry point handles elevation, removal of the earlier package, and starting the native launcher under the invoking user's normal profile.
-
-## Run checks individually
-
-From the repository root, with the launcher and game closed:
+### Run checks individually
 
 ```powershell
 dotnet run --project .\Checks\Checks.csproj -c Release
@@ -209,107 +292,91 @@ node .\Checks\NativeLoginChecks.cjs
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Checks\InstallerScriptChecks.ps1
 ```
 
-C# checks cover opaque snapshots, native keys, activation rollback, identity verification, pending login, reauthentication, logout isolation, bridge requests and the supported native adapter. JavaScript checks cover browser-login dispatch, preservation of native login parameters, immediate transition scheduling and native logout/sign-in behavior.
+Automated checks do not perform a real browser login, launch the game, or establish server-side logout isolation.
 
-Installer checks verify that user and system shortcuts keep their names, no second launcher entry is created, originals are restored exactly, later user changes and official updates are preserved, and invalid restoration journals are rejected.
+Those interactions should be tested manually before publishing a release.
 
-Automated checks do not perform a real browser login, launch the game, or establish server-side logout isolation. Use the manual sequence below to check those interactions.
+### Manual publish
 
-## Publish manually
-
-For a compiler-only build, or to inspect publishing separately from validation:
+If you only want to inspect publishing without running the complete validation process:
 
 ```powershell
-dotnet publish .\Launcher\Launcher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false -o .\dist\build
+dotnet publish .\Launcher\Launcher.csproj `
+    -c Release `
+    -r win-x64 `
+    --self-contained true `
+    -p:PublishSingleFile=true `
+    -p:IncludeNativeLibrariesForSelfExtract=true `
+    -p:DebugType=None `
+    -p:DebugSymbols=false `
+    -o .\dist\build
 ```
 
-Create the setup filename and checksum:
+Then create the setup executable and checksum:
 
 ```powershell
-Copy-Item -LiteralPath .\dist\build\HytaleAccounts.exe -Destination .\dist\HytaleAccounts-Setup.exe -Force
-$hash = (Get-FileHash -LiteralPath .\dist\HytaleAccounts-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-"$hash  HytaleAccounts-Setup.exe" | Set-Content -LiteralPath .\dist\SHA256SUMS.txt -Encoding ASCII
+Copy-Item `
+    -LiteralPath .\dist\build\HytaleAccounts.exe `
+    -Destination .\dist\HytaleAccounts-Setup.exe `
+    -Force
+
+$hash = (
+    Get-FileHash `
+        -LiteralPath .\dist\HytaleAccounts-Setup.exe `
+        -Algorithm SHA256
+).Hash.ToLowerInvariant()
+
+"$hash  HytaleAccounts-Setup.exe" |
+    Set-Content `
+        -LiteralPath .\dist\SHA256SUMS.txt `
+        -Encoding ASCII
 ```
 
-Manual publish does **not** run checks. The recommended `Build-Installer.ps1` validates before packaging. SDK versions and source revisions can change binary checksums; compare a download to its release checksum, not to an unrelated local build.
+> [!WARNING]
+> Manual publishing does **not** run the project's validation checks. Use `Build-Installer.ps1` for release builds.
 
-## Test your build
+## Manual release testing
 
-After installing:
+Before distributing a build:
 
-1. Search **Hytale Launcher** in Start and open your original entry. Check that no second launcher entry or duplicate desktop shortcut exists.
-2. Sign in to account A through Hytale's normal login.
-3. Use **Add account** to sign in to account B in your default browser. The launcher window must remain open.
-4. Select account A in the dropdown. The same window should switch accounts without opening a browser.
-5. Log out of account A. Account B should become active in that window instead of returning to sign-in while a usable account remains.
-6. When no usable account remains, confirm native sign-in contains no extra account controls.
-7. Remove **Hytale Accounts addon** through Windows Settings > Apps. Open the original shortcut and confirm normal launcher behavior and preserved game data.
+1. Open your original **Hytale Launcher** Start-menu or desktop entry and verify no duplicate launcher shortcut exists.
+2. Sign into account A through Hytale normally.
+3. Select **Add account** and sign into account B through the browser.
+4. Switch back to account A through the existing profile dropdown.
+5. Verify the account changes without reopening the launcher or browser.
+6. Log out of account A and verify account B becomes active.
+7. Verify Hytale's native sign-in appears when no usable account remains.
+8. Uninstall **Hytale Accounts addon** through Windows Settings.
+9. Open the original Hytale Launcher shortcut and verify normal behavior and preserved game data.
 
-This sequence logs out an actual account, so use accounts you are willing to sign in to again.
+> [!NOTE]
+> This test performs a real logout. Use accounts you are prepared to sign into again.
 
-## Troubleshooting
-
-| Problem | What to check |
-| --- | --- |
-| `dotnet` is not recognized | Install .NET 10 **SDK** and open a new terminal. |
-| `node` is not recognized | Install Node.js and open a new terminal. Node is only needed for checks. |
-| SDK/target-framework error | Confirm `dotnet --list-sdks` includes .NET 10. |
-| Script cannot be found | Change to the repository root, not the `Launcher` folder. |
-| Checks require an idle launcher | Close Hytale and the game normally, then rerun. |
-| Official executable missing | Install the official launcher in its standard location. |
-| Unsupported build/hash/signature | Compare with the compatibility table. Use a compatible addon or remove it and use normal Hytale. Never replace an updated launcher with an older backup. |
-| Setup cannot write files/shortcuts | Close the game, approve elevation with an administrator account, and check access to Hytale's installation and shortcuts. |
-| Shortcut-change/invalid-journal error | Unexpected files are being preserved. Inspect the original shortcuts and restoration backups before retrying; do not delete backups blindly. |
-| No launcher shortcut found | Reinstall the official launcher so its original shortcuts exist, then retry setup. |
-| Account switching blocked during Play | Close the game before switching or logging out. |
-| Add account awaiting authentication | Complete Hytale's browser login. The previous account remains selected until native authentication succeeds. |
-| Saved account cannot be restored | Sign in again using Hytale's native flow; logout or expiry can make a snapshot unusable. |
-
-## How it works
-
-### Launcher integration
-
-The helper and removal scripts are installed inside the existing launcher directory:
-
-```text
-C:\Program Files\Hypixel Studios\Hytale Launcher\.hytale-accounts-addon
-```
-
-Setup changes the targets of existing launcher shortcuts and stores their original bytes. The signed original `hytale-launcher.exe` remains intact. Opening that executable directly bypasses shortcut integration; ordinary desktop and Start-menu shortcuts use the addon.
-
-At runtime, the invisible helper verifies the original executable and creates a temporary native copy with the embedded frontend bootstrap and a small native session adapter. The helper has no account-chooser window. The temporary executable stays read-only during use and is removed on normal exit.
-
-The adapter targets exact native functions and binary offsets, including Go stack/preemption metadata, in the supported build. This is why arbitrary launcher updates are rejected.
-
-### Authentication and storage
-
-Hytale owns browser authentication, active encrypted `account.dat`, encryption keys, token refresh, logout and Play. The addon does not implement custom OAuth or decrypt credentials.
-
-The native launcher uses the official `GameInstallPath` registry value, falling back to `%APPDATA%\Hytale`. Opaque account snapshots and local metadata live beneath that root's `Accounts` directory. Your default browser, Windows profile, installation, worlds and settings keep their normal locations. Launcher profile-related environment variables are not redirected.
-
-Switching pauses native account tasks, restores the chosen opaque snapshot to the official active location, asks Hytale to load it, verifies the native identity and resumes tasks in the existing process/window. Failed verification or metadata commits restore the previous account. Add preserves the current account until login succeeds. Logout invokes native logout for the selected account and restores a usable fallback before showing sign-in.
-
-A loopback HTTP bridge connects the helper and native frontend. Requests require an unpredictable per-launch capability and the native Wails origin, and request sizes are limited. It exposes no separate credential vault or replacement Play action.
-
-### Removal
-
-The uninstaller validates the protected restoration journal and backups, closes the addon normally, restores shortcuts that still belong to it, removes exact addon-owned files and unregisters its Apps entry. It never recursively deletes Hytale's account/game directories. Later shortcut changes and newer official launcher bytes are preserved.
-
-## Source layout
+## Project structure
 
 | Path | Responsibility |
 | --- | --- |
 | `Launcher/Launcher.csproj` | Windows executable and embedded frontend/setup resources |
-| `Launcher/App.xaml.cs` | Invisible helper startup, setup commands and single-instance handling |
-| `Launcher/Setup.cs` | Setup elevation, earlier-package removal and normal-user launcher startup |
-| `Launcher/NativeStores.cs` | Official storage, opaque snapshots, identity metadata and atomic activation |
-| `Launcher/NativeSession.cs` | In-place switching, pending login, verification and logout fallback |
-| `Launcher/NativeDropdown.js` | Existing profile dropdown and native browser-login integration |
-| `Launcher/LocalAccountBridge.cs` | Capability-protected loopback communication |
-| `Launcher/PatchInstaller.cs` | Exact-build adapter/bootstrap and restoration safeguards |
-| `Launcher/IntegrationSafety.cs` | Compatibility, native publisher verification and process environment |
-| `Checks/` | Native, frontend and installer checks used by the build |
-| `Install.ps1`, `Uninstall.ps1`, `InstallerSafety.ps1` | Auditable scripts embedded in setup |
-| `Build-Installer.ps1` | Validation, publishing, setup creation and checksum |
+| `Launcher/App.xaml.cs` | Helper startup, setup commands and single-instance handling |
+| `Launcher/Setup.cs` | Elevation, package migration and normal-user launcher startup |
+| `Launcher/NativeStores.cs` | Native storage, account snapshots and atomic activation |
+| `Launcher/NativeSession.cs` | Account switching, login verification and logout fallback |
+| `Launcher/NativeDropdown.js` | Integration with Hytale's existing profile dropdown |
+| `Launcher/LocalAccountBridge.cs` | Capability-protected local communication |
+| `Launcher/PatchInstaller.cs` | Exact-build native adapter and restoration safeguards |
+| `Launcher/IntegrationSafety.cs` | Compatibility and publisher verification |
+| `Checks/` | Native, frontend and installer checks |
+| `Install.ps1` | Installation logic embedded into setup |
+| `Uninstall.ps1` | Removal and shortcut restoration |
+| `InstallerSafety.ps1` | Installer safety checks |
+| `Build-Installer.ps1` | Validation, publishing and packaging |
 
-Generated binaries, logs, local account data, encryption keys and game files are not part of the source repository. The ready-built installer and checksum are distributed as release assets.
+Generated binaries, logs, local account data, encryption keys and Hytale game files are not included in the source repository.
+
+Ready-built installers and their checksums are distributed through [Releases](https://github.com/AminBoua/Hytale-Account-Switcher/releases).
+
+## Disclaimer
+
+Hytale Account Switcher is an unofficial community project and is not affiliated with, authorized by, or endorsed by Hypixel Studios.
+
+Hytale and related names and assets belong to their respective owners.
