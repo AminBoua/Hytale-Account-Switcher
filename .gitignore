@@ -6,3 +6,7 @@ dist/
 *.dpapi
 credentials*
 *.log
+account.dat
+.keys/
+native-stores.json
+Accounts/
