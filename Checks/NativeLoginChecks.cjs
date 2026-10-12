@@ -26,17 +26,17 @@ const window = {
 const document = {
   addEventListener() {}, currentScript: { src: 'http://127.0.0.1:1234/cap/ui.js' },
   createElement: tag => { created.push(tag); return {}; }, body: { append() {} },
-  querySelector: selector => selector === '.login__container' ? {} : null
+  querySelector: selector => selector === '.login__container' ? {} : selector === '#app' ?
+    { __vue_app__: { config: { globalProperties: { $pinia: { _s: new Map([['user', user]]) } } } } } : null
 };
 const source = fs.readFileSync('Launcher/NativeDropdown.js', 'utf8')
-  .replaceAll("(await import(location.origin + '/assets/index-C4Qf_qVT.js'))", '(await mockImport())')
   .replace('  new MutationObserver', '  window.testCommand = command;\n  new MutationObserver');
 vm.runInNewContext(source, {
   location: { origin: 'http://wails.localhost', pathname: '/launch-game' }, window, document, URL, AbortSignal, Date,
   MutationObserver: class { observe() {} }, setInterval: fn => { tick = fn; },
   setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; },
   clearTimeout: id => timers.delete(id),
-  alert: message => { throw Error(message); }, mockImport: async () => ({ S: () => user }),
+  alert: message => { throw Error(message); },
   fetch: async (url, options) => {
     if (options.body) {
       const data = JSON.parse(options.body); calls.push(data);

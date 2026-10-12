@@ -108,6 +108,33 @@ public sealed class PatchInstaller
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(patched.AsSpan(0x153674c, 4), 0x124bd6e - 0x12042e8);
         return patched;
     }
+    internal static byte[] PatchCurrent(byte[] original, int port, string capability)
+    {
+        if (port is < 1024 or > 65535 || !Regex.IsMatch(capability, "^[A-Za-z0-9_-]{43}$")) throw new IOException("Invalid bridge bootstrap.");
+        var text = Encoding.Latin1.GetString(original);
+        foreach (var hook in new[] { "window.go.account.Service.CheckNetworkMode", "window.go.account.Service.GenerateOauthURL",
+            "window.go.account.Service.IsUserLoggedIn", "window.go.account.Service.LogoutUser", "window.go.account.Service.HasValidSession",
+            "launch-game__profile-dropdown", "hy-dropdown__list", "login__container", "settings__action-button", "getUserProfile", "hybutton-split__main" })
+            if (!text.Contains(hook, StringComparison.Ordinal)) throw new IOException("Updated launcher frontend account interface changed; files and accounts preserved.");
+        const string title = "<title>Hytale Launcher</title>";
+        var titleAt = text.IndexOf(title, StringComparison.Ordinal);
+        if (titleAt < 0 || text.LastIndexOf(title, StringComparison.Ordinal) != titleAt) throw new IOException("Ambiguous embedded frontend.");
+        var start = text.LastIndexOf("<html", titleAt, StringComparison.Ordinal);
+        var end = start < 0 ? -1 : text.IndexOf("</html>", titleAt, StringComparison.Ordinal);
+        if (end < titleAt) throw new IOException("Missing embedded frontend boundary.");
+        end += 7;
+        // Drop preload hints and formatting to make room, preserving the updated launcher's own assets.
+        var html = Regex.Replace(text[start..end], "<link\\b[^>]*rel=\"modulepreload\"[^>]*>", "", RegexOptions.CultureInvariant);
+        html = Regex.Replace(html, @">\s+<", "><", RegexOptions.CultureInvariant);
+        html = html.Replace("</body>", $"<script src=\"http://127.0.0.1:{port}/{capability}/ui.js\"></script></body>", StringComparison.Ordinal);
+        if (!html.Contains($"/{capability}/ui.js", StringComparison.Ordinal) || html.Length > end - start)
+            throw new IOException("Updated launcher frontend has no room for the addon bootstrap.");
+        var patched = (byte[])original.Clone();
+        NativeAdapter.Apply(patched);
+        patched.AsSpan(start, end - start).Fill((byte)' ');
+        Encoding.Latin1.GetBytes(html).CopyTo(patched, start);
+        return patched;
+    }
     private async Task VerifyBackup(PatchRecord record)
     {
         RequireHash(BackupPath, record.OriginalHash); await publisher(BackupPath);

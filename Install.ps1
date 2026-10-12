@@ -6,6 +6,7 @@ param(
     [string]$RegistryPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HytaleAccounts'
 )
 $ErrorActionPreference = 'Stop'
+try {
 . (Join-Path $PSScriptRoot 'InstallerSafety.ps1')
 $helper = Join-Path $PSScriptRoot 'HytaleAccounts.exe'
 if (!(Test-Path -LiteralPath $helper)) { $helper = Join-Path $PSScriptRoot 'dist\build\HytaleAccounts.exe' }
@@ -36,7 +37,12 @@ function Install-Shortcut([string]$Path, [string]$Arguments = '') {
     if ($existing.Count -gt 0) {
         if (Test-Path -LiteralPath $Path) {
             $link = $shell.CreateShortcut($Path)
-            if ($link.TargetPath -ne $installed -or $link.Arguments -ne $Arguments) { throw "Shortcut changed since installation; preserved: $Path" }
+            if ($link.TargetPath -eq $official -and !$link.Arguments -and $existing[0].Backup) {
+                if ($existing[0].Backup -notmatch '^shortcut-[a-f0-9]{32}\.lnk$') { throw 'Invalid shortcut restoration backup; files preserved.' }
+                Assert-RegularPath (Join-Path $destination $existing[0].Backup)
+                Copy-Item -LiteralPath $Path -Destination (Join-Path $destination $existing[0].Backup) -Force
+            }
+            elseif ($link.TargetPath -ne $installed -or $link.Arguments -ne $Arguments) { throw "Shortcut changed since installation; preserved: $Path" }
         }
     } else {
         $backup = ''
@@ -64,9 +70,9 @@ function Install-Shortcut([string]$Path, [string]$Arguments = '') {
     $link.Description = if ($Arguments) { 'Remove the Hytale account addon; keep Hytale and your data' } else { 'Hytale launcher with account switching' }
     $link.Save()
 }
-foreach ($name in @('HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','launcher-baseline.json')) { Assert-RegularPath (Join-Path $destination $name) }
+foreach ($name in @('HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','Repair-Integration.ps1','launcher-baseline.json')) { Assert-RegularPath (Join-Path $destination $name) }
 Copy-Item -LiteralPath $helper -Destination $installed -Force
-foreach ($name in @('Uninstall.ps1','InstallerSafety.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $destination $name) -Force }
+foreach ($name in @('Uninstall.ps1','InstallerSafety.ps1','Repair-Integration.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $destination $name) -Force }
 $before | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $destination 'launcher-baseline.json') -Encoding UTF8
 # Keep every existing launcher's name and location, including official system-wide shortcuts.
 foreach ($folder in $roots) {
@@ -81,9 +87,22 @@ foreach ($folder in $roots) {
 if (!$records.Count) { throw 'No Hytale launcher shortcut was found. Reinstall the official launcher first.' }
 New-Item -Path $RegistryPath -Force | Out-Null
 $properties = @{
-    DisplayName = 'Hytale Accounts addon'; DisplayVersion = '0.1.0'; InstallLocation = $destination
+    DisplayName = 'Hytale Accounts addon'; DisplayVersion = '0.1.1'; InstallLocation = $destination
     UninstallString = '"' + $installed + '" --uninstall'; DisplayIcon = "$official,0"
 }
 foreach ($name in $properties.Keys) { New-ItemProperty -LiteralPath $RegistryPath -Name $name -Value $properties[$name] -PropertyType String -Force | Out-Null }
+$powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$action = New-ScheduledTaskAction -Execute $powershell -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '"')
+$repairTask = Get-ScheduledTask -TaskName 'HytaleAccounts-Repair' -ErrorAction SilentlyContinue
+if ($repairTask -and (@($repairTask.Actions).Count -ne 1 -or $repairTask.Actions[0].Execute -cne $powershell -or $repairTask.Actions[0].Arguments -cne $action.Arguments)) { throw 'Another task owns the shortcut repair entry; preserved.' }
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
+$settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName 'HytaleAccounts-Repair' -Action $action -Trigger $trigger -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
 Assert-LauncherSnapshot $official $before
 Write-Output 'Installed. Official launcher bytes and permissions preserved.'
+} catch {
+    $errorPath = Join-Path $PSScriptRoot 'install-error.txt'
+    Assert-RegularPath $errorPath
+    [IO.File]::WriteAllText($errorPath, $_.ToString())
+    throw
+}

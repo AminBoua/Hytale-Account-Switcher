@@ -5,6 +5,17 @@ $registry = 'HKCU:\Software\HytaleAccounts-Check-' + $id
 $repository = Split-Path $PSScriptRoot
 $oldLocal = $env:LOCALAPPDATA
 $oldPrograms = $env:ProgramFiles
+# Exercise the real task action/trigger/settings without registering a system task during fixtures.
+Import-Module ScheduledTasks
+$script:repairTask = $null
+function Register-ScheduledTask { param($TaskName,$Action,$Trigger,$Settings,$User,$RunLevel,[switch]$Force)
+    Check ($TaskName -eq 'HytaleAccounts-Repair' -and $User -eq 'SYSTEM' -and $Settings.Hidden -and $Action.Arguments -like '*-WindowStyle Hidden*') 'update repair runs invisibly outside the user profile'
+    $script:repairTask = [pscustomobject]@{ Actions = @($Action) }
+}
+function Get-ScheduledTask { param($TaskName,$ErrorAction) $script:repairTask }
+function Disable-ScheduledTask { param($TaskName) }
+function Stop-ScheduledTask { param($TaskName) }
+function Unregister-ScheduledTask { param($TaskName,$Confirm) $script:repairTask = $null }
 function Check($Condition, [string]$Message) {
     if (!$Condition) { throw "FAIL $Message" }
     Write-Host "PASS $Message"
@@ -30,7 +41,7 @@ try {
     $env:ProgramFiles = Join-Path $root 'program-files'
     $official = Join-Path $env:ProgramFiles 'Hypixel Studios\Hytale Launcher\hytale-launcher.exe'
     foreach ($folder in @($package, $programs, (Split-Path $official))) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
-    foreach ($name in @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1')) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $package }
+    foreach ($name in @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','Repair-Integration.ps1')) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $package }
     Set-Content -LiteralPath (Join-Path $package 'HytaleAccounts.exe') -Value 'non-executed helper fixture'
     Set-Content -LiteralPath $official -Value 'official launcher fixture'
     . (Join-Path $package 'InstallerSafety.ps1')
@@ -71,8 +82,20 @@ try {
     & (Join-Path $package 'Install.ps1') @options
     Set-Content -LiteralPath $official -Value 'new official update fixture'
     $updated = Get-LauncherSnapshot $official
+    $updater = $shell.CreateShortcut($shortcutPath); $updater.TargetPath = $official; $updater.Description = 'Updated official shortcut'; $updater.Save()
+    $updatedLink = (Get-FileHash -LiteralPath $shortcutPath).Hash
+    & (Join-Path $destination 'Repair-Integration.ps1')
+    Check ($shell.CreateShortcut($shortcutPath).TargetPath -eq (Join-Path $destination 'HytaleAccounts.exe')) 'official update shortcut automatically returns to addon'
+    & (Join-Path $destination 'Repair-Integration.ps1')
+    Assert-LauncherSnapshot $official $updated
+    & (Join-Path $package 'Uninstall.ps1') @options
+    Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $updatedLink) 'uninstall restores latest official updater shortcut, not an obsolete backup'
+    Check ($null -eq $script:repairTask) 'uninstall removes hidden update repair task'
+    & (Join-Path $package 'Install.ps1') @options
     $foreign = $shell.CreateShortcut($shortcutPath); $foreign.TargetPath = Join-Path $root 'other.exe'; $foreign.Save()
     $foreignHash = (Get-FileHash -LiteralPath $shortcutPath).Hash
+    & (Join-Path $destination 'Repair-Integration.ps1')
+    Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $foreignHash) 'automatic repair leaves user-selected shortcut targets alone'
     & (Join-Path $package 'Uninstall.ps1') @options
     Assert-LauncherSnapshot $official $updated
     Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $foreignHash) 'uninstall preserves a replaced foreign shortcut and updated launcher'
@@ -94,6 +117,22 @@ try {
     Check ($rejected -and (Test-Path -LiteralPath (Join-Path $destination 'HytaleAccounts.exe'))) 'invalid restoration journal rejected before removal'
     Set-Content -LiteralPath $manifest -Value $valid
     & (Join-Path $package 'Uninstall.ps1') @options
+    New-Item -Path $registry -Force | Out-Null
+    New-ItemProperty -Path $registry -Name InstallLocation -Value 'foreign installation' -Force | Out-Null
+    $rejected = $false
+    try { & (Join-Path $package 'Install.ps1') @options } catch { $rejected = $true }
+    Check ($rejected -and (Get-Content -LiteralPath (Join-Path $package 'install-error.txt') -Raw).Contains('Another installation owns')) 'setup preserves the actual failure for its error dialog'
+    & {
+        $fixtureHelper = [pscustomobject]@{ Closed = $false }
+        $fixtureHelper | Add-Member ScriptMethod CloseMainWindow { $this.Closed = $true; return $true }
+        $fixtureHelper | Add-Member ScriptMethod WaitForExit { param($Timeout) return $this.Closed }
+        function Get-CimInstance { param($ClassName,$Filter)
+            if ($Filter -like '*HytaleAccounts*') { [pscustomobject]@{ ExecutablePath = 'fixture-helper'; ProcessId = 123 } }
+        }
+        function Get-Process { param($Name,$Id,$ErrorAction) if ($Id -eq 123) { $fixtureHelper } }
+        Stop-InstalledLauncher 'fixture-helper'
+        Check $fixtureHelper.Closed 'setup closes a leftover helper error dialog before waiting for exit'
+    }
 } finally {
     if (Test-Path -LiteralPath $registry) { Remove-Item -LiteralPath $registry }
     $env:LOCALAPPDATA = $oldLocal

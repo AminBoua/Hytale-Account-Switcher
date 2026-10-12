@@ -204,14 +204,27 @@ public sealed class NativeStores
     {
         RequireIdle();
         var original = IntegrationSafety.OfficialPath;
-        if (PatchInstaller.Hash(original) != IntegrationSafety.SupportedHash)
+        var updated = Path.Combine(Root, "launcher-update.exe");
+        RegularPath(updated);
+        if (File.Exists(updated) && NewerBuild(updated, original)) original = updated;
+        async Task<byte[]> ReadOriginal(string path)
         {
-            var installer = new PatchInstaller();
-            var record = installer.Read(); installer.VerifyInstalled(record);
-            original = installer.BackupPath;
+            RegularPath(path);
+            using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            await IntegrationSafety.VerifyPublisher(path);
+            using var buffer = new MemoryStream(); await source.CopyToAsync(buffer);
+            return buffer.ToArray();
         }
-        await IntegrationSafety.VerifyPublisher(original);
-        var bytes = PatchInstaller.Patch(File.ReadAllBytes(original), bridge.Port, bridge.Capability);
+        byte[] originalBytes;
+        try { originalBytes = await ReadOriginal(original); }
+        catch (InvalidOperationException)
+        {
+            // Only unsigned earlier in-place patches need their restoration journal; updates ignore stale state.
+            var legacy = new PatchInstaller();
+            var record = legacy.Read(); legacy.VerifyInstalled(record);
+            originalBytes = await ReadOriginal(legacy.BackupPath);
+        }
+        var bytes = PatchInstaller.PatchCurrent(originalBytes, bridge.Port, bridge.Capability);
         var run = Path.Combine(Folder(store.Folder), "run-" + Guid.NewGuid().ToString("N"));
         RegularPath(run); Directory.CreateDirectory(run);
         var executable = Path.Combine(run, "hytale-launcher.exe"); AtomicWrite(executable, bytes);
@@ -219,6 +232,28 @@ public sealed class NativeStores
         start.Environment["HYTALE_LAUNCHER_NO_SELF_UPDATE"] = "1";
         Activate(store);
         return (start, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant());
+    }
+    internal async Task<bool> PreserveLauncherUpdate(string path, string previousHash)
+    {
+        RegularPath(path);
+        if (!File.Exists(path)) return false;
+        using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var buffer = new MemoryStream(); await source.CopyToAsync(buffer);
+        var bytes = buffer.ToArray();
+        if (Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).Equals(previousHash, StringComparison.OrdinalIgnoreCase)) return false;
+        await IntegrationSafety.VerifyPublisher(path);
+        _ = PatchInstaller.PatchCurrent(bytes, 49152, new string('a', 43));
+        var updated = Path.Combine(Root, "launcher-update.exe"); RegularPath(updated);
+        if (File.Exists(updated) && !NewerBuild(path, updated)) return false;
+        AtomicWrite(updated, bytes);
+        return true;
+    }
+    private static bool NewerBuild(string candidate, string previous)
+    {
+        var version = FileVersionInfo.GetVersionInfo(candidate).ProductVersion;
+        var old = FileVersionInfo.GetVersionInfo(previous).ProductVersion;
+        // Commit hashes aren't ordered; Hytale's updater determines which same-day build supersedes another.
+        return version != old && string.CompareOrdinal(version?.Split('-')[0], old?.Split('-')[0]) >= 0;
     }
     public static void RequireIdle()
     {

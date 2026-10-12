@@ -46,7 +46,7 @@ public static class Setup
         {
             File.Copy(Environment.ProcessPath!, Path.Combine(package, "HytaleAccounts.exe"));
             var assembly = Assembly.GetExecutingAssembly();
-            foreach (var name in new[] { "Install.ps1", "Uninstall.ps1", "InstallerSafety.ps1" })
+            foreach (var name in new[] { "Install.ps1", "Uninstall.ps1", "InstallerSafety.ps1", "Repair-Integration.ps1" })
             {
                 using var resource = assembly.GetManifestResourceStream("HytaleAccounts." + name) ?? throw new IOException("Setup resource is missing: " + name);
                 using var file = File.Create(Path.Combine(package, name));
@@ -63,12 +63,18 @@ public static class Setup
             }
             using var install = Process.Start(start) ?? throw new IOException("Could not start setup.");
             await install.WaitForExitAsync();
-            if (install.ExitCode != 0) throw new IOException("Installation failed. Close Hytale and check that your administrator account can update its installation and shortcuts, then try again.");
+            if (install.ExitCode != 0)
+            {
+                var errorPath = Path.Combine(package, "install-error.txt");
+                NativeStores.RegularPath(errorPath);
+                var detail = File.Exists(errorPath) ? File.ReadAllText(errorPath) : $"The installer process exited with code {install.ExitCode}.";
+                throw new IOException("Installation failed. " + detail);
+            }
         }
         finally
         {
             // Exact files created above; never recurse through somebody else's data.
-            foreach (var name in new[] { "HytaleAccounts.exe", "Install.ps1", "Uninstall.ps1", "InstallerSafety.ps1" })
+            foreach (var name in new[] { "HytaleAccounts.exe", "Install.ps1", "Uninstall.ps1", "InstallerSafety.ps1", "Repair-Integration.ps1", "install-error.txt" })
             {
                 var path = Path.Combine(package, name);
                 NativeStores.RegularPath(path);

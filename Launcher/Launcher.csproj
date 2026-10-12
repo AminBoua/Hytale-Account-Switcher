@@ -12,5 +12,6 @@
     <EmbeddedResource Include="../Install.ps1" LogicalName="HytaleAccounts.Install.ps1" />
     <EmbeddedResource Include="../Uninstall.ps1" LogicalName="HytaleAccounts.Uninstall.ps1" />
     <EmbeddedResource Include="../InstallerSafety.ps1" LogicalName="HytaleAccounts.InstallerSafety.ps1" />
+    <EmbeddedResource Include="../Repair-Integration.ps1" LogicalName="HytaleAccounts.Repair-Integration.ps1" />
   </ItemGroup>
 </Project>

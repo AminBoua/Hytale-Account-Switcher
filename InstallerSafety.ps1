@@ -11,7 +11,11 @@ function Stop-InstalledLauncher([string]$Installed, [switch]$IncludeOfficial) {
     }
     foreach ($helper in $helpers) {
         $process = Get-Process -Id $helper.ProcessId -ErrorAction SilentlyContinue
-        if ($process -and !$process.WaitForExit(15000)) { throw 'Close Hytale before continuing; no process was forcibly stopped.' }
+        if ($process) {
+            # A failed startup can leave the invisible helper waiting on an error dialog.
+            $null = $process.CloseMainWindow()
+            if (!$process.WaitForExit(15000)) { throw 'Close Hytale before continuing; no process was forcibly stopped.' }
+        }
     }
 }
 function Assert-RegularPath([string]$Path) {

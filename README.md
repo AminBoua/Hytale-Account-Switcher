@@ -25,15 +25,15 @@ Download the latest **`HytaleAccounts-Setup.exe`** from the [Releases](https://g
 | Requirement | Supported value |
 | --- | --- |
 | Platform | Windows x64 |
-| Hytale Launcher build | `2026.09.30-326a0c2` |
+| Verified Hytale Launcher builds | `2026.09.30-326a0c2`, `2026.10.09-4e41671` |
 | Launcher location | `C:\Program Files\Hypixel Studios\Hytale Launcher\hytale-launcher.exe` |
-| Original executable SHA-256 | `e34e33bf28271cb2647c37624591e6e588ea5d55619deadc18f8e67491f2fafe` |
+| Original 2026.09.30 executable SHA-256 | `e34e33bf28271cb2647c37624591e6e588ea5d55619deadc18f8e67491f2fafe` |
 | Original publisher | Hypixel Studios Canada Inc |
 
 > [!IMPORTANT]
 > Compatibility is tied to the **Hytale Launcher build**, not the game version shown beside the Play button.
 >
-> The addon verifies the original launcher executable and publisher before running. If Hytale updates the launcher, a compatible addon release may be required.
+> The addon verifies the current launcher publisher signature and native adapter structure before running. Compatible updates are handled automatically through current frontend assets and Go function metadata. Changes to the calling convention, receiver layout, frontend allocation or Go metadata still require a compatible addon release.
 
 ## Installation
 
@@ -48,7 +48,7 @@ You do **not** need Git, Node.js, Visual Studio, a separate .NET runtime, or the
 
 After installation, continue opening Hytale through your normal **Hytale Launcher** desktop shortcut or Start-menu entry.
 
-The addon does **not** create a second launcher shortcut.
+The addon does **not** create a second launcher shortcut. A hidden Windows scheduled task checks existing shortcuts every minute and restores integration if the official updater rewrites them. It preserves user-selected targets, saves the updater's latest shortcut for uninstall, and is removed with the addon.
 
 > [!NOTE]
 > The executable is currently unsigned, so Windows may display its standard reputation/SmartScreen warning.
@@ -157,13 +157,13 @@ It also does not intentionally log you out.
 
 | Problem | What to check |
 | --- | --- |
-| Unsupported launcher build/hash/signature | Check the compatibility table above. You may need a newer addon release after a Hytale Launcher update. |
+| Incompatible native adapter/signature | Compatible updates are automatic. A changed native account interface still requires a compatible addon release. |
 | Setup cannot write files or shortcuts | Close Hytale and the game, approve the administrator prompt, and check access to the Hytale installation. |
 | No launcher shortcut found | Reinstall the official Hytale Launcher so its original shortcuts exist, then retry setup. |
 | Account switching is blocked | Close the running game before switching accounts or logging out. |
 | Add account is waiting for authentication | Complete Hytale's login flow in your browser. Your previous account stays active until it succeeds. |
 | Saved account cannot be restored | Sign into that account again through Hytale. Logout or session expiry can make a saved native session unusable. |
-| Launcher updated and the addon stopped working | Wait for/use an addon release supporting the new launcher build. Do not replace the updated launcher with an older executable. |
+| Launcher updated and the addon stopped working | Install the latest addon release. Never replace the updated launcher with an older executable. |
 
 ### Check your launcher version
 
@@ -202,7 +202,9 @@ At runtime, the helper:
 4. Starts the launcher normally.
 5. Removes the temporary executable after normal exit.
 
-The native adapter targets functions and binary offsets belonging to the exact supported launcher build. For that reason, arbitrary launcher versions are intentionally rejected.
+The native adapter resolves functions and stack/preemption metadata from the current executable's Go function table. It verifies the service wrapper and authentication receiver layout before generating native branches. Earlier in-place installations retain their exact-build restoration checks.
+
+Hytale can automatically update the temporary native executable. The helper follows that update, verifies and retains the new signed executable locally, and reopens it with the addon. Subsequent launches use that updated build until the official installation catches up. Account switching, Add and logout continue in the existing process; Hytale's own launcher updates restart it.
 
 ### Account switching
 
@@ -251,7 +253,7 @@ Set-Location .\Hytale-Account-Switcher
 To build the source corresponding to a particular release, check out its tag:
 
 ```powershell
-git checkout v0.1.0
+git checkout v0.1.1
 ```
 
 ### Build and validate
@@ -363,12 +365,13 @@ Before distributing a build:
 | `Launcher/NativeSession.cs` | Account switching, login verification and logout fallback |
 | `Launcher/NativeDropdown.js` | Integration with Hytale's existing profile dropdown |
 | `Launcher/LocalAccountBridge.cs` | Capability-protected local communication |
-| `Launcher/PatchInstaller.cs` | Exact-build native adapter and restoration safeguards |
+| `Launcher/PatchInstaller.cs`, `Launcher/NativeAdapter.cs` | Current-build native adapter and restoration safeguards |
 | `Launcher/IntegrationSafety.cs` | Compatibility and publisher verification |
 | `Checks/` | Native, frontend and installer checks |
 | `Install.ps1` | Installation logic embedded into setup |
 | `Uninstall.ps1` | Removal and shortcut restoration |
 | `InstallerSafety.ps1` | Installer safety checks |
+| `Repair-Integration.ps1` | Invisible recovery of existing shortcuts after official updates |
 | `Build-Installer.ps1` | Validation, publishing and packaging |
 
 Generated binaries, logs, local account data, encryption keys and Hytale game files are not included in the source repository.

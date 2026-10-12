@@ -39,6 +39,18 @@ try {
             if (!(Test-Path -LiteralPath $backup)) { throw 'Shortcut backup is missing; files preserved.' }
         }
     }
+    $repairTask = Get-ScheduledTask -TaskName 'HytaleAccounts-Repair' -ErrorAction SilentlyContinue
+    if ($repairTask) {
+        $expected = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '"'
+        if (@($repairTask.Actions).Count -ne 1 -or $repairTask.Actions[0].Arguments -cne $expected) { throw 'Shortcut repair task changed; files preserved.' }
+        Disable-ScheduledTask -TaskName 'HytaleAccounts-Repair' | Out-Null
+        Stop-ScheduledTask -TaskName 'HytaleAccounts-Repair'
+        for ($attempt = 0; (Get-ScheduledTask -TaskName 'HytaleAccounts-Repair').State -eq 'Running'; $attempt++) {
+            if ($attempt -ge 50) { throw 'Shortcut repair is still stopping; retry removal. Files preserved.' }
+            Start-Sleep -Milliseconds 100
+        }
+        Unregister-ScheduledTask -TaskName 'HytaleAccounts-Repair' -Confirm:$false
+    }
     foreach ($record in $records) {
         if (Test-Path -LiteralPath $record.Path) {
             $link = $shell.CreateShortcut($record.Path)
@@ -52,7 +64,7 @@ try {
     }
     if ($before) { Assert-LauncherSnapshot $official $before }
     # Only exact addon-owned files; accounts, encryption keys, worlds and Hytale remain untouched.
-    $files = @('HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','launcher-baseline.json','shortcuts.json','shortcuts.new') + @($records | Where-Object Backup | ForEach-Object Backup)
+    $files = @('HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','Repair-Integration.ps1','launcher-baseline.json','shortcuts.json','shortcuts.new') + @($records | Where-Object Backup | ForEach-Object Backup)
     foreach ($name in $files) { Assert-RegularPath (Join-Path $destination $name) }
     foreach ($name in $files) { $path = Join-Path $destination $name; if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }
     if (!(Get-ChildItem -LiteralPath $destination -Force)) { [IO.Directory]::Delete($destination) }

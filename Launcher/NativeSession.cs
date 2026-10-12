@@ -14,6 +14,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     private TaskCompletionSource<Guid?>? ready;
     private string? nativeName;
     private string? runImage;
+    private string? runHash;
     private bool busy, holdLogin, verifiedSession;
     private NativeStore? pendingLogin;
     private string? logoutRequest;
@@ -309,13 +310,20 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         var prepared = await stores.PrepareIntegrated(store, bridge);
         var start = prepared.Start;
         runImage = start.FileName;
+        runHash = prepared.Hash;
         image = new FileStream(start.FileName, FileMode.Open, FileAccess.Read, FileShare.Read);
         if (PatchInstaller.Hash(start.FileName) != prepared.Hash) throw new IOException("Native launch image changed before startup; files preserved.");
         launcher = Process.Start(start) ?? throw new IOException("Could not open native launcher.");
         var process = launcher;
         var exit = process.WaitForExitAsync();
         var verified = ready.Task.WaitAsync(TimeSpan.FromSeconds(45));
-        if (await Task.WhenAny(verified, exit) == exit) throw new IOException("Native launcher exited before profile verification.");
+        if (await Task.WhenAny(verified, exit) == exit)
+        {
+            // The native updater must be able to rename the old image after its launcher exits.
+            image?.Dispose(); image = null;
+            if (await ResumeAfterUpdate()) { await Stop(); return await Start(store, commit); }
+            throw new IOException("Native launcher exited before profile verification.");
+        }
         var profile = await verified;
         if (profile is null && commit) throw new IOException("Native store is signed out. Sign in before selecting it.");
         if (profile is Guid uuid) CommitProfile(uuid, commit);
@@ -327,7 +335,22 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         try
         {
             await process.WaitForExitAsync();
-            if (launcher != process || busy) return;
+            if (launcher != process) return;
+            image?.Dispose(); image = null;
+            while (busy && launcher == process) await Task.Delay(100);
+            if (launcher != process) return;
+            if (active is not null && await ResumeAfterUpdate())
+            {
+                busy = true;
+                try
+                {
+                    var store = active;
+                    await Stop(); await Start(store, false);
+                    message = "Launcher updated; account addon restored.";
+                }
+                finally { busy = false; await Publish(); }
+                return;
+            }
             message = "Native launcher closed.";
             await Stop(); await Publish(); Closed?.Invoke();
         }
@@ -336,6 +359,42 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             message = "Native launcher cleanup failed; files preserved. " + ex.Message;
             try { await Publish(); } catch { /* Never turn cleanup into helper failure. */ }
         }
+    }
+    private async Task<bool> ResumeAfterUpdate()
+    {
+        if (runImage is null || runHash is null) return false;
+        var deadline = DateTime.UtcNow.AddSeconds(45);
+        bool Matches(Process process)
+        {
+            try
+            {
+                var path = process.MainModule?.FileName;
+                return !process.HasExited && (string.Equals(path, runImage, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(path, runImage + ".old", StringComparison.OrdinalIgnoreCase));
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { return false; }
+        }
+        while (DateTime.UtcNow < deadline)
+        {
+            var processes = Process.GetProcessesByName("hytale-launcher");
+            try
+            {
+                var updates = processes.Where(Matches).ToArray();
+                if (updates.Length == 0) return false;
+                // Hytale's updater owns replacement and verification; wait for its restarted window.
+                var restarted = updates.FirstOrDefault(p => p.MainWindowHandle != IntPtr.Zero);
+                if (restarted is not null && await stores.PreserveLauncherUpdate(runImage, runHash))
+                {
+                    RequireNoGame();
+                    restarted.CloseMainWindow();
+                    await restarted.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+                    return true;
+                }
+            }
+            finally { foreach (var process in processes) process.Dispose(); }
+            await Task.Delay(100);
+        }
+        throw new IOException("The native launcher update is still running. Reopen your usual shortcut after it completes; accounts were preserved.");
     }
     private async Task Stop()
     {

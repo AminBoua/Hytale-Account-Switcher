@@ -154,7 +154,8 @@
       if (state.login && location.pathname.startsWith('/error')) {
         await request('command', { action: 'login-failed' });
       }
-      if (!user) user = (await import(location.origin + '/assets/index-C4Qf_qVT.js')).S();
+      if (!user) user = document.querySelector('#app')?.__vue_app__?.config.globalProperties.$pinia?._s.get('user');
+      if (!user) return;
       if (state.login && loginCompleted) await user.load();
       const profile = user.getUserProfile?.uuid;
       if (!profile && document.querySelector('.login__container')) loginSince ||= Date.now();

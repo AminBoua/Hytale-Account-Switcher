@@ -7,21 +7,50 @@ if (args.Contains("--live-cancel")) { await NativeSessionChecks.Run(addAccount: 
 if (args.Contains("--live-failure")) { await NativeSessionChecks.Run(addAccount: true, abort: "login-failed"); return; }
 if (args.Contains("--live-native")) { await NativeSessionChecks.Run(); return; }
 if (args.Contains("--live-signin")) { await NativeSessionChecks.Run(signIn: true); return; }
+if (args.Length == 2 && args[0] == "--verify-image")
+{
+    await IntegrationSafety.VerifyExecutable(args[1]);
+    Console.WriteLine("PASS current signed launcher accepts the resolved adapter and frontend bootstrap");
+    var updateRoot = Path.Combine(Path.GetTempPath(), "native-update-check-" + Guid.NewGuid().ToString("N"));
+    var updatedStores = new NativeStores(updateRoot);
+    var cached = Path.Combine(updatedStores.Root, "launcher-update.exe");
+    try
+    {
+        if (!await updatedStores.PreserveLauncherUpdate(args[1], new string('0', 64)) || PatchInstaller.Hash(cached) != PatchInstaller.Hash(args[1]))
+            throw new Exception("Signed native update was not preserved exactly.");
+        if (await updatedStores.PreserveLauncherUpdate(args[1], new string('0', 64))) throw new Exception("Same native update was adopted twice.");
+        var invalid = Path.Combine(updateRoot, "unsigned.exe"); File.WriteAllText(invalid, "unsigned update fixture");
+        try { await updatedStores.PreserveLauncherUpdate(invalid, new string('0', 64)); throw new Exception("Unsigned update accepted"); }
+        catch (InvalidOperationException) { }
+        if (PatchInstaller.Hash(cached) != PatchInstaller.Hash(args[1])) throw new Exception("Failed update replaced the preserved signed image.");
+        File.Delete(invalid);
+        Console.WriteLine("PASS native updater image is preserved exactly, duplicates and unsigned replacements rejected");
+    }
+    finally
+    {
+        File.Delete(cached); File.Delete(Path.Combine(updatedStores.Root, "native-stores.json"));
+        Directory.Delete(updatedStores.Root); Directory.Delete(updateRoot);
+    }
+    return;
+}
 
 void Check(bool result, string message) { if (!result) throw new Exception(message); Console.WriteLine("PASS " + message); }
-foreach (var name in new[] { "Install.ps1", "Uninstall.ps1", "InstallerSafety.ps1" })
+foreach (var name in new[] { "Install.ps1", "Uninstall.ps1", "InstallerSafety.ps1", "Repair-Integration.ps1" })
 {
     using var resource = typeof(Setup).Assembly.GetManifestResourceStream("HytaleAccounts." + name);
     Check(resource is { Length: > 0 }, "single-file setup embeds " + name);
 }
-await NativeAddChecks.Run(Check);
-if (args.Contains("--native-add")) return;
-await BridgeShutdownChecks.Run(Check);
-if (args.Contains("--bridge-shutdown")) return;
-await NativeLogoutChecks.Run(Check);
-if (args.Contains("--native-logout")) return;
-await LifecycleChecks.Run(Check);
-if (args.Contains("--lifecycle")) return;
+if (!args.Contains("--stores"))
+{
+    await NativeAddChecks.Run(Check);
+    if (args.Contains("--native-add")) return;
+    await BridgeShutdownChecks.Run(Check);
+    if (args.Contains("--bridge-shutdown")) return;
+    await NativeLogoutChecks.Run(Check);
+    if (args.Contains("--native-logout")) return;
+    await LifecycleChecks.Run(Check);
+    if (args.Contains("--lifecycle")) return;
+}
 var root = Path.Combine(Path.GetTempPath(), "native-store-check-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
 void DeleteFixture(string path)
@@ -158,6 +187,39 @@ try
         System.Text.Encoding.Latin1.GetString(original).Contains("function ca(){return window.go.account.Service.IsUserLoggedIn()}"),
         "supported native build exposes logout and signed-in verification backends");
     var integrated = PatchInstaller.Patch(original, 49152, new string('a', 43));
+    var adaptive = PatchInstaller.PatchCurrent(original, 49152, new string('a', 43));
+    Check(adaptive.AsSpan(0x43fca0, 96).SequenceEqual(integrated.AsSpan(0x43fca0, 96)), "resolved adapter matches verified native machine code exactly");
+    var updated = (byte[])original.Clone();
+    var oldAsset = System.Text.Encoding.ASCII.GetBytes("index-C4Qf_qVT.js");
+    var updatedAsset = System.Text.Encoding.ASCII.GetBytes("index-UPDATED1.js");
+    var titleAt = updated.AsSpan().IndexOf(System.Text.Encoding.ASCII.GetBytes("<title>Hytale Launcher</title>"));
+    var assetAt = titleAt + updated.AsSpan(titleAt).IndexOf(oldAsset);
+    updatedAsset.CopyTo(updated, assetAt);
+    var updatedImage = PatchInstaller.PatchCurrent(updated, 49152, new string('a', 43));
+    Check(updatedImage.Length == updated.Length && System.Text.Encoding.Latin1.GetString(updatedImage).Contains("src=\"/assets/index-UPDATED1.js\""), "changed build hash keeps updated native frontend assets without downgrade");
+    // Simulate a linker moving all file sections, so no historical raw offsets remain usable.
+    using (var pe = new System.Reflection.PortableExecutable.PEReader(new MemoryStream(updated)))
+    {
+        var textSection = pe.PEHeaders.SectionHeaders.Single(s => s.Name == ".text");
+        const int shift = 512;
+        var relocated = new byte[updated.Length + shift];
+        updated.AsSpan(0, textSection.PointerToRawData).CopyTo(relocated);
+        updated.AsSpan(textSection.PointerToRawData).CopyTo(relocated.AsSpan(textSection.PointerToRawData + shift));
+        var sectionHeaders = pe.PEHeaders.PEHeaderStartOffset + pe.PEHeaders.CoffHeader.SizeOfOptionalHeader;
+        for (var i = 0; i < pe.PEHeaders.SectionHeaders.Length; i++)
+        {
+            var offset = pe.PEHeaders.SectionHeaders[i].PointerToRawData;
+            if (offset >= textSection.PointerToRawData)
+                System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(relocated.AsSpan(sectionHeaders + i * 40 + 20, 4), offset + shift);
+        }
+        var relocatedImage = PatchInstaller.PatchCurrent(relocated, 49152, new string('a', 43));
+        Check(relocatedImage.AsSpan(0x43fca0 + shift, 96).SequenceEqual(adaptive.AsSpan(0x43fca0, 96)), "relocated native functions resolve from Go metadata without old file offsets");
+    }
+    var invalidAdapter = (byte[])updated.Clone(); invalidAdapter[0x43fca0 + 22] ^= 1;
+    try { PatchInstaller.PatchCurrent(invalidAdapter, 49152, new string('a', 43)); throw new Exception("Changed receiver accepted"); }
+    catch (IOException) { Check(true, "changed native receiver layout rejects patch before account activation"); }
+    try { PatchInstaller.PatchCurrent(new byte[128], 49152, new string('a', 43)); throw new Exception("Invalid image accepted"); }
+    catch (IOException) { Check(true, "malformed update is rejected without changing official bytes"); }
     Check(integrated.Length == original.Length && System.Text.Encoding.Latin1.GetString(integrated).Contains("http://127.0.0.1:49152/" + new string('a', 43) + "/ui.js"), "integrated copy embeds a local capability bootstrap and preserves binary size");
     Check(integrated.AsSpan(0x124bd5a, 3).SequenceEqual(new byte[] { 2, 0x60, 0 }) &&
         integrated.AsSpan(0x124bd6e, 3).SequenceEqual(new byte[] { 1, 0x60, 0 }) &&
