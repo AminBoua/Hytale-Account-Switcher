@@ -17,7 +17,8 @@ $steps = @(
 )
 foreach ($entry in @(@('installer-fixtures','Checks/InstallerScriptChecks.ps1'),@('shortcut-races','Checks/ShortcutRaceChecks.ps1'),
     @('acl-races','Checks/AclMigrationRaceChecks.ps1'),@('storage-races','Checks/AclMigrationRaceChecks.ps1','-Storage'),
-    @('vm-harness-host-only','Checks/VmValidation/Validate.ps1'),@('evidence-gate','Checks/SecurityGateChecks.ps1'))) {
+    @('vm-harness-host-only','Checks/VmValidation/Validate.ps1'),@('evidence-gate','Checks/SecurityGateChecks.ps1'),
+    @('runtime-notices','Checks/RuntimeNoticeChecks.ps1'))) {
     $steps += @{Name=$entry[0];Exe='powershell.exe';Arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File') + $entry[1..($entry.Length-1)]}
 }
 if ($RegressionControls) {

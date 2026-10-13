@@ -4,7 +4,9 @@ Switch between saved Hytale accounts from the official launcher's profile dropdo
 
 A Windows x64 addon that keeps your usual **Hytale Launcher** shortcut, browser, and game data. Hytale handles authentication and Play; the addon adds account switching inside the existing window. This is an unofficial project, unaffiliated with Hypixel Studios.
 
-**[Download the installer](https://github.com/AminBoua/Hytale-Account-Switcher/releases/latest)** · [Install](#install) · [Use](#use) · [Troubleshoot](#troubleshoot) · [Build from source](#build-from-source)
+**[Experimental downloads](https://github.com/AminBoua/Hytale-Account-Switcher/releases)** · [Install](#install) · [Use](#use) · [Troubleshoot](#troubleshoot) · [Build from source](#build-from-source)
+
+**Experimental:** real elevated/cross-user VM validation and fresh live-account acceptance checks remain outstanding. Versions **0.1.0 and 0.1.1 are unsupported** and lack later security hardening. Use only the newest prerelease if you accept the documented limitations; see the [security policy](SECURITY.md).
 
 ## What it does
 
@@ -22,16 +24,16 @@ C:\Program Files\Hypixel Studios\Hytale Launcher\hytale-launcher.exe
 ```
 
 1. Close Hytale and the Hytale Launcher.
-2. Open [Releases](https://github.com/AminBoua/Hytale-Account-Switcher/releases/latest), read the release notes, and download **HytaleAccounts-Setup.exe** and **SHA256SUMS.txt** from the same release. The source archives are for developers.
+2. Open [Releases](https://github.com/AminBoua/Hytale-Account-Switcher/releases), read the release notes, and download **HytaleAccounts-Setup.zip** and **SHA256SUMS.txt** from the same release. The setup ZIP includes the installer and its license notices; GitHub's source archives are for developers. Older packages may provide the `.exe` separately: keep the accompanying license notices with it.
 3. In PowerShell, from the download folder, check the installer hash:
 
    ```powershell
-   Get-FileHash .\HytaleAccounts-Setup.exe -Algorithm SHA256
+   Get-FileHash .\HytaleAccounts-Setup.zip -Algorithm SHA256
    Get-Content .\SHA256SUMS.txt
    ```
 
-   The hash must match the entry for `HytaleAccounts-Setup.exe`, ignoring letter case. A matching hash checks the download against the published file; it is not a publisher signature.
-4. Double-click **HytaleAccounts-Setup.exe** normally and accept its UAC prompt. Do not start it with **Run as administrator**: setup needs your normal user context to update your shortcuts.
+   The hash must match the entry for the downloaded file, ignoring letter case. For a separate `.exe`, check that file instead. A matching hash checks the download against the published file; it is not a publisher signature.
+4. Extract the setup ZIP, then double-click **HytaleAccounts-Setup.exe** normally and accept its UAC prompt. Do not start it with **Run as administrator**: setup needs your normal user context to update your shortcuts.
 5. Setup opens the launcher. From then on, use your existing **Hytale Launcher** shortcut or Windows search entry.
 
 > [!IMPORTANT]
@@ -92,7 +94,7 @@ The Hytale data root comes from the official `GameInstallPath` registry setting,
 | A file is locked or a path is rejected | Close the conflicting program and retry. Preserve the named files; do not delete session data or loosen folder permissions to bypass a check. |
 | Uninstall cannot restore shortcuts | Run removal from the Windows account that installed the addon. Keep the shortcut restoration records intact. |
 
-For unresolved problems, [open an issue](https://github.com/AminBoua/Hytale-Account-Switcher/issues) with your Windows version, addon release, official launcher version, exact error, and steps to reproduce. Include only a reviewed, relevant excerpt from `hytale-accounts.log`.
+For help, use [GitHub Discussions](https://github.com/AminBoua/Hytale-Account-Switcher/discussions) with your Windows version, addon release, official launcher version, exact error, and steps to reproduce. Include only a reviewed, relevant excerpt from `hytale-accounts.log`. For suspected vulnerabilities, follow [SECURITY.md](SECURITY.md) before sharing details.
 
 ## Build from source
 
@@ -111,12 +113,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Installer.ps1
 
 Choose the checks-only command or the packaging command for your task; packaging already runs the checks. It produces:
 
-- `dist\HytaleAccounts-Setup.exe` — installer; building does not install it.
-- `dist\SHA256SUMS.txt` — installer checksum.
+- `dist\HytaleAccounts-Setup.zip` — installer plus addon license and runtime notices; building does not install it.
+- `dist\HytaleAccounts-Setup.exe` — the same installer as in the ZIP.
+- `dist\LICENSE` and `dist\THIRD-PARTY-NOTICES.txt` — addon and exact bundled runtime license texts.
+- `dist\SHA256SUMS.txt` — checksums for the ZIP, installer and license files.
 - `dist\SECURITY-STATUS.json` — artifact hash and validation status.
 - `dist\security\<run>\` — check report and logs.
 
 The safe suite covers C# storage/session/bridge behavior, mocked frontend behavior, installer and shortcut fixtures, race checks, and evidence-gate validation. It does not use live Hytale accounts, request elevation, or prove live launcher compatibility. Its build step clears package sources, so missing local SDK/targeting prerequisites must be installed first. A direct `dotnet build` only compiles and does not substitute for the gate.
+
+GitHub Actions runs the safe suite and regression controls under a disposable standard Windows user. Its administrator bootstrap only prepares that test account; it does not establish UAC or cross-user security validation. Packaging also extracts the notices from the runtime packs actually used by the build and fails if a required pack license is missing.
 
 For regression controls and release packaging with matching VM evidence, follow [SECURITY-RELEASE.md](SECURITY-RELEASE.md). Ordinary builds can succeed with `SecurityValidated: false`; an installer build alone is not security validation. The [security re-audit](SECURITY-REAUDIT.md) records remaining limitations.
 
@@ -134,3 +140,9 @@ With test accounts you can sign into again, verify installation through the exis
 | [`Launcher/Setup.cs`](Launcher/Setup.cs), [`Install.ps1`](Install.ps1), [`Uninstall.ps1`](Uninstall.ps1) | Setup and removal. |
 | [`ShortcutIntegration.ps1`](ShortcutIntegration.ps1), [`Repair-Integration.ps1`](Repair-Integration.ps1) | Existing shortcut integration and background repair. |
 | [`Checks/`](Checks/), [`Build-Installer.ps1`](Build-Installer.ps1) | Verification and installer packaging. |
+
+## License and compatibility rights
+
+Original addon code is available under the [MIT License](LICENSE), copyright 2026 AminBoua. Bundled runtime components retain their own licenses, supplied in `THIRD-PARTY-NOTICES.txt` with the installer. No Hytale executable or game files are distributed by this project.
+
+The addon patches a local launcher copy and is not endorsed by Hypixel Studios. Hytale's [EULA](https://hytale.com/eula) covers the launcher, permits mods, and includes restrictions and an applicable-law interoperability exception. This project's MIT license grants no rights to Hytale's software; specific permission for this implementation has not been established.

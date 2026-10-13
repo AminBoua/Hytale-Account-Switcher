@@ -17,7 +17,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Build-Installer.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Build-Installer.ps1 -ChecksOnly -RegressionControls
 ```
 
-`Build-Installer.ps1` is the repository's build/release entry point; there is no checked-in remote CI/release workflow. All its paths run the safe gate first. A direct `dotnet build` is compilation only and supplies no security validation. There is no skip-checks build option. Safe checks refuse an elevated token; never elevate to fix a failure.
+`Build-Installer.ps1` is the repository's build/release entry point. All its paths run the safe gate first. A direct `dotnet build` is compilation only and supplies no security validation. There is no skip-checks build option. Safe checks refuse an elevated token; never elevate to fix a failure.
+
+The checked-in [GitHub Actions workflow](.github/workflows/checks.yml) runs safe checks and all eight regression controls for pushes and pull requests. GitHub's hosted Windows runner starts as administrator, so `Checks/Run-CiChecks.ps1` creates a disposable standard user, loads its profile, runs the unchanged safe gate with that token, and removes the user afterward. This bootstrap is allowed only on GitHub-hosted runners and must not be run on a personal machine. It does not run the actual privileged VM matrix. CI retains synthetic logs for 14 days; preserve release evidence separately. Require the `Windows safe checks` status on `main` when GitHub branch protection is available.
 
 | Recorded step | Coverage |
 | --- | --- |
@@ -30,6 +32,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Build-Installer.ps1 -Che
 | `storage-races` | Retained read/write/creation handles, destination insertion rejection and fixture preservation |
 | `vm-harness-host-only` | Script parsing, offline compilation/package hashes/provenance, simulated guard predicates and actual compiled refusal of a non-designated path; **no privileged guest tests** |
 | `evidence-gate` | Disposable fabricated evidence and Git fixtures test missing/failed/simulated/tampered/stale evidence rejection, actor/ACL validation and source invalidation; **not a VM pass** |
+| `runtime-notices` | Synthetic pack fixtures verify component/version attribution, complete license/notice text, and rejection of missing licenses or an empty pack set |
 
 The optional eight negative controls disable membership checking, ACL propagation suppression, path pins, mutation policy, private replacement, body timeout, handler timeout, or outstanding-handler slot retention in disposable source copies. Each must exit nonzero at its expected regression; compile errors or surviving mutations fail the gate. Normal builds run the positive suites; mutation builds are an explicit audit cost.
 
@@ -63,6 +66,8 @@ The fingerprint includes all non-Markdown, non-ignored files under `Launcher/` a
 
 Maintainers must also request fresh VM validation for changed target Windows/runtime/security policy, new supported filesystems/architectures, new security findings, or build inputs added outside the fingerprint's coverage. The gate does not infer these changes. Evidence proves only the recorded guest configuration; other configurations remain unverified. Review the fingerprint's file list when adding build inputs.
 
-Local packaging emits `dist/SECURITY-STATUS.json`, binding the installer SHA-256 to the safe report hash and VM status. Preserve that file, `SHA256SUMS.txt`, the exact installer, the whole safe-report directory and the complete VM export together. `dist/` is ignored and is not durable evidence unless retained by the maintainer. Never reuse metadata for a different installer hash. No command here publishes or modifies external services.
+Local packaging emits `dist/SECURITY-STATUS.json`, binding the installer SHA-256 to the safe report hash and VM status. It also creates `HytaleAccounts-Setup.zip` containing the executable, MIT `LICENSE` and `THIRD-PARTY-NOTICES.txt` collected from the exact runtime packs used in that publish. Missing runtime license text fails packaging. `SHA256SUMS.txt` covers the ZIP, executable and both license files. Preserve those files, the whole safe-report directory and the complete VM export together. `dist/` is ignored and is not durable evidence unless retained by the maintainer. Never reuse metadata for a different installer hash. No command here publishes or modifies external services.
+
+Until both actual VM validation and the README's live acceptance sequence have passed, publish only explicitly experimental prereleases. Mark older versions lacking the current security fixes unsupported. Link users to `/releases`, not `/releases/latest`, which can select an older regular release or be unavailable when only prereleases exist. Review logs/status metadata for local paths and identities before attaching public evidence. See [SECURITY.md](SECURITY.md) for publication settings and reporting.
 
 Evidence is unsigned, maintainer-supplied test output, not remote attestation. A compromised builder/guest administrator can forge it. Trust the reviewed source, build environment, VM operator and retained evidence. Simulated Authz access, deterministic races and fabricated evidence-schema tests must always be reported separately from actual user-token/elevation enforcement. No live credentials, real installation/authentication/gameplay, exhaustive races, sustained denial-of-service, or compatibility outside the recorded environment are certified.

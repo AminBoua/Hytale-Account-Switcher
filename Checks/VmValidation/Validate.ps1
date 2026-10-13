@@ -34,7 +34,17 @@ Reject { Assert-Designation $designation 'fixture' 'HOST' ([DateTime]::Parse('20
 $designation.Consent = ''
 Reject { Assert-Designation $designation 'fixture' 'VM' ([DateTime]::Parse('2026-01-01T00:00:00Z')) } 'missing explicit consent'
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('vm-harness-build-' + [Guid]::NewGuid().ToString('N'))
+$generated = Join-Path $PSScriptRoot 'package'
+$createdGenerated = !(Test-Path -LiteralPath $generated)
+if ($createdGenerated) { $null = New-Item -ItemType Directory -Path $generated }
+$probe = Join-Path $generated ('compile-exclusion-' + [Guid]::NewGuid().ToString('N') + '.cs')
 try {
+    '#error Generated package source must not compile' | Set-Content -LiteralPath $probe
+    $inputs = & dotnet msbuild (Join-Path $PSScriptRoot 'VmValidation.csproj') -nologo -getItem:Compile | Out-String
+    if ($LASTEXITCODE) { throw 'Cannot inspect VM harness compilation inputs.' }
+    $compile = @(($inputs | ConvertFrom-Json).Items.Compile)
+    if ($compile.Count -ne 1 -or $compile[0].Identity -ne 'Program.cs') { throw 'VM harness must compile only Program.cs, excluding generated packages.' }
+    Write-Output 'PASS generated package C# is excluded from harness compilation'
     & (Join-Path $PSScriptRoot 'Build.ps1') -Destination $fixture
     $package = Get-Content -LiteralPath (Join-Path $fixture 'package.json') -Raw | ConvertFrom-Json
     if ($package.Schema -ne 1 -or $package.Kind -ne 'vm-validation-package' -or $package.Source.Fingerprint -ne (Get-SecuritySource (Split-Path (Split-Path $PSScriptRoot))).Fingerprint -or !$package.BuildEnvironment.DotnetSdk) { throw 'Missing/current source and SDK provenance.' }
@@ -49,6 +59,8 @@ try {
     if ($process.ExitCode -eq 0 -or (Get-Content -LiteralPath (Join-Path $fixture 'guard-error.txt') -Raw) -notlike '*VM guard refused execution*Only the designated fixed VM fixture root is allowed*') { throw 'Compiled guard refusal was not established.' }
     Write-Output 'PASS compiled runner rejects host/non-designated execution before test work'
 } finally {
+    if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe }
+    if ($createdGenerated -and !(Get-ChildItem -LiteralPath $generated -Force)) { [IO.Directory]::Delete($generated) }
     $full = [IO.Path]::GetFullPath($fixture)
     $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
     if (!$full.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or (Split-Path $full -Leaf) -notmatch '^vm-harness-build-[a-f0-9]{32}$') { throw 'Invalid build cleanup root.' }
