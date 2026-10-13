@@ -14,7 +14,7 @@ internal static class AclPropagationChecks
         try
         {
             File.WriteAllText(victim, "synthetic victim");
-            var before = new FileInfo(victim).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+            var before = new FileInfo(victim).GetAccessControl();
             var acl = new DirectoryInfo(directory).GetAccessControl();
             // Keep the fixture's existing access (including sandbox access), and add a harmless synthetic ACE.
             acl.SetAccessRuleProtection(true, true);
@@ -30,11 +30,14 @@ internal static class AclPropagationChecks
             }
             check(actual.AreAccessRulesProtected && Dacl(actual).AsSpan().SequenceEqual(Dacl(acl)),
                 "handle ACL setter applies the protected directory DACL");
-            check(new FileInfo(victim).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.Access) == before &&
-                File.ReadAllText(victim) == "synthetic victim", "directory ACL setter never propagates to an uninspected child");
+            var after = new FileInfo(victim).GetAccessControl();
+            // Windows may update auto-inheritance bookkeeping; compare every ACE and the protection flag.
+            check(after.AreAccessRulesProtected == before.AreAccessRulesProtected && Dacl(after).AsSpan().SequenceEqual(Dacl(before)) &&
+                File.ReadAllText(victim) == "synthetic victim", "directory ACL setter never propagates to an uninspected child: " +
+                before.GetSecurityDescriptorSddlForm(AccessControlSections.Access) + " -> " + after.GetSecurityDescriptorSddlForm(AccessControlSections.Access));
             // Positive control: the previous path setter must expose the exact failure being guarded against.
             new DirectoryInfo(directory).SetAccessControl(acl);
-            check(new FileInfo(victim).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.Access) != before,
+            check(!Dacl(new FileInfo(victim).GetAccessControl()).AsSpan().SequenceEqual(Dacl(before)),
                 "old path-based directory ACL setter changes the child (regression reproduced)");
         }
         finally
