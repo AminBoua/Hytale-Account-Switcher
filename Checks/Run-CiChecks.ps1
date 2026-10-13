@@ -19,7 +19,7 @@ if ($Worker) {
     git config --global --add safe.directory ($repository.Replace('\','/'))
     if ($LASTEXITCODE) { throw 'Cannot trust the CI checkout for the test user.' }
     Write-Output 'CI tests run with a standard-user token and a separate disposable profile.'
-    & (Join-Path $repository 'Build-Installer.ps1') -ChecksOnly -RegressionControls
+    & (Join-Path $repository 'Build-Installer.ps1') -RegressionControls
     exit 0
 }
 if (!$administrator) { throw 'Runner bootstrap requires its normal administrator token.' }
@@ -31,7 +31,7 @@ $logs = Join-Path $repository 'dist/ci'
 $null = New-Item -ItemType Directory -Path $logs -Force
 try {
     $account = New-LocalUser -Name $name -Password $password -Description 'Disposable launcher CI checks'
-    Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $account.SID
+    Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $account
     & icacls.exe $repository /grant ('*' + $account.SID.Value + ':(OI)(CI)M') /T /Q
     if ($LASTEXITCODE) { throw 'Cannot grant the CI user access to the checkout.' }
     $credential = [Management.Automation.PSCredential]::new("$env:COMPUTERNAME\$name", $password)
