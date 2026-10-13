@@ -19,7 +19,7 @@ internal static class NativeLogoutChecks
             SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
             _ = dispatcher.InvokeAsync(async () =>
             {
-                var root = Path.Combine(Path.GetTempPath(), "native-logout-" + Guid.NewGuid().ToString("N"));
+                var root = SecurityFixture.Create("native-logout-");
                 try
                 {
                     var stores = new NativeStores(root);

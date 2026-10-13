@@ -16,6 +16,7 @@ public sealed class LocalAccountBridge : IAsyncDisposable
     private readonly Func<JsonElement, Task<bool>> command;
     private readonly Task serving;
     private readonly List<Task> pending = [];
+    private readonly SemaphoreSlim commandSlots = new(16);
     private bool disposed;
     private int scriptLoads, stateReads;
     public object Evidence => new { scriptLoads = Volatile.Read(ref scriptLoads), authenticatedStateReads = Volatile.Read(ref stateReads) };
@@ -108,9 +109,21 @@ public sealed class LocalAccountBridge : IAsyncDisposable
             if (!string.Equals(request.ContentType?.Split(';')[0].Trim(), "application/json", StringComparison.OrdinalIgnoreCase)) { response.StatusCode = 415; return; }
             if (request.ContentLength64 is < 1 or > 4096) { response.StatusCode = 413; return; }
             var payload = new byte[(int)request.ContentLength64];
-            await request.InputStream.ReadExactlyAsync(payload, timeout.Token);
+            await request.InputStream.ReadExactlyAsync(payload, timeout.Token).AsTask().WaitAsync(timeout.Token);
             using var json = JsonDocument.Parse(payload, new JsonDocumentOptions { MaxDepth = 8 });
-            response.StatusCode = await command(json.RootElement.Clone()) ? 204 : 400;
+            timeout.Token.ThrowIfCancellationRequested();
+            if (!commandSlots.Wait(0)) { response.StatusCode = 503; return; }
+            var data = json.RootElement.Clone();
+            var token = timeout.Token;
+            // A response timeout cannot stop a handler; retain its slot until the work actually ends.
+            var work = Task.Run(async () =>
+            {
+                try { token.ThrowIfCancellationRequested(); return await command(data); }
+                finally { commandSlots.Release(); }
+            });
+            _ = work.ContinueWith(failed => { _ = failed.Exception; }, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            response.StatusCode = await work.WaitAsync(token) ? 204 : 400;
         }
         catch (Exception e)
         {

@@ -3,46 +3,46 @@ param(
     [string]$DesktopDirectory = [Environment]::GetFolderPath('DesktopDirectory'),
     [string]$RegistryPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HytaleAccounts',
     [int]$WaitForPid = 0,
+    [switch]$UserOnly,
+    [string]$UserSid = '',
     [switch]$Interactive
 )
 $ErrorActionPreference = 'Stop'
 try {
     . (Join-Path $PSScriptRoot 'InstallerSafety.ps1')
+    . (Join-Path $PSScriptRoot 'ShortcutIntegration.ps1')
+    if ($UserOnly -and [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Per-user shortcut removal must run without elevation.' }
     if ($WaitForPid) { Wait-Process -Id $WaitForPid -Timeout 30 -ErrorAction SilentlyContinue }
     $official = Join-Path $env:ProgramFiles 'Hypixel Studios\Hytale Launcher\hytale-launcher.exe'
     $destination = Join-Path (Split-Path $official) '.hytale-accounts-addon'
     $installed = Join-Path $destination 'HytaleAccounts.exe'
     Assert-RegularPath $destination
-    Stop-InstalledLauncher $installed
+    $machineManifest = Join-Path $destination 'shortcuts.json'
+    if (Test-Path -LiteralPath $machineManifest) {
+        Assert-RegularPath $machineManifest
+        $machineJournal = Get-Content -LiteralPath $machineManifest -Raw | ConvertFrom-Json
+        $callerSid = if ($UserOnly) { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } else { $UserSid }
+        if ($machineJournal.UserSid -and $machineJournal.UserSid -ne $callerSid) { throw 'Remove the addon from the Windows account that installed it so its shortcuts can be restored.' }
+    }
+    if (!$UserOnly) { Stop-InstalledLauncher $installed }
     $before = if (Test-Path -LiteralPath $official) { Get-LauncherSnapshot $official } else { $null }
     $shell = New-Object -ComObject WScript.Shell
-    $manifestPath = Join-Path $destination 'shortcuts.json'
+    $state = if ($UserOnly) { Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration' } else { $destination }
+    $manifestPath = Join-Path $state 'shortcuts.json'
+    if ($UserOnly -and !(Test-Path -LiteralPath $manifestPath)) { return }
+    $journalLock = Open-ShortcutJournal $state
     Assert-RegularPath $manifestPath
     if (!(Test-Path -LiteralPath $manifestPath)) { throw 'Shortcut restoration journal is missing; files preserved.' }
     $journal = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $records = @($journal.Shortcuts)
     $roots = @($journal.Roots)
-    if (!$records.Count -or !$roots.Count) { throw 'Shortcut restoration journal is empty; files preserved.' }
-    # Validate the entire restoration journal before deleting any files.
-    foreach ($record in $records) {
-        $path = [IO.Path]::GetFullPath($record.Path)
-        $allowed = $false
-        foreach ($folder in $roots) {
-            if ($path.StartsWith([IO.Path]::GetFullPath($folder).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { $allowed = $true }
-        }
-        if (!$allowed -or [IO.Path]::GetExtension($path) -ne '.lnk' -or $record.Arguments -notin @('','--uninstall')) { throw 'Invalid shortcut restoration journal; files preserved.' }
-        if ($record.Backup -and $record.Backup -notmatch '^shortcut-[a-f0-9]{32}\.lnk$') { throw 'Invalid shortcut backup; files preserved.' }
-        Assert-RegularPath $path
-        if ($record.Backup) {
-            $backup = Join-Path $destination $record.Backup
-            Assert-RegularPath $backup
-            if (!(Test-Path -LiteralPath $backup)) { throw 'Shortcut backup is missing; files preserved.' }
-        }
-    }
+    if (!$roots.Count) { throw 'Shortcut restoration journal is empty; files preserved.' }
+    foreach ($record in $records) { Assert-ShortcutRecord $record $roots }
+    if (!$UserOnly) {
     $repairTask = Get-ScheduledTask -TaskName 'HytaleAccounts-Repair' -ErrorAction SilentlyContinue
     if ($repairTask) {
         $expected = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '"'
-        if (@($repairTask.Actions).Count -ne 1 -or $repairTask.Actions[0].Arguments -cne $expected) { throw 'Shortcut repair task changed; files preserved.' }
+        if (@($repairTask.Actions).Count -ne 1 -or $repairTask.Actions[0].Execute -cne (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -or $repairTask.Actions[0].Arguments -cne $expected) { throw 'Shortcut repair task changed; files preserved.' }
         Disable-ScheduledTask -TaskName 'HytaleAccounts-Repair' | Out-Null
         Stop-ScheduledTask -TaskName 'HytaleAccounts-Repair'
         for ($attempt = 0; (Get-ScheduledTask -TaskName 'HytaleAccounts-Repair').State -eq 'Running'; $attempt++) {
@@ -51,22 +51,28 @@ try {
         }
         Unregister-ScheduledTask -TaskName 'HytaleAccounts-Repair' -Confirm:$false
     }
-    foreach ($record in $records) {
-        if (Test-Path -LiteralPath $record.Path) {
-            $link = $shell.CreateShortcut($record.Path)
-            if ($link.TargetPath -ne $installed -or $link.Arguments -ne $record.Arguments) { continue }
-            if ($record.Backup) { Copy-Item -LiteralPath (Join-Path $destination $record.Backup) -Destination $record.Path -Force }
-            else { Remove-Item -LiteralPath $record.Path }
-        } elseif ($record.Backup) { Copy-Item -LiteralPath (Join-Path $destination $record.Backup) -Destination $record.Path }
+    # Only remove tasks whose executable and arguments still match this installation.
+    foreach ($task in @(Get-ScheduledTask -TaskName 'HytaleAccounts-Repair-S-1-*' -ErrorAction SilentlyContinue)) {
+        $expectedUser = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '" -UserOnly'
+        $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -cne $powershell -or $task.Actions[0].Arguments -cne $expectedUser) { throw 'User shortcut repair task changed; files preserved.' }
+        Disable-ScheduledTask -TaskName $task.TaskName | Out-Null
+        Stop-ScheduledTask -TaskName $task.TaskName
+        Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false
     }
+    }
+    foreach ($record in $records) { Update-Shortcut $record.Path Remove $record }
+    Remove-ShortcutStateFiles
+    if ($UserOnly) { return }
     if (Test-Path -LiteralPath $RegistryPath) {
         if ((Get-ItemProperty -LiteralPath $RegistryPath).InstallLocation -eq $destination) { Remove-Item -LiteralPath $RegistryPath }
     }
     if ($before) { Assert-LauncherSnapshot $official $before }
     # Only exact addon-owned files; accounts, encryption keys, worlds and Hytale remain untouched.
-    $files = @('HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','Repair-Integration.ps1','launcher-baseline.json','shortcuts.json','shortcuts.new') + @($records | Where-Object Backup | ForEach-Object Backup)
+    $files = @('HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json') + @($records | Where-Object Backup | ForEach-Object Backup)
     foreach ($name in $files) { Assert-RegularPath (Join-Path $destination $name) }
     foreach ($name in $files) { $path = Join-Path $destination $name; if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }
+    $journalLock.Delete(); $journalLock.Dispose(); $journalLock = $null
     if (!(Get-ChildItem -LiteralPath $destination -Force)) { [IO.Directory]::Delete($destination) }
     Write-Output 'Addon removed. Hytale, accounts and game data preserved.'
 } catch {
@@ -74,3 +80,5 @@ try {
     else { throw }
     exit 1
 }
+
+finally { if ($journalLock) { $journalLock.Dispose() } }

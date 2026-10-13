@@ -2,6 +2,8 @@ using HytaleAccounts;
 using System.Diagnostics;
 using System.IO;
 
+if (args.Length == 0) args = ["--safe"];
+var safe = args.SequenceEqual(new[] { "--safe" });
 if (args.Contains("--live-add")) { await NativeSessionChecks.Run(addAccount: true); return; }
 if (args.Contains("--live-cancel")) { await NativeSessionChecks.Run(addAccount: true, abort: "cancel"); return; }
 if (args.Contains("--live-failure")) { await NativeSessionChecks.Run(addAccount: true, abort: "login-failed"); return; }
@@ -11,7 +13,7 @@ if (args.Length == 2 && args[0] == "--verify-image")
 {
     await IntegrationSafety.VerifyExecutable(args[1]);
     Console.WriteLine("PASS current signed launcher accepts the resolved adapter and frontend bootstrap");
-    var updateRoot = Path.Combine(Path.GetTempPath(), "native-update-check-" + Guid.NewGuid().ToString("N"));
+    var updateRoot = SecurityFixture.Create("native-update-check-");
     var updatedStores = new NativeStores(updateRoot);
     var cached = Path.Combine(updatedStores.Root, "launcher-update.exe");
     try
@@ -35,7 +37,22 @@ if (args.Length == 2 && args[0] == "--verify-image")
 }
 
 void Check(bool result, string message) { if (!result) throw new Exception(message); Console.WriteLine("PASS " + message); }
-foreach (var name in new[] { "Install.ps1", "Uninstall.ps1", "InstallerSafety.ps1", "Repair-Integration.ps1" })
+if (args.Contains("--acl-access")) { EffectiveAccessChecks.Run(Check); return; }
+if (args.Contains("--acl-propagation")) { AclPropagationChecks.Run(Check); return; }
+if (args.Contains("--storage-safety")) { StorageSafetyChecks.Run(Check); return; }
+if (safe || args.Contains("--bridge-auth"))
+{
+    await BridgeAuthenticationChecks.Run(Check);
+    await BridgeLimitChecks.Run(Check);
+}
+if (args.Contains("--bridge-auth")) { await BridgeShutdownChecks.Run(Check); return; }
+if (safe || args.Contains("--setup")) await SetupChecks.Run(Check);
+if (args.Contains("--setup")) return;
+StorageSafetyChecks.Run(Check);
+AclChecks.Run(Check);
+if (safe) { EffectiveAccessChecks.Run(Check); AclPropagationChecks.Run(Check); }
+if (args.Contains("--acl")) return;
+foreach (var name in new[] { "Install.ps1", "Uninstall.ps1", "InstallerSafety.ps1", "Repair-Integration.ps1", "ShortcutIntegration.ps1", "ShortcutFile.cs" })
 {
     using var resource = typeof(Setup).Assembly.GetManifestResourceStream("HytaleAccounts." + name);
     Check(resource is { Length: > 0 }, "single-file setup embeds " + name);
@@ -48,10 +65,10 @@ if (!args.Contains("--stores"))
     if (args.Contains("--bridge-shutdown")) return;
     await NativeLogoutChecks.Run(Check);
     if (args.Contains("--native-logout")) return;
-    await LifecycleChecks.Run(Check);
+    if (!safe) await LifecycleChecks.Run(Check);
     if (args.Contains("--lifecycle")) return;
 }
-var root = Path.Combine(Path.GetTempPath(), "native-store-check-" + Guid.NewGuid().ToString("N"));
+var root = SecurityFixture.Create("native-store-check-");
 Directory.CreateDirectory(root);
 void DeleteFixture(string path)
 {
@@ -180,6 +197,7 @@ try
     try { stores.Activate(first); throw new Exception("Conflicting key accepted"); }
     catch (IOException) { Check(File.ReadAllText(Path.Combine(root, "account.dat")) == "accountA-session", "conflicting native key rejects switch before changing active session"); }
     try { stores.Folder("../escape"); throw new Exception("Traversal accepted"); } catch (IOException) { Check(true, "store traversal rejected"); }
+    if (safe) return; // Native binary/legacy lifecycle checks are explicitly opt-in.
     var source = IntegrationSafety.OfficialPath;
     if (PatchInstaller.Hash(source) != IntegrationSafety.SupportedHash) source = new PatchInstaller().BackupPath;
     var original = File.ReadAllBytes(source);

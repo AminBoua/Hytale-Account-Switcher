@@ -7,11 +7,18 @@ public partial class App : Application
     private NativeSession? session;
     protected override async void OnStartup(StartupEventArgs e)
     {
+        if (e.Args.Contains(Setup.ElevatedMode))
+        {
+            base.OnStartup(e); ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            try { await Setup.RunElevated(e.Args); Shutdown(0); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Hytale Accounts setup"); Shutdown(1); }
+            return;
+        }
         if (e.Args.Contains("--install") || e.Args.Contains("--uninstall") ||
             Path.GetFileNameWithoutExtension(Environment.ProcessPath!).Equals("HytaleAccounts-Setup", StringComparison.OrdinalIgnoreCase))
         {
             base.OnStartup(e); ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            try { await Setup.Run(e.Args.Contains("--uninstall")); Shutdown(0); }
+            try { Shutdown(await Setup.Run(e.Args.Contains("--uninstall"))); }
             catch (Exception ex) { MessageBox.Show(ex.Message, "Hytale Accounts setup"); Shutdown(1); }
             return;
         }

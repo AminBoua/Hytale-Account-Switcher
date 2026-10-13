@@ -8,7 +8,7 @@ internal static class NativeAddChecks
 {
     public static async Task Run(Action<bool, string> check)
     {
-        var root = Path.Combine(Path.GetTempPath(), "native-add-" + Guid.NewGuid().ToString("N"));
+        var root = SecurityFixture.Create("native-add-");
         try
         {
             var stores = new NativeStores(root);

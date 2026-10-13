@@ -3,6 +3,8 @@ param(
     [string]$DesktopDirectory = [Environment]::GetFolderPath('DesktopDirectory'),
     [string]$CommonProgramsDirectory = [Environment]::GetFolderPath('CommonPrograms'),
     [string]$CommonDesktopDirectory = [Environment]::GetFolderPath('CommonDesktopDirectory'),
+    [switch]$UserOnly,
+    [string]$UserSid = '',
     [string]$RegistryPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HytaleAccounts'
 )
 $ErrorActionPreference = 'Stop'
@@ -14,80 +16,66 @@ if (!(Test-Path -LiteralPath $helper)) { throw 'Build first with Build-Installer
 $official = Join-Path $env:ProgramFiles 'Hypixel Studios\Hytale Launcher\hytale-launcher.exe'
 $destination = Join-Path (Split-Path $official) '.hytale-accounts-addon'
 $installed = Join-Path $destination 'HytaleAccounts.exe'
-$roots = @($DesktopDirectory, $ProgramsDirectory, $CommonDesktopDirectory, $CommonProgramsDirectory)
+. (Join-Path $PSScriptRoot 'ShortcutIntegration.ps1')
+$state = if ($UserOnly) { Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration' } else { $destination }
+$scanRoots = if ($UserOnly) { @($DesktopDirectory, $ProgramsDirectory) } else { @($CommonDesktopDirectory, $CommonProgramsDirectory) }
+$roots = $scanRoots
+$repairRoots = $scanRoots
+$ownerSid = $UserSid
+if ($UserOnly -and [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Per-user shortcut integration must run without elevation.' }
 foreach ($path in @($helper, $destination) + $roots) { Assert-RegularPath $path }
+# A per-user journal must be restored by the Windows account that owns it.
+$machineManifest = Join-Path $destination 'shortcuts.json'
+if (Test-Path -LiteralPath $machineManifest) {
+    Assert-RegularPath $machineManifest
+    $machineJournal = Get-Content -LiteralPath $machineManifest -Raw | ConvertFrom-Json
+    $callerSid = if ($UserOnly) { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } else { $UserSid }
+    if ($machineJournal.UserSid -and $machineJournal.UserSid -ne $callerSid) { throw 'Remove the addon from the Windows account that installed it before installing for another user.' }
+    if ($UserOnly) { $ownerSid = $callerSid }
+}
 $before = Get-LauncherSnapshot $official
-if (Test-Path -LiteralPath $RegistryPath) {
+if (!$UserOnly -and (Test-Path -LiteralPath $RegistryPath)) {
     if ((Get-ItemProperty -LiteralPath $RegistryPath).InstallLocation -ne $destination) { throw 'Another installation owns the uninstall entry; preserved.' }
 }
-Stop-InstalledLauncher $installed -IncludeOfficial
-New-Item -ItemType Directory -Path $destination -Force | Out-Null
-$manifestPath = Join-Path $destination 'shortcuts.json'
+if (!$UserOnly) { Stop-InstalledLauncher $installed -IncludeOfficial }
+$journalLock = Open-ShortcutJournal $state
+$manifestPath = Join-Path $state 'shortcuts.json'
 Assert-RegularPath $manifestPath
-$records = @()
+$script:records = @()
 if (Test-Path -LiteralPath $manifestPath) {
     $journal = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $records = @($journal.Shortcuts)
-    $roots = @(@($journal.Roots) + $roots | Select-Object -Unique)
+    $script:records = @($journal.Shortcuts)
+    foreach ($record in $records) { Assert-ShortcutRecord $record $journal.Roots }
+    $roots = @(@($journal.Roots) + $scanRoots | Select-Object -Unique)
 }
 $shell = New-Object -ComObject WScript.Shell
-function Install-Shortcut([string]$Path, [string]$Arguments = '') {
-    Assert-RegularPath $Path
-    $existing = @($records | Where-Object { $_.Path -eq $Path })
-    if ($existing.Count -gt 0) {
-        if (Test-Path -LiteralPath $Path) {
-            $link = $shell.CreateShortcut($Path)
-            if ($link.TargetPath -eq $official -and !$link.Arguments -and $existing[0].Backup) {
-                if ($existing[0].Backup -notmatch '^shortcut-[a-f0-9]{32}\.lnk$') { throw 'Invalid shortcut restoration backup; files preserved.' }
-                Assert-RegularPath (Join-Path $destination $existing[0].Backup)
-                Copy-Item -LiteralPath $Path -Destination (Join-Path $destination $existing[0].Backup) -Force
-            }
-            elseif ($link.TargetPath -ne $installed -or $link.Arguments -ne $Arguments) { throw "Shortcut changed since installation; preserved: $Path" }
-        }
-    } else {
-        $backup = ''
-        if (Test-Path -LiteralPath $Path) {
-            $previous = $shell.CreateShortcut($Path)
-            if ($previous.TargetPath -ne $installed -or $previous.Arguments -notin @('','--uninstall')) {
-                $backup = 'shortcut-' + [Guid]::NewGuid().ToString('N') + '.lnk'
-                Copy-Item -LiteralPath $Path -Destination (Join-Path $destination $backup)
-            }
-        }
-        $script:records += [pscustomobject]@{ Path = $Path; Backup = $backup; Arguments = $Arguments }
-        # Record restoration before changing a shortcut, including on interrupted installs.
-        $temporary = Join-Path $destination 'shortcuts.new'
-        Assert-RegularPath $temporary
-        [IO.File]::WriteAllText($temporary, (ConvertTo-Json -InputObject @{ Roots = $roots; Shortcuts = @($script:records) } -Depth 4))
-        if (Test-Path -LiteralPath $manifestPath) { [IO.File]::Replace($temporary, $manifestPath, [System.Management.Automation.Language.NullString]::Value) }
-        else { [IO.File]::Move($temporary, $manifestPath) }
-    }
-    New-Item -ItemType Directory -Path (Split-Path $Path) -Force | Out-Null
-    $link = $shell.CreateShortcut($Path)
-    $link.TargetPath = $installed
-    $link.Arguments = $Arguments
-    $link.WorkingDirectory = $destination
-    $link.IconLocation = "$official,0"
-    $link.Description = if ($Arguments) { 'Remove the Hytale account addon; keep Hytale and your data' } else { 'Hytale launcher with account switching' }
-    $link.Save()
-}
-foreach ($name in @('HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','Repair-Integration.ps1','launcher-baseline.json')) { Assert-RegularPath (Join-Path $destination $name) }
+if (!$UserOnly) {
+foreach ($name in @('HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json')) { Assert-RegularPath (Join-Path $destination $name) }
 Copy-Item -LiteralPath $helper -Destination $installed -Force
-foreach ($name in @('Uninstall.ps1','InstallerSafety.ps1','Repair-Integration.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $destination $name) -Force }
+foreach ($name in @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $destination $name) -Force }
 $before | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $destination 'launcher-baseline.json') -Encoding UTF8
+}
 # Keep every existing launcher's name and location, including official system-wide shortcuts.
-foreach ($folder in $roots) {
+foreach ($folder in $scanRoots) {
     if (Test-Path -LiteralPath $folder) {
         foreach ($file in Get-ChildItem -LiteralPath $folder -Filter '*.lnk' -Recurse) {
             Assert-RegularPath $file.FullName
             $link = $shell.CreateShortcut($file.FullName)
-            if ($link.TargetPath -eq $official -and !$link.Arguments) { Install-Shortcut $file.FullName }
+            if ($link.TargetPath -in @($official, $installed) -and !$link.Arguments) {
+                $record = @($records | Where-Object Path -eq $file.FullName)
+                Update-Shortcut $file.FullName Install ($record | Select-Object -First 1)
+            }
         }
     }
 }
-if (!$records.Count) { throw 'No Hytale launcher shortcut was found. Reinstall the official launcher first.' }
+Save-ShortcutJournal
+if ($UserOnly) {
+    if (!$records.Count -and !@($machineJournal.Shortcuts | Where-Object Path).Count) { throw 'No Hytale launcher shortcut was found. Reinstall the official launcher first.' }
+    return
+}
 New-Item -Path $RegistryPath -Force | Out-Null
 $properties = @{
-    DisplayName = 'Hytale Accounts addon'; DisplayVersion = '0.1.1'; InstallLocation = $destination
+    DisplayName = 'Hytale Accounts addon'; DisplayVersion = '0.1.2'; InstallLocation = $destination
     UninstallString = '"' + $installed + '" --uninstall'; DisplayIcon = "$official,0"
 }
 foreach ($name in $properties.Keys) { New-ItemProperty -LiteralPath $RegistryPath -Name $name -Value $properties[$name] -PropertyType String -Force | Out-Null }
@@ -98,11 +86,24 @@ if ($repairTask -and (@($repairTask.Actions).Count -ne 1 -or $repairTask.Actions
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
 $settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName 'HytaleAccounts-Repair' -Action $action -Trigger $trigger -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
+if ($UserSid) {
+    $sid = [Security.Principal.SecurityIdentifier]::new($UserSid)
+    if (!$sid.IsAccountSid()) { throw 'Invalid shortcut user SID.' }
+    $userAction = New-ScheduledTaskAction -Execute $powershell -Argument ($action.Arguments + ' -UserOnly')
+    $name = 'HytaleAccounts-Repair-' + $sid.Value
+    $existingTask = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    if ($existingTask -and (@($existingTask.Actions).Count -ne 1 -or $existingTask.Actions[0].Execute -cne $powershell -or $existingTask.Actions[0].Arguments -cne $userAction.Arguments)) { throw 'Another task owns the user shortcut repair entry; preserved.' }
+    $principal = New-ScheduledTaskPrincipal -UserId $sid.Value -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $name -Action $userAction -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+}
 Assert-LauncherSnapshot $official $before
 Write-Output 'Installed. Official launcher bytes and permissions preserved.'
 } catch {
+    if ($UserOnly) { throw }
     $errorPath = Join-Path $PSScriptRoot 'install-error.txt'
     Assert-RegularPath $errorPath
     [IO.File]::WriteAllText($errorPath, $_.ToString())
     throw
 }
+
+finally { if ($journalLock) { $journalLock.Dispose() } }

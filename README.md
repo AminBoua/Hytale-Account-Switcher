@@ -33,7 +33,9 @@ The packaged installer includes the .NET runtime. Development tools are only nee
 4. Run the installer and approve the Windows administrator prompt.
 5. Setup opens Hytale with the addon enabled. Continue using your usual **Hytale Launcher** shortcut or Start-menu entry.
 
-Setup changes existing shortcuts and saves their original state. It installs a hidden `HytaleAccounts-Repair` scheduled task that checks every minute for shortcuts rewritten by the official updater. User changes to shortcut targets are preserved. No second launcher entry or addon uninstall shortcut is created.
+Setup changes existing shortcuts and saves their original state. It installs hidden repair tasks that check every minute for shortcuts rewritten by the official updater. `HytaleAccounts-Repair` handles common shortcuts as SYSTEM; `HytaleAccounts-Repair-<Windows SID>` handles your shortcuts with your limited interactive token while you are signed in. Setup and removal also handle per-user shortcuts without elevation; run removal from the Windows account that installed the addon. Changes to addon shortcut targets, arguments, icons, or descriptions are preserved. No second launcher entry or addon uninstall shortcut is created.
+
+Open setup normally; it elevates an installer worker and then starts Hytale from the original, unelevated process. The worker extracts embedded scripts into a new administrator/SYSTEM-only directory under Program Files, holds the installer and payload files against replacement, and removes staging afterward. User-writable or linked installation paths are rejected before copying payloads.
 
 > [!IMPORTANT]
 > Compatibility depends on the launcher executable, not the game version beside **Play**. Before integration, the addon verifies the official publisher signature and the native interfaces it needs. Compatible builds are resolved from their current frontend assets and Go metadata; changes to those interfaces can require an addon update.
@@ -69,7 +71,7 @@ The saved-account dropdown remains available after login. Hytale's native sign-i
 3. Select **Hytale Accounts addon > Uninstall** and approve the administrator prompt.
 4. Open your usual Hytale Launcher shortcut to use the official launcher again.
 
-Removal restores shortcuts still owned by the addon and removes its helper, repair task, and installation files. It retains Hytale, worlds, settings, the current native login, session keys, and saved account snapshots. It does not intentionally log you out.
+Removal restores shortcuts still owned by the addon and removes its helper, repair tasks, and installation files. It retains Hytale, worlds, settings, the current native login, session keys, and saved account snapshots. It does not intentionally log you out.
 
 > [!IMPORTANT]
 > Use the Windows uninstaller. Manually deleting the addon folder leaves shortcut integration behind.
@@ -80,7 +82,8 @@ Hytale owns browser authentication, the active encrypted `account.dat`, encrypti
 
 | Location | Contents |
 | --- | --- |
-| `C:\Program Files\Hypixel Studios\Hytale Launcher\.hytale-accounts-addon` | Installed helper, removal and repair scripts, shortcut backups, and installation records. |
+| `C:\Program Files\Hypixel Studios\Hytale Launcher\.hytale-accounts-addon` | Installed helper, removal and repair scripts, common shortcut backups, and installation records. |
+| `%LOCALAPPDATA%\HytaleAccounts\ShortcutIntegration` | Per-user shortcut originals and restoration journal. |
 | `<Hytale data directory>\Accounts\native-stores.json` | Saved profile metadata and account selection. |
 | `<Hytale data directory>\Accounts\<account>\AppData\Hytale` | Opaque native session snapshots and associated native keys. |
 | `<Hytale data directory>\hytale-accounts.log` | Helper status and account transition diagnostics. |
@@ -88,6 +91,8 @@ Hytale owns browser authentication, the active encrypted `account.dat`, encrypti
 The data directory comes from Hytale's `GameInstallPath` registry setting, preferring the current user's setting, and falls back to `%APPDATA%\Hytale`.
 
 Treat account snapshots and keys as private session data. Do not publish them with logs or bug reports.
+
+The addon restricts its `Accounts` tree, including snapshots, copied keys and generated runtime files, to the current Windows user, SYSTEM and administrators. Startup secures existing addon-owned files without changing their contents; links and files owned by other users stop initialization. Native storage and encryption stay unchanged, and atomic session replacement preserves the existing session ACL.
 
 ### Launcher integration
 
@@ -142,13 +147,13 @@ Set-Location .\Hytale-Account-Switcher
 
 ### Build the installer
 
-Close the launcher and game, then run from the repository root:
+Run unelevated from the repository root:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Installer.ps1
 ```
 
-The script runs C# checks, frontend checks, and installer fixture checks before publishing a self-contained `win-x64` executable and generating its checksum.
+The script runs the safe synthetic security gate before locally packaging a self-contained `win-x64` executable and generating its checksum. Use `-ChecksOnly` to run just the gate. See [the security release gate](SECURITY-RELEASE.md) for coverage, evidence and the matching VM validation required by `-SecurityValidated`. Missing VM evidence is explicitly **unverified**.
 
 > [!NOTE]
 > Some native lifecycle checks require the exact `2026.09.30-326a0c2` fixture executable with SHA-256 `e34e33bf28271cb2647c37624591e6e588ea5d55619deadc18f8e67491f2fafe`. A newer compatible launcher can work with the addon while failing these fixture checks.
@@ -158,16 +163,26 @@ The script runs C# checks, frontend checks, and installer fixture checks before 
 | `dist/HytaleAccounts-Setup.exe` | Distributable installer. |
 | `dist/SHA256SUMS.txt` | Installer checksum. |
 | `dist/build/HytaleAccounts.exe` | Published helper used to create the installer. |
+| `dist/SECURITY-STATUS.json`, `dist/security/` | Artifact-bound validation status, exact commands, source/environment provenance and logs. |
 
 Run the checks individually with:
 
 ```powershell
 dotnet run --project .\Checks\Checks.csproj -c Release
+dotnet run --project .\Checks\Checks.csproj -c Release -- --acl
+dotnet run --project .\Checks\Checks.csproj -c Release -- --setup
+dotnet run --project .\Checks\Checks.csproj -c Release -- --bridge-auth
 node .\Checks\NativeLoginChecks.cjs
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Checks\InstallerScriptChecks.ps1
 ```
 
-The default checks cover storage and rollback, account transitions, logout fallback, bridge validation, native binary integration, frontend behavior, and installation/removal using fixtures. Real browser login, game launch, and server-side logout behavior need manual verification.
+The default C# checks (also `--safe`) cover synthetic storage/rollback, account transitions, logout fallback, ACL policy/access simulations, setup and loopback bridge validation. The build gate additionally runs frontend, installer/shortcut fixtures, deterministic races and host-only VM harness validation. It never reads the installed launcher or real account storage. Native binary/legacy lifecycle checks are opt-in (`--native-binary`); live browser login, game launch and server-side logout remain separate manual checks.
+
+`--acl` runs only synthetic Windows ACL checks in a temporary directory, including migration, native session replacement/rollback and link rejection. It never reads real credentials or changes live accounts. Synthetic transitions do not require a live launcher.
+
+`--setup` checks installer ACL policy, source/payload substitution, link rejection, cleanup, and hidden process settings with synthetic payloads. It runs only harmless fixture scripts as the current user, without UAC, live installation, or live launcher startup; actual elevation requires separate recorded disposable-VM validation.
+
+`--bridge-auth` runs only loopback bridge authentication and shutdown checks with synthetic handlers. It covers capability isolation, Origin/Host/referrer checks, preflight, JSON limits and rejected-command isolation without reading native files or changing accounts.
 
 ### Manual release checks
 
@@ -185,7 +200,7 @@ These steps perform real logout; use accounts you can sign into again.
 
 | Path | Responsibility |
 | --- | --- |
-| `Launcher/App.xaml.cs`, `Launcher/Setup.cs` | Hidden helper startup, single-instance handling, setup, and elevation. |
+| `Launcher/App.xaml.cs`, `Launcher/Setup.cs`, `Launcher/SetupPayload.cs` | Hidden helper startup, single-instance handling, setup, elevation, and protected payload staging. |
 | `Launcher/NativeSession.cs` | Account changes, native verification, logout fallback, and process lifecycle. |
 | `Launcher/NativeStores.cs` | Native storage discovery, snapshots, and atomic activation. |
 | `Launcher/NativeDropdown.js` | Existing dropdown integration, browser login, and frontend state. |
@@ -194,5 +209,8 @@ These steps perform real logout; use accounts you can sign into again.
 | `Launcher/IntegrationSafety.cs` | Publisher verification and integration safety checks. |
 | `Install.ps1`, `Uninstall.ps1`, `InstallerSafety.ps1` | Shortcut integration, removal, and installation safeguards. |
 | `Repair-Integration.ps1` | Hidden shortcut recovery after official updates. |
+| `ShortcutIntegration.ps1`, `ShortcutFile.cs` | Shared shortcut journaling and handle-relative file operations that resist path replacement. |
 | `Checks/` | C#, JavaScript, and PowerShell checks. |
 | `Build-Installer.ps1` | Validation, publishing, packaging, and checksum generation. |
+
+Shortcut race checks run with `powershell.exe -NoProfile -File Checks/ShortcutRaceChecks.ps1`. They inject directory, junction, hard-link, and leaf replacement attempts at deterministic acquisition/write boundaries using temporary fixtures. Lifecycle checks mock all scheduled-task changes; neither suite modifies real shortcuts or tasks. Conflicting file access fails closed; close the conflicting program and retry.

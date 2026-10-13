@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>HytaleAccounts</AssemblyName>
+    <Version>0.1.2</Version>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="NativeDropdown.js" LogicalName="HytaleAccounts.NativeDropdown.js" />
@@ -13,5 +14,7 @@
     <EmbeddedResource Include="../Uninstall.ps1" LogicalName="HytaleAccounts.Uninstall.ps1" />
     <EmbeddedResource Include="../InstallerSafety.ps1" LogicalName="HytaleAccounts.InstallerSafety.ps1" />
     <EmbeddedResource Include="../Repair-Integration.ps1" LogicalName="HytaleAccounts.Repair-Integration.ps1" />
+    <EmbeddedResource Include="../ShortcutIntegration.ps1" LogicalName="HytaleAccounts.ShortcutIntegration.ps1" />
+    <EmbeddedResource Include="../ShortcutFile.cs" LogicalName="HytaleAccounts.ShortcutFile.cs" />
   </ItemGroup>
 </Project>

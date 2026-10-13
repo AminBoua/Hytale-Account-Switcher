@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.AccessControl;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -25,9 +26,10 @@ public sealed class NativeStores
     {
         HytaleRoot = Path.GetFullPath(root ?? OfficialRoot());
         RegularPath(Root);
-        Directory.CreateDirectory(Root);
+        PrivateFiles.SecureTree(Root);
+        using var directories = new SetupPayload.PinnedDirectories(Root, requireTrusted: false, forMutation: true);
         RegularPath(Metadata);
-        Catalog = File.Exists(Metadata) ? JsonSerializer.Deserialize<NativeCatalog>(File.ReadAllBytes(Metadata), Json) ?? throw new IOException("Invalid store metadata; files preserved.") : new();
+        Catalog = StorageSafety.FileExists(Metadata) ? JsonSerializer.Deserialize<NativeCatalog>(ReadFile(Metadata), Json) ?? throw new IOException("Invalid store metadata; files preserved.") : new();
         foreach (var store in Catalog.Stores) Folder(store.Folder);
         if (Catalog.Stores.Select(s => s.Folder).Distinct(StringComparer.OrdinalIgnoreCase).Count() != Catalog.Stores.Count)
             throw new IOException("Duplicate store paths; metadata preserved.");
@@ -36,7 +38,7 @@ public sealed class NativeStores
             var id = Path.GetFileName(directory);
             if (id.StartsWith("pending-", StringComparison.OrdinalIgnoreCase)) continue;
             var store = new NativeStore(id, id);
-            if (!File.Exists(Path.Combine(Folder(store.Folder), "AppData", "Hytale", "account.dat"))) continue;
+            if (!StorageSafety.FileExists(Path.Combine(Folder(store.Folder), "AppData", "Hytale", "account.dat"))) continue;
             var at = Catalog.Stores.FindIndex(s => s.Folder.Equals(store.Folder, StringComparison.OrdinalIgnoreCase));
             if (at < 0) Catalog.Stores.Add(store);
         }
@@ -62,14 +64,14 @@ public sealed class NativeStores
     internal static void RegularPath(string path)
     {
         for (var current = Path.GetFullPath(path); current is not null; current = Path.GetDirectoryName(current))
-            if ((File.Exists(current) || Directory.Exists(current)) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
-                throw new IOException("Store path contains a link; files preserved.");
+            if (StorageSafety.Attributes(current) is { } attributes && (attributes & FileAttributes.ReparsePoint) != 0)
+                throw new IOException($"Store path '{current}' contains a link; files preserved.");
     }
-    public void Save() { RegularPath(Metadata); AtomicWrite(Metadata, JsonSerializer.SerializeToUtf8Bytes(Catalog, Json)); }
+    public void Save() { RegularPath(Metadata); AtomicWrite(Metadata, JsonSerializer.SerializeToUtf8Bytes(Catalog, Json), privateFile: true); }
     public NativeStore CreatePending()
     {
         var store = new NativeStore("pending-" + Guid.NewGuid().ToString("N"), "New native account");
-        Directory.CreateDirectory(Folder(store.Folder));
+        PrivateFiles.CreateDirectory(Folder(store.Folder));
         pending.Add(store.Folder);
         return store;
     }
@@ -128,31 +130,36 @@ public sealed class NativeStores
     // Hytale writes the active encrypted session in its official location. Snapshots only
     // retain other accounts for switching; credentials are never decoded or re-encrypted.
     private string Storage(NativeStore store) => Path.Combine(Folder(store.Folder), "AppData", "Hytale");
-    private static void CopyKeys(string source, string destination)
+    private static void CopyKeys(string source, string destination, bool privateFiles = false)
     {
         RegularPath(source); RegularPath(destination);
-        if (!Directory.Exists(source)) return;
-        Directory.CreateDirectory(destination);
+        if (!StorageSafety.DirectoryExists(source)) return;
+        using var sourceDirectories = new SetupPayload.PinnedDirectories(source, requireTrusted: false, forMutation: true);
+        PrivateFiles.CreateDirectory(destination);
+        using var destinationDirectories = new SetupPayload.PinnedDirectories(destination, requireTrusted: false, forMutation: true);
         foreach (var key in Directory.EnumerateFiles(source))
         {
             RegularPath(key);
             var target = Path.Combine(destination, Path.GetFileName(key)); RegularPath(target);
-            var bytes = File.ReadAllBytes(key);
-            if (File.Exists(target))
+            var bytes = ReadFile(key);
+            if (StorageSafety.FileExists(target))
             {
-                if (!File.ReadAllBytes(target).AsSpan().SequenceEqual(bytes)) throw new IOException("Native key conflict; files preserved.");
+                if (!ReadFile(target).AsSpan().SequenceEqual(bytes)) throw new IOException("Native key conflict; files preserved.");
+                if (privateFiles) AtomicWrite(target, bytes, privateFile: true);
             }
-            else AtomicWrite(target, bytes);
+            else AtomicWrite(target, bytes, privateFile: privateFiles);
         }
     }
     public void Capture(NativeStore store)
     {
-        var storage = Storage(store); RegularPath(storage); Directory.CreateDirectory(storage);
-        CopyKeys(Path.Combine(HytaleRoot, ".keys"), Path.Combine(storage, ".keys"));
+        var storage = Storage(store); PrivateFiles.CreateDirectory(storage);
+        using var directories = new SetupPayload.PinnedDirectories(storage, requireTrusted: false, forMutation: true);
+        using var nativeDirectories = new SetupPayload.PinnedDirectories(HytaleRoot, requireTrusted: false, forMutation: true);
+        CopyKeys(Path.Combine(HytaleRoot, ".keys"), Path.Combine(storage, ".keys"), privateFiles: true);
         var source = Path.Combine(HytaleRoot, "account.dat"); RegularPath(source);
         var target = Path.Combine(storage, "account.dat"); RegularPath(target);
-        if (File.Exists(source)) AtomicWrite(target, File.ReadAllBytes(source));
-        else File.Delete(target);
+        if (StorageSafety.FileExists(source)) AtomicWrite(target, ReadFile(source), privateFile: true);
+        else DeleteFile(target);
         var previous = Catalog.Active;
         Catalog.Active = store.Folder;
         try { Save(); } catch { Catalog.Active = previous; throw; }
@@ -182,21 +189,30 @@ public sealed class NativeStores
         // A normal restart keeps Hytale's latest refreshed session, not an older snapshot.
         if (Catalog.Active == store.Folder) return;
         var storage = Storage(store); RegularPath(storage);
+        using var nativeDirectories = new SetupPayload.PinnedDirectories(HytaleRoot, requireTrusted: false, forMutation: true);
+        using var sourceDirectories = new SetupPayload.PinnedDirectories(StorageSafety.DirectoryExists(storage) ? storage : Folder(store.Folder), requireTrusted: false, forMutation: true);
         CopyKeys(Path.Combine(storage, ".keys"), Path.Combine(HytaleRoot, ".keys"));
         var source = Path.Combine(storage, "account.dat"); RegularPath(source);
         var target = Path.Combine(HytaleRoot, "account.dat"); RegularPath(target);
-        var previousBytes = File.Exists(target) ? File.ReadAllBytes(target) : null;
-        var nextBytes = File.Exists(source) && !store.SignedOut ? File.ReadAllBytes(source) : null;
+        byte[]? previousBytes = null;
+        FileSecurity? previousPermissions = null;
+        if (StorageSafety.FileExists(target))
+        {
+            using var file = SetupPayload.OpenSource(target);
+            using var buffer = new MemoryStream(); file.CopyTo(buffer); previousBytes = buffer.ToArray();
+            previousPermissions = file.GetAccessControl();
+        }
+        var nextBytes = StorageSafety.FileExists(source) && !store.SignedOut ? ReadFile(source) : null;
         var previous = Catalog.Active;
         try
         {
-            if (nextBytes is not null) AtomicWrite(target, nextBytes); else File.Delete(target);
+            if (nextBytes is not null) AtomicWrite(target, nextBytes); else DeleteFile(target);
             Catalog.Active = store.Folder; Save();
         }
         catch
         {
             Catalog.Active = previous;
-            if (previousBytes is not null) AtomicWrite(target, previousBytes); else File.Delete(target);
+            if (previousBytes is not null) AtomicWrite(target, previousBytes, previousPermissions); else DeleteFile(target);
             throw;
         }
     }
@@ -206,11 +222,12 @@ public sealed class NativeStores
         var original = IntegrationSafety.OfficialPath;
         var updated = Path.Combine(Root, "launcher-update.exe");
         RegularPath(updated);
-        if (File.Exists(updated) && NewerBuild(updated, original)) original = updated;
+        if (StorageSafety.FileExists(updated) && NewerBuild(updated, original)) original = updated;
         async Task<byte[]> ReadOriginal(string path)
         {
             RegularPath(path);
-            using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var directories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(path)!, requireTrusted: false);
+            using var source = SetupPayload.OpenSource(path);
             await IntegrationSafety.VerifyPublisher(path);
             using var buffer = new MemoryStream(); await source.CopyToAsync(buffer);
             return buffer.ToArray();
@@ -226,8 +243,9 @@ public sealed class NativeStores
         }
         var bytes = PatchInstaller.PatchCurrent(originalBytes, bridge.Port, bridge.Capability);
         var run = Path.Combine(Folder(store.Folder), "run-" + Guid.NewGuid().ToString("N"));
-        RegularPath(run); Directory.CreateDirectory(run);
-        var executable = Path.Combine(run, "hytale-launcher.exe"); AtomicWrite(executable, bytes);
+        PrivateFiles.CreateDirectory(run);
+        using var runDirectories = new SetupPayload.PinnedDirectories(run, requireTrusted: false, forMutation: true);
+        var executable = Path.Combine(run, "hytale-launcher.exe"); AtomicWrite(executable, bytes, privateFile: true);
         var start = IntegrationSafety.StartInfo(executable);
         start.Environment["HYTALE_LAUNCHER_NO_SELF_UPDATE"] = "1";
         Activate(store);
@@ -236,22 +254,29 @@ public sealed class NativeStores
     internal async Task<bool> PreserveLauncherUpdate(string path, string previousHash)
     {
         RegularPath(path);
-        if (!File.Exists(path)) return false;
-        using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (!StorageSafety.FileExists(path)) return false;
+        using var directories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(path)!, requireTrusted: false, forMutation: true);
+        using var source = SetupPayload.OpenSource(path);
         using var buffer = new MemoryStream(); await source.CopyToAsync(buffer);
         var bytes = buffer.ToArray();
         if (Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).Equals(previousHash, StringComparison.OrdinalIgnoreCase)) return false;
         await IntegrationSafety.VerifyPublisher(path);
         _ = PatchInstaller.PatchCurrent(bytes, 49152, new string('a', 43));
         var updated = Path.Combine(Root, "launcher-update.exe"); RegularPath(updated);
-        if (File.Exists(updated) && !NewerBuild(path, updated)) return false;
-        AtomicWrite(updated, bytes);
+        if (StorageSafety.FileExists(updated) && !NewerBuild(path, updated)) return false;
+        AtomicWrite(updated, bytes, privateFile: true);
         return true;
     }
-    private static bool NewerBuild(string candidate, string previous)
+    internal static bool NewerBuild(string candidate, string previous)
     {
-        var version = FileVersionInfo.GetVersionInfo(candidate).ProductVersion;
-        var old = FileVersionInfo.GetVersionInfo(previous).ProductVersion;
+        static string? Version(string path)
+        {
+            using var directories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(Path.GetFullPath(path))!, requireTrusted: false);
+            using var file = SetupPayload.OpenSource(path);
+            return FileVersionInfo.GetVersionInfo(path).ProductVersion;
+        }
+        var version = Version(candidate);
+        var old = Version(previous);
         // Commit hashes aren't ordered; Hytale's updater determines which same-day build supersedes another.
         return version != old && string.CompareOrdinal(version?.Split('-')[0], old?.Split('-')[0]) >= 0;
     }
@@ -264,14 +289,51 @@ public sealed class NativeStores
             finally { foreach (var process in processes) process.Dispose(); }
         }
     }
-    public static void AtomicWrite(string path, byte[] bytes)
+    internal static byte[] ReadFile(string path)
     {
+        using var directories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(Path.GetFullPath(path))!, requireTrusted: false);
+        using var source = SetupPayload.OpenSource(path);
+        using var buffer = new MemoryStream(); source.CopyTo(buffer); return buffer.ToArray();
+    }
+
+    private static void DeleteFile(string path)
+    {
+        RegularPath(path);
+        if (!StorageSafety.FileExists(path)) return;
+        using var directories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(path)!, requireTrusted: false);
+        using var file = SetupPayload.OpenSource(path, allowDelete: true);
+        try { File.Delete(path); }
+        catch (IOException ex) { throw StorageSafety.Error(path, ex); }
+    }
+
+    public static void AtomicWrite(string path, byte[] bytes, FileSecurity? restorePermissions = null, bool privateFile = false)
+    {
+        RegularPath(path);
+        using var directories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(Path.GetFullPath(path))!, requireTrusted: false, forMutation: true);
+        using var destination = StorageSafety.FileExists(path) ? SetupPayload.OpenSource(path, allowDelete: true) : null;
         var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            using (var file = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { file.Write(bytes); file.Flush(true); }
-            File.Move(temp, path, true);
+            using (var file = PrivateFiles.CreateFile(temp))
+            {
+                file.Write(bytes); file.Flush(true);
+                if (privateFile || destination is null)
+                {
+                    // A failed sign-out transition may restore Hytale's deleted session and its original DACL.
+                    if (!privateFile && restorePermissions is not null)
+                    {
+                        var acl = new FileSecurity();
+                        acl.SetSecurityDescriptorBinaryForm(restorePermissions.GetSecurityDescriptorBinaryForm(), AccessControlSections.Access);
+                        file.SetAccessControl(acl);
+                    }
+                    directories.Rename(file.SafeFileHandle, path, replace: privateFile && destination is not null);
+                    return;
+                }
+            }
+            // ReplaceFile preserves Hytale's DACL; never fall back to an ACL-losing overwrite.
+            File.Replace(temp, path, null);
         }
-        finally { if (File.Exists(temp)) File.Delete(temp); }
+        catch (IOException ex) { throw StorageSafety.Error(path, ex); }
+        finally { if (StorageSafety.FileExists(temp)) File.Delete(temp); }
     }
 }
