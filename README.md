@@ -6,8 +6,6 @@ A Windows x64 addon that keeps your usual **Hytale Launcher** shortcut, browser,
 
 **[Experimental downloads](https://github.com/AminBoua/Hytale-Account-Switcher/releases)** · [Install](#install) · [Use](#use) · [Troubleshoot](#troubleshoot) · [Build from source](#build-from-source)
 
-**Experimental:** real elevated/cross-user VM validation and fresh live-account acceptance checks remain outstanding. Versions **0.1.0 and 0.1.1 are unsupported** and lack later security hardening. Use only the newest prerelease if you accept the documented limitations; see the [security policy](SECURITY.md).
-
 ## What it does
 
 - **Save accounts:** choose **Add account** and complete Hytale's login in your default browser. Your current account stays selected until authentication succeeds.
