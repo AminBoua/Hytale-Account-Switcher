@@ -29,8 +29,17 @@ internal static class NativeAddChecks
     private static async Task RunCore(Action<bool, string> check)
     {
         var root = SecurityFixture.Create("native-add-");
+        var log = Path.Combine(root, "hytale-accounts.log");
         try
         {
+            App.LogStatus(root, "writable log");
+            check(File.ReadAllText(log).Contains("writable log"), "status logging still writes when available");
+            using (var locked = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.Read))
+                App.LogStatus(root, "locked log");
+            check(!File.ReadAllText(log).Contains("locked log"), "locked status logging is best effort");
+            File.SetAttributes(log, FileAttributes.ReadOnly);
+            try { File.AppendAllText(log, "denied"); throw new Exception("Read-only log fixture accepted a write"); }
+            catch (UnauthorizedAccessException) { }
             var stores = new NativeStores(root);
             var other = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), "accountA");
             var officialSession = Path.Combine(root, "account.dat");
@@ -40,6 +49,7 @@ internal static class NativeAddChecks
             File.WriteAllText(officialSession, "opaque-accountB-session"); stores.Capture(current);
             using var process = Process.GetCurrentProcess();
             var session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+            session.Status += text => App.LogStatus(stores.HytaleRoot, text);
             const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
             void Set(string name, object value) => typeof(NativeSession).GetField(name, flags)!.SetValue(session, value);
             object? Get(string name) => typeof(NativeSession).GetField(name, flags)!.GetValue(session);
@@ -48,7 +58,7 @@ internal static class NativeAddChecks
                 .Invoke(session, new object[] { JsonSerializer.SerializeToElement(data), signal })!;
             string Pending() => ((NativeStore)Get("pendingLogin")!).Folder;
             Set("launcher", process); Set("active", current); Set("verifiedSession", true);
-            check(await session.AddAccount(), "Add accepts a browser login while the launcher is open");
+            check(await session.AddAccount(), "Add progresses while status logging is denied");
             check(session.IsOpen && !process.HasExited && stores.Catalog.Selected == current.Folder && stores.Catalog.Active == current.Folder &&
                 File.ReadAllText(officialSession) == "opaque-accountB-session", "Add preserves the process, native session and selected account without restart");
             check(stores.Catalog.Stores.Count == 2 && !await session.AddAccount(), "pending browser login saves no duplicate account and rejects a second Add");
@@ -115,7 +125,16 @@ internal static class NativeAddChecks
             check(Get("pendingLogin") is null && Get("busy") is false && Get("holdLogin") is false &&
                 Get("verifiedSession") is false && stores.Catalog.Selected == other.Folder && session.IsOpen &&
                 !await session.AddAccount(), "failed cancellation recovery keeps Play unverified, preserves selection and leaves the process open");
+            var failure = new UnauthorizedAccessException("synthetic session failure");
+            session.Status += _ => throw failure;
+            try { typeof(NativeSession).GetMethod("Publish", flags)!.Invoke(session, null); throw new Exception("Session failure was swallowed"); }
+            catch (TargetInvocationException ex) when (ReferenceEquals(ex.InnerException, failure))
+            { check(true, "best-effort logging does not swallow unrelated session errors"); }
         }
-        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+        finally
+        {
+            if (File.Exists(log)) File.SetAttributes(log, FileAttributes.Normal);
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
     }
 }
