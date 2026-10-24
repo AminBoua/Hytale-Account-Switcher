@@ -268,6 +268,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     {
         var confirmed = false;
         var requested = false;
+        var cleanupError = "";
         busy = true; holdLogin = true;
         message = "Logging out " + target.Label + "…"; await Publish();
         try
@@ -284,7 +285,9 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             logoutRequest = null;
             verifiedSession = false;
             stores.MarkSignedOut(target);
-            stores.Capture(target);
+            // Revocation is committed; obsolete snapshot cleanup must not block native recovery.
+            try { stores.Capture(target); }
+            catch (Exception ex) { cleanupError = " Could not clear signed-out snapshot: " + ex.Message; }
             // Verify remaining sessions through their native backend, never by reading credentials.
             var candidates = stores.Catalog.Stores.Where(s => s.Folder != target.Folder && !s.SignedOut).ToArray();
             foreach (var candidate in candidates)
@@ -312,7 +315,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             }
             catch (Exception recovery) { verifiedSession = false; message += " Native recovery failed: " + recovery.Message; }
         }
-        finally { logoutRequest = null; logoutResult = null; holdLogin = false; busy = false; await Publish(); }
+        finally { logoutRequest = null; logoutResult = null; holdLogin = false; busy = false; message += cleanupError; await Publish(); }
     }
     private static void RequireNoGame()
     {
