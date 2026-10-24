@@ -346,6 +346,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     }
     private async Task ObserveExit(Process process)
     {
+        var ownedExit = false;
         try
         {
             await process.WaitForExitAsync();
@@ -353,6 +354,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             image?.Dispose(); image = null;
             while (busy && launcher == process) await Task.Delay(100);
             if (launcher != process) return;
+            ownedExit = true;
             if (active is not null && await ResumeAfterUpdate())
             {
                 busy = true;
@@ -366,12 +368,17 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
                 return;
             }
             message = "Native launcher closed.";
-            await Stop(); await Publish(); Closed?.Invoke();
+            await Stop(); await Publish();
         }
         catch (Exception ex)
         {
             message = "Native launcher cleanup failed; files preserved. " + ex.Message;
             try { await Publish(); } catch { /* Never turn cleanup into helper failure. */ }
+        }
+        finally
+        {
+            // Failed cleanup must still release the hidden helper and its instance mutex.
+            if (ownedExit && !IsOpen) Closed?.Invoke();
         }
     }
     private async Task<bool> ResumeAfterUpdate()

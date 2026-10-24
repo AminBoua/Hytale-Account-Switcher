@@ -4,6 +4,7 @@ using System.IO;
 
 if (args.Length == 0) args = ["--safe"];
 var safe = args.SequenceEqual(new[] { "--safe" });
+if (args.Length == 3 && args[0] == "--native-exit-child") { NativeExitChecks.Child(args[1], args[2]); return; }
 if (args.Contains("--live-add")) { await NativeSessionChecks.Run(addAccount: true); return; }
 if (args.Contains("--live-cancel")) { await NativeSessionChecks.Run(addAccount: true, abort: "cancel"); return; }
 if (args.Contains("--live-failure")) { await NativeSessionChecks.Run(addAccount: true, abort: "login-failed"); return; }
@@ -37,6 +38,8 @@ if (args.Length == 2 && args[0] == "--verify-image")
 }
 
 void Check(bool result, string message) { if (!result) throw new Exception(message); Console.WriteLine("PASS " + message); }
+if (safe || args.Contains("--native-exit")) await NativeExitChecks.Run(Check);
+if (args.Contains("--native-exit")) return;
 if (safe || args.Contains("--native-startup")) NativeStartupChecks.Run(Check);
 if (args.Contains("--native-startup")) return;
 if (args.Contains("--acl-access")) { EffectiveAccessChecks.Run(Check); return; }
