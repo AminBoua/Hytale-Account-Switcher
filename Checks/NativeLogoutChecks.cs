@@ -64,13 +64,13 @@ internal static class NativeLogoutChecks
                         var snapshot = Path.Combine(stores.Folder(store.Folder), "AppData", "Hytale", "account.dat");
                         if (!lockSnapshot)
                         {
-                            check(!File.Exists(snapshot) && !status.Contains("Could not clear signed-out snapshot:"),
+                            check(!File.Exists(snapshot) && !status.Contains("Logout storage update failed:"),
                                 "confirmed logout clears its obsolete snapshot despite the authenticated capture requirement");
                             return;
                         }
                         var saved = JsonSerializer.Deserialize<NativeCatalog>(File.ReadAllText(Path.Combine(stores.Root, "native-stores.json")))!;
                         check(File.ReadAllText(snapshot) == store.Label && saved.Stores.Single(s => s.Folder == store.Folder).SignedOut &&
-                            saved.Selected != store.Folder && status.Contains("Could not clear signed-out snapshot:") && status.Contains(snapshot),
+                            saved.Selected != store.Folder && status.Contains("Logout storage update failed:") && status.Contains(snapshot),
                             "locked obsolete snapshot stays signed out on disk and its cleanup error remains in status");
                     }
                     session.Status += text =>
@@ -110,9 +110,11 @@ internal static class NativeLogoutChecks
                     var accepted = await (Task<bool>)typeof(NativeSession).GetMethod("Command", flags)!.Invoke(session, new object[] { inactive, signal })!;
                     check(!accepted && revoked.Count == 1, "inactive accounts cannot be logged out through the bridge");
                     failLogout = true;
+                    var beforeFailedLogout = stores.Catalog.Stores.ToArray();
                     await Invoke("LogoutCore", accountA);
                     check(session.IsOpen && resident == accountA.Profile && stores.Catalog.Selected == accountA.Folder && revoked.Count == 1 &&
-                        logoutRequests == 2 && Get("verifiedSession") is true && !stores.Catalog.Stores.Single(s => s.Folder == accountA.Folder).SignedOut,
+                        logoutRequests == 2 && Get("verifiedSession") is true && !stores.Catalog.Stores.Single(s => s.Folder == accountA.Folder).SignedOut &&
+                        stores.Catalog.Stores.SequenceEqual(beforeFailedLogout) && operations.Last() == "run",
                         "failed native logout retains the account and running launcher");
                     failLogout = false;
                     using var lockedA = LockSnapshot(accountA);
@@ -120,11 +122,14 @@ internal static class NativeLogoutChecks
                     check(session.IsOpen && !owner.HasExited && ReferenceEquals(Get("launcher"), owner) && owner.Id == pid &&
                         owner.MainWindowHandle == window && ReferenceEquals(Get("ready"), signal) && resident is null && stores.Catalog.Selected is null &&
                         Get("active") is NativeStore pending && stores.IsPending(pending) && Get("verifiedSession") is false &&
-                        status.StartsWith("Account logged out. Sign in to continue.", StringComparison.Ordinal),
+                        status.EndsWith("Account logged out. Sign in to continue.", StringComparison.Ordinal),
                         "logout with no usable fallback clears cached native identity and shows sign-in without restart");
                     check(logoutRequests == 3 && revoked.SequenceEqual(new[] { accountB.Profile, accountA.Profile }) && operations.Contains("clear"),
                         "final sign-in clears native memory without revoking the failed fallback");
                     CheckCleanup(accountA);
+                    foreach (var fallback in new[] { true, false })
+                        foreach (var metadata in new[] { false, true })
+                            await StorageRecovery(Path.Combine(root, $"storage-{fallback}-{metadata}"), dispatcher, fallback, metadata, check);
                     complete.TrySetResult();
                 }
                 catch (Exception ex) { complete.TrySetException(ex); }
@@ -138,5 +143,96 @@ internal static class NativeLogoutChecks
         });
         thread.SetApartmentState(ApartmentState.STA); thread.Start();
         return complete.Task;
+    }
+
+    private static async Task StorageRecovery(string root, Dispatcher dispatcher, bool fallback, bool metadata, Action<bool, string> check)
+    {
+        var stores = new NativeStores(root);
+        var native = Path.Combine(root, "account.dat");
+        NativeStore Account(string label)
+        {
+            var store = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), label);
+            File.WriteAllText(native, label); stores.Capture(store);
+            return store;
+        }
+        var accountB = fallback ? Account("accountB") : null;
+        var accountA = Account("accountA");
+        var snapshot = Path.Combine(stores.Folder(accountA.Folder), "AppData", "Hytale", "account.dat");
+        var lockedPath = metadata ? Path.Combine(stores.Root, "native-stores.json") : snapshot;
+        var preserved = File.ReadAllBytes(lockedPath);
+        var session = new NativeSession(stores, dispatcher);
+        using var owner = Process.GetCurrentProcess();
+        const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        object? Get(string name) => typeof(NativeSession).GetField(name, flags)!.GetValue(session);
+        void Set(string name, object value) => typeof(NativeSession).GetField(name, flags)!.SetValue(session, value);
+        Task Invoke(string name, params object[] args) => (Task)typeof(NativeSession).GetMethod(name, flags)!.Invoke(session, args)!;
+        Set("launcher", owner); Set("active", accountA); Set("verifiedSession", true);
+        Guid? resident = accountA.Profile;
+        var handled = new HashSet<string>();
+        var revoked = new List<Guid?>();
+        var operations = new List<string>();
+        var status = "";
+        session.Status += text =>
+        {
+            status = text;
+            if (Get("logoutRequest") is string logout && handled.Add(logout))
+            {
+                revoked.Add(resident); resident = null; File.Delete(native);
+                ((TaskCompletionSource<bool>)Get("logoutResult")!).TrySetResult(true);
+            }
+            if (Get("sessionRequest") is not string request || !handled.Add(request)) return;
+            var operation = (string)Get("sessionOperation")!; operations.Add(operation);
+            if (operation == "load")
+            {
+                var label = File.ReadAllText(native);
+                resident = stores.Catalog.Stores.Single(s => s.Label == label).Profile;
+            }
+            if (operation == "clear") resident = null;
+            ((TaskCompletionSource<JsonElement>)Get("sessionResult")!).TrySetResult(JsonSerializer.SerializeToElement(new
+                { success = true, profile = resident?.ToString(), loggedIn = resident is not null }));
+        };
+        var scenario = (metadata ? "locked metadata" : "locked snapshot") + (fallback ? " with fallback" : " on final account");
+        using (var locked = new FileStream(lockedPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            await Invoke("LogoutCore", accountA);
+            check(operations.Contains("stop") && revoked.SequenceEqual(new[] { accountA.Profile }) &&
+                status.Contains("Logout storage update failed:") && status.Contains(lockedPath),
+                scenario + " attempts recovery after confirmed logout and reports the storage failure");
+            check(File.ReadAllBytes(lockedPath).SequenceEqual(preserved) && File.ReadAllText(snapshot) == "accountA" &&
+                (accountB is null || File.ReadAllText(Path.Combine(stores.Folder(accountB.Folder), "AppData", "Hytale", "account.dat")) == "accountB"),
+                scenario + " preserves locked recovery data and other account snapshots");
+            if (metadata)
+            {
+                check(Get("verifiedSession") is false && !operations.Contains("run") && resident is null &&
+                    !File.Exists(native) && status.Contains("Other accounts were preserved.") &&
+                    (!fallback || status.Contains("Could not restore accountB:")),
+                    scenario + " keeps Play blocked when storage prevents every safe recovery");
+            }
+            else
+            {
+                check(fallback ? resident == accountB!.Profile && stores.Catalog.Selected == accountB.Folder && Get("verifiedSession") is true && !operations.Contains("clear") :
+                    resident is null && stores.Catalog.Selected is null && Get("verifiedSession") is false && operations.Contains("clear") &&
+                    Get("active") is NativeStore pending && stores.IsPending(pending),
+                    scenario + " recovers to the saved account or native sign-in despite capture failure");
+            }
+        }
+        if (metadata)
+        {
+            if (accountB is not null) await session.Open(accountB, true);
+            else await Invoke("ShowSignIn");
+            check(accountB is not null ? resident == accountB.Profile && stores.Catalog.Selected == accountB.Folder && Get("verifiedSession") is true :
+                resident is null && Get("active") is NativeStore pending && stores.IsPending(pending) && Get("verifiedSession") is false,
+                scenario + " safely recovers after releasing the metadata lock");
+        }
+        else
+        {
+            // Retry only signed-out bookkeeping; never capture the now-active fallback into A's snapshot.
+            stores.MarkSignedOut(accountA);
+            check(stores.Catalog.Stores.Single(s => s.Folder == accountA.Folder).SignedOut && File.ReadAllText(snapshot) == "accountA",
+                scenario + " allows metadata retry without overwriting preserved recovery data");
+        }
+        check(ReferenceEquals(Get("launcher"), owner) && session.IsOpen && !owner.HasExited &&
+            Get("busy") is false && Get("holdLogin") is false && revoked.SequenceEqual(new[] { accountA.Profile }),
+            scenario + " retains the existing process and revokes no other account throughout recovery");
     }
 }
