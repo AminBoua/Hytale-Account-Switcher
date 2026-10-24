@@ -49,6 +49,7 @@ internal static class LifecycleChecks
                 Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(patched)).ToLowerInvariant(),
                 PatchInstaller.Hash(installer.HelperPath), port, capability, state == "installed" ? "installed" : "prepared", permissions);
             File.WriteAllBytes(Path.Combine(installer.DirectoryPath, "install.json"), JsonSerializer.SerializeToUtf8Bytes(record));
+            if (state == "installed") installer.VerifyInstalled(installer.Read());
             return installer;
         }
         async Task Reject(Func<Task> action, string label)

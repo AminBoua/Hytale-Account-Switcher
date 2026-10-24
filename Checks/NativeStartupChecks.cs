@@ -64,6 +64,8 @@ internal static class NativeStartupChecks
                 check(File.ReadAllText(official) == "opaque-current-B" && File.ReadAllText(Snapshot(verifiedB)) == "opaque-current-B" &&
                     File.ReadAllText(Snapshot(accountA)) == "opaque-A" && reloaded.Catalog.Stores.Single(s => s.Folder == accountA.Folder) == accountA,
                     "startup reconciliation preserves A's identity and snapshot and captures B only under B");
+                check(savedB ? !File.Exists(Snapshot(initial)) : File.Exists(Snapshot(initial)),
+                    "only staging snapshots reconciled to an existing account are removed");
                 check(initial.Folder == verifiedB.Folder || !Directory.Exists(stores.Folder(initial.Folder)),
                     "successful reconciliation removes only the redundant pending snapshot and keys");
                 for (var restart = 0; restart < 3; restart++)
@@ -130,5 +132,101 @@ internal static class NativeStartupChecks
             }
             finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         }
+        RepeatedReconciliation(check);
+    }
+
+    private static void RepeatedReconciliation(Action<bool, string> check)
+    {
+        var root = SecurityFixture.Create("native-startup-cleanup-");
+        try
+        {
+            var stores = new NativeStores(root);
+            var official = Path.Combine(root, "account.dat");
+            string Storage(NativeStore store) => Path.Combine(stores.Folder(store.Folder), "AppData", "Hytale");
+            Directory.CreateDirectory(Path.Combine(root, ".keys"));
+            File.WriteAllText(Path.Combine(root, ".keys", "key"), "opaque-key");
+            File.WriteAllText(official, "opaque-original");
+            var account = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), "saved");
+            stores.Capture(account);
+            var cancelled = stores.CreatePending(); stores.Capture(cancelled);
+            stores = new NativeStores(root); stores.DiscardPending(cancelled); // Previous-run recovery data is not disposable in this instance.
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                stores = new NativeStores(root);
+                var session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+                var staged = session.InitialStore();
+                var storage = Storage(staged);
+                var runtime = Path.Combine(stores.Folder(staged.Folder), "run-fixture", "hytale-launcher.exe");
+                Directory.CreateDirectory(Path.GetDirectoryName(runtime)!); File.WriteAllText(runtime, "fake runtime");
+                File.WriteAllText(Path.Combine(storage, "unrelated.bin"), "unrelated");
+                File.WriteAllText(Path.Combine(storage, ".keys", "recovery-key"), "unique-recovery-key");
+                File.WriteAllText(Path.Combine(storage, ".keys", "key"), attempt == 2 ? "different-recovery-key" : "opaque-key");
+                typeof(NativeSession).GetField("active", flags)!.SetValue(session, staged);
+                // Simulate a native refresh after staging; the verified capture supersedes the older session.
+                File.WriteAllText(official, "opaque-refreshed-" + attempt);
+                using (var image = new FileStream(runtime, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    typeof(NativeSession).GetMethod("CommitProfile", flags)!.Invoke(session, [account.Profile!.Value, false, null]);
+                check(!File.Exists(Path.Combine(storage, "account.dat")) &&
+                    (attempt == 2 ? File.ReadAllText(Path.Combine(storage, ".keys", "key")) == "different-recovery-key" :
+                        !File.Exists(Path.Combine(storage, ".keys", "key"))),
+                    "reconciled staging session and byte-identical key copies are removed after capture");
+                check(File.ReadAllText(runtime) == "fake runtime" && File.ReadAllText(Path.Combine(storage, "unrelated.bin")) == "unrelated" &&
+                    File.ReadAllText(Path.Combine(storage, ".keys", "recovery-key")) == "unique-recovery-key",
+                    "cleanup preserves the locked runtime, unrelated files and keys absent from the saved snapshot");
+                check(File.ReadAllText(official) == "opaque-refreshed-" + attempt &&
+                    File.ReadAllText(Path.Combine(Storage(account), "account.dat")) == "opaque-refreshed-" + attempt &&
+                    File.ReadAllText(Path.Combine(root, ".keys", "key")) == "opaque-key" &&
+                    File.ReadAllText(Path.Combine(Storage(account), ".keys", "key")) == "opaque-key" &&
+                    File.ReadAllText(Path.Combine(Storage(cancelled), "account.dat")) == "opaque-original" &&
+                    Directory.GetFiles(stores.Root, "account.dat", SearchOption.AllDirectories).Length == 2,
+                    "repeated reconciliation accumulates no snapshots and retains saved, native and cancelled-session data");
+            }
+            var failedSession = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+            var failed = failedSession.InitialStore();
+            typeof(NativeSession).GetField("active", flags)!.SetValue(failedSession, failed);
+            using (var locked = new FileStream(official, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                try { typeof(NativeSession).GetMethod("CommitProfile", flags)!.Invoke(failedSession, [account.Profile!.Value, false, null]); throw new Exception("Locked capture succeeded"); }
+                catch (TargetInvocationException ex) when (ex.InnerException is IOException or UnauthorizedAccessException) { }
+            }
+            check(File.ReadAllText(Path.Combine(Storage(failed), "account.dat")) == "opaque-refreshed-2" &&
+                File.ReadAllText(Path.Combine(Storage(failed), ".keys", "key")) == "opaque-key" &&
+                File.ReadAllText(Path.Combine(Storage(account), "account.dat")) == "opaque-refreshed-2",
+                "failed capture after reconciliation retains staging recovery data and the saved snapshot");
+            stores.RemoveRedundantPending(account with { Folder = account.Folder.ToUpperInvariant() }, account);
+            check(File.ReadAllText(Path.Combine(Storage(account), "account.dat")) == "opaque-refreshed-2",
+                "catalog-referenced pending-named stores remain protected regardless of path casing");
+            foreach (var missing in new[] { false, true })
+            {
+                File.WriteAllText(official, "opaque-recovery");
+                var session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+                var staged = session.InitialStore();
+                typeof(NativeSession).GetField("active", flags)!.SetValue(session, staged);
+                if (missing) File.Delete(official); else File.WriteAllText(official, "");
+                typeof(NativeSession).GetMethod("CommitProfile", flags)!.Invoke(session, [account.Profile!.Value, false, null]);
+                stores.CleanupPending();
+                check(File.ReadAllText(Path.Combine(Storage(staged), "account.dat")) == "opaque-recovery" &&
+                    File.ReadAllText(Path.Combine(Storage(staged), ".keys", "key")) == "opaque-key",
+                    "missing or empty captured session retains the complete staging snapshot");
+            }
+            File.WriteAllText(official, "opaque-locked-cleanup");
+            var lockedSession = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+            var lockedStage = lockedSession.InitialStore();
+            typeof(NativeSession).GetField("active", flags)!.SetValue(lockedSession, lockedStage);
+            using (var locked = new FileStream(Path.Combine(Storage(lockedStage), "account.dat"), FileMode.Open, FileAccess.Read, FileShare.Read))
+                typeof(NativeSession).GetMethod("CommitProfile", flags)!.Invoke(lockedSession, [account.Profile!.Value, false, null]);
+            check(File.ReadAllText(Path.Combine(Storage(lockedStage), "account.dat")) == "opaque-locked-cleanup" &&
+                File.ReadAllText(Path.Combine(Storage(account), "account.dat")) == "opaque-locked-cleanup" &&
+                stores.Catalog.Active == account.Folder && stores.Catalog.Selected == account.Folder,
+                "blocked cleanup retains staging data without failing the successful account transition");
+            stores.CleanupPending();
+            check(!File.Exists(Path.Combine(Storage(lockedStage), "account.dat")) &&
+                File.ReadAllText(Path.Combine(Storage(account), "account.dat")) == "opaque-locked-cleanup" &&
+                File.ReadAllText(Path.Combine(Storage(failed), "account.dat")) == "opaque-refreshed-2" &&
+                File.ReadAllText(Path.Combine(Storage(cancelled), "account.dat")) == "opaque-original",
+                "cleanup retry removes only the reconciled snapshot after unlocking and retains failed and prior-run recovery data");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
 }

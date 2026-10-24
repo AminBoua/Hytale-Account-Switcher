@@ -126,14 +126,15 @@ try {
         try { & (Join-Path $package $operation) @wrongUser } catch { $rejected = $true }
         Check ($rejected -and (Get-FileHash -LiteralPath $shortcutPath).Hash -eq $ownedHash) 'another Windows account cannot orphan the owner shortcut journal'
     }
-    foreach ($lockedName in @('HytaleAccounts.exe','Repair-Integration.ps1','shortcuts.json')) {
+    foreach ($lockedName in @('HytaleAccounts.exe','Repair-Integration.ps1','launcher-baseline.json','shortcuts.new','shortcuts.json')) {
         & (Join-Path $package 'Install.ps1') @options
         & (Join-Path $package 'Install.ps1') @options -UserOnly
         & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
+        Set-Content -LiteralPath (Join-Path $destination 'shortcuts.new') -Value 'unfinished journal fixture'
         $manifest = Join-Path $destination 'shortcuts.json'
         $journal = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
         $recovery = @{}
-        foreach ($name in @('shortcuts.json','HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json') + @($journal.Shortcuts | ForEach-Object Backup)) {
+        foreach ($name in @('shortcuts.json','shortcuts.new','HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json') + @($journal.Shortcuts | ForEach-Object Backup)) {
             $path = Join-Path $destination $name
             $recovery[$path] = (Get-FileHash -LiteralPath $path).Hash
         }
@@ -148,7 +149,7 @@ try {
         foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'failed removal leaves original user and system shortcuts restored' }
         $missing = @($recovery.Keys | Where-Object { !(Test-Path -LiteralPath $_) })
         Check (!$missing.Count -and (Test-Path -LiteralPath $registry)) ('failed removal retains recovery files and Windows Apps entry; missing: ' + ($missing -join ', ') + '; Apps entry: ' + (Test-Path -LiteralPath $registry))
-        Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -eq $uninstallString -and $uninstallString -eq ('"' + (Join-Path $destination 'HytaleAccounts.exe') + '" --uninstall')) 'failed removal retains the executable entry point for retry from Windows Apps'
+        Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -ceq $uninstallString -and $uninstallString -ceq ('"' + (Join-Path $destination 'HytaleAccounts.exe') + '" --uninstall')) 'failed removal retains the executable entry point for retry from Windows Apps'
         foreach ($path in $recovery.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $recovery[$path]) 'failed removal preserves recovery bytes' }
         $rejected = $false
         try { & (Join-Path $destination 'Uninstall.ps1') @wrongUser } catch { $rejected = $true }

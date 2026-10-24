@@ -112,38 +112,52 @@ internal static class NativeAddChecks
             check(await Command(new { action = "ready", loginRequest = second, profile = oldProfile, username = "accountB" }) &&
                 Get("pendingLogin") is null && stores.Catalog.Selected == current.Folder && stores.Catalog.Stores.Count == 2,
                 "a matching same-account completion clears pending login without duplicating the saved account");
-            check(await session.AddAccount(), "Add can reauthenticate another saved account");
-            var retry = (NativeStore)Get("pendingLogin")!;
+            check(await session.AddAccount(), "a saved account can be re-added after completion");
+            var retry = Pending();
+            var completion = new { action = "ready", loginRequest = retry, profile = other.Profile, username = "accountA" };
             var previousMetadata = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
-            File.WriteAllText(officialSession, "opaque-refreshed-A-session");
-            using (var locked = File.Open(Path.Combine(stores.Folder(other.Folder), "AppData", "Hytale", "account.dat"), FileMode.Open, FileAccess.Read, FileShare.Read))
+            var snapshot = Path.Combine(stores.Folder(other.Folder), "AppData", "Hytale", "account.dat");
+            File.WriteAllText(officialSession, "opaque-refreshed-accountA-session");
+            using (var locked = new FileStream(snapshot, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                try { await Command(new { action = "ready", loginRequest = retry.Folder, profile = other.Profile, username = "accountA" }); throw new Exception("Locked capture committed"); }
-                catch (IOException) { }
-                check((NativeStore?)Get("pendingLogin") == retry && stores.IsPending(retry) && (NativeStore?)Get("active") == current && Get("verifiedSession") is false &&
-                    stores.Catalog.Selected == current.Folder && File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(previousMetadata) &&
-                    session.IsOpen && !process.HasExited, "failed saved-account capture keeps a recoverable attempt, prior selection and existing process unverified");
+                try { await Command(completion); throw new Exception("Locked snapshot completion succeeded"); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    check(Pending() == retry && stores.IsPending((NativeStore)Get("pendingLogin")!) &&
+                        ((NativeStore)Get("active")!).Folder == current.Folder && stores.Catalog.Selected == current.Folder &&
+                        Get("verifiedSession") is false && File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(previousMetadata) &&
+                        stores.Catalog.Active == current.Folder && stores.Catalog.Stores.Count == 2 &&
+                        File.ReadAllText(snapshot) == "opaque-accountA-session" &&
+                        File.ReadAllText(officialSession) == "opaque-refreshed-accountA-session" &&
+                        session.IsOpen && ReferenceEquals(Get("launcher"), process),
+                        "failed snapshot preserves prior identity and selection, login/Play fence, native session and launcher ownership");
+                }
             }
-            check(await Command(new { action = "ready", loginRequest = retry.Folder, profile = other.Profile, username = "accountA" }) &&
-                Get("pendingLogin") is null && Get("verifiedSession") is true && stores.Catalog.Selected == other.Folder &&
-                stores.Catalog.Stores.Count == 2 && File.ReadAllText(Path.Combine(stores.Folder(other.Folder), "AppData", "Hytale", "account.dat")) == "opaque-refreshed-A-session",
-                "retry after unlocking captures and selects the existing account without losing the pending marker or duplicating accounts");
-            File.WriteAllText(officialSession, "opaque-accountA-session"); stores.Capture(other);
+            check(!await Command(new { action = "ready", loginRequest = second, profile = oldProfile, username = "late" }) &&
+                !await Command(new { action = "cancel", loginRequest = second }) &&
+                !await Command(new { action = "login-failed", loginRequest = second }) && Pending() == retry &&
+                !await Command(new { action = "select", store = current.Folder }),
+                "failed completion retains its request fence against late callbacks and switching");
+            check(await Command(completion) && Get("pendingLogin") is null && Get("verifiedSession") is true &&
+                ((NativeStore)Get("active")!).Folder == other.Folder && stores.Catalog.Selected == other.Folder &&
+                stores.Catalog.Active == other.Folder && stores.Catalog.Stores.Count == 2 &&
+                File.ReadAllText(snapshot) == "opaque-refreshed-accountA-session" &&
+                File.ReadAllText(officialSession) == "opaque-refreshed-accountA-session" &&
+                session.IsOpen && ReferenceEquals(Get("launcher"), process),
+                "the same completion retries successfully after releasing the snapshot lock without restart or duplicate accounts");
+            check(!await Command(completion), "a late duplicate completion is rejected after the successful retry");
             restored = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            check(await Command(new { action = "select", store = current.Folder }), "switching back is accepted after capture retry");
+            check(await Command(new { action = "select", store = current.Folder }), "switching is accepted after cancellation and completion");
             await restored.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            restored = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            check(await Command(new { action = "select", store = other.Folder }), "switching is accepted after cancellation and completion");
-            await restored.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            check(session.IsOpen && Get("verifiedSession") is true && stores.Catalog.Selected == other.Folder &&
-                File.ReadAllText(officialSession) == "opaque-accountA-session", "switching still restores another saved account in the existing process");
+            check(session.IsOpen && Get("verifiedSession") is true && stores.Catalog.Selected == current.Folder &&
+                File.ReadAllText(officialSession) == "opaque-accountB-session", "switching still restores another saved account in the existing process");
             check(await session.AddAccount(), "another Add can follow switching");
             var third = Pending();
             failLoad = true; restored = new(TaskCreationOptions.RunContinuationsAsynchronously);
             check(await Command(new { action = "login-failed", loginRequest = third }), "matching native login failure uses the cancellation recovery path");
             await restored.Task.WaitAsync(TimeSpan.FromSeconds(5));
             check(Get("pendingLogin") is null && Get("busy") is false && Get("holdLogin") is false &&
-                Get("verifiedSession") is false && stores.Catalog.Selected == other.Folder && session.IsOpen &&
+                Get("verifiedSession") is false && stores.Catalog.Selected == current.Folder && session.IsOpen &&
                 !await session.AddAccount(), "failed cancellation recovery keeps Play unverified, preserves selection and leaves the process open");
             var failure = new UnauthorizedAccessException("synthetic session failure");
             session.Status += _ => throw failure;
