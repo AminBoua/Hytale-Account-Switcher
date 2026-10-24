@@ -38,6 +38,7 @@ if (args.Length == 2 && args[0] == "--verify-image")
 }
 
 void Check(bool result, string message) { if (!result) throw new Exception(message); Console.WriteLine("PASS " + message); }
+Check(typeof(PatchInstaller).GetMethod("Install") is null, "legacy installation entry point is absent from shipped assembly");
 if (safe || args.Contains("--logging")) await LoggingChecks.Run(Check);
 if (args.Contains("--logging")) return;
 if (safe || args.Contains("--native-adapter")) NativeAdapterChecks.Run(Check);
