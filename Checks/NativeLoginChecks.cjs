@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-let tick, nativeLogouts = 0, generated = 0, requestId = 0, failLogin = false;
+let tick, nativeLogouts = 0, generated = 0, requestId = 0, failLogin = false, userLoads = 0;
 const calls = [], created = [], browserUrls = [], events = {}, nativeActions = [];
 const deliveryFailures = new Map(), delivered = [];
 const timers = new Map();
@@ -9,7 +9,7 @@ let timerId = 0, automaticSwitch = false, disconnected = false, loadGate, urlGat
 const accountB = { uuid: 'accountB-profile', username: 'accountB' };
 const accountA = { uuid: 'accountA-profile', username: 'accountA' };
 let nativeProfile = accountB;
-const user = { getUserProfile: accountB, async load() { const profile = nativeProfile; await loadGate; this.getUserProfile = profile; } };
+const user = { getUserProfile: accountB, async load() { userLoads++; const profile = nativeProfile; await loadGate; this.getUserProfile = profile; } };
 const state = { stores: [{ id: 'accountB', label: 'accountB' }, { id: 'accountA', label: 'accountA' },
   { id: 'signed-out', label: 'Signed out', signedOut: true }], active: 'accountB', selected: 'accountB', profile: accountB.uuid, busy: false, holdLogin: false, login: null };
 const window = {
@@ -56,7 +56,8 @@ function element(className = '') {
 const document = element(), body = element(), login = element('login__container'), app = element();
 document.documentElement = element(); document.append(document.documentElement);
 document.body = body; document.documentElement.append(body); body.append(login); body.append(app);
-app.id = 'app'; app.__vue_app__ = { config: { globalProperties: { $pinia: { _s: new Map([['user', user]]) } } } };
+app.id = 'app'; app.__vue_app__ = { config: { globalProperties: { $pinia: { _s: new Map() } } } };
+const nativeScript = element(); nativeScript.src = 'http://wails.localhost/assets/index-renamed.js'; body.append(nativeScript);
 document.currentScript = { src: 'http://127.0.0.1:1234/cap/ui.js' };
 document.createElement = tag => { created.push(tag); return element(); };
 const dropdown = element('launch-game__profile-dropdown'), list = element('hy-dropdown__list');
@@ -91,6 +92,8 @@ const playBlocked = () => {
   return event.defaultPrevented;
 };
 const source = fs.readFileSync('Launcher/NativeDropdown.js', 'utf8');
+state.session = { request: 'startup-run', operation: 'run' }; state.busy = true;
+user.getUserProfile = null;
 vm.runInNewContext(source, {
   location: { origin: 'http://wails.localhost', pathname: '/launch-game' }, window, document, URL, AbortSignal, Date,
   MutationObserver: class { constructor(fn) { refresh = fn; } observe() {} }, setInterval: fn => { tick = fn; },
@@ -125,9 +128,32 @@ vm.runInNewContext(source, {
     if (!options.body && disconnected) throw Error('helper disconnected');
     return { ok: true, json: async () => structuredClone(state) };
   }
-});
+}, { importModuleDynamically: async asset => { throw Error('Unavailable frontend import: ' + asset + '; mounted asset: ' + nativeScript.src); } });
 (async () => {
   await new Promise(setImmediate); // Allow the initial asynchronous poll to finish.
+  assert.equal(calls.length, 0, 'run received first waits for Pinia without acknowledging a result');
+  assert.equal(nativeActions.length, 0, 'waiting for Pinia does not start native tasks');
+  assert(playBlocked(), 'Play stays blocked while the user store is unavailable');
+  const waiting = [...timers.entries()].at(-1);
+  assert(waiting && waiting[1].delay <= 25, 'unready store retries without a one-second transition delay');
+  app.__vue_app__.config.globalProperties.$pinia._s.set('user', user);
+  deliveryFailures.set('startup-run', 1);
+  timers.delete(waiting[0]); await waiting[1].fn();
+  const recovered = calls.at(-1);
+  assert.deepEqual(recovered, { action: 'session-result', request: 'startup-run', success: true,
+    profile: accountB.uuid, username: accountB.username, loggedIn: true }, 'first run recovers from the mounted store with renamed frontend assets');
+  assert.equal(user.getUserProfile, accountB, 'recovery loads the native profile into the existing frontend');
+  assert.equal(delivered.length, 0, 'failed recovery response has not reached the helper');
+  assert(playBlocked(), 'lost recovery response keeps Play blocked');
+  const retry = [...timers.entries()].at(-1);
+  assert(retry && retry[1].delay <= 25, 'recovery response retries immediately');
+  timers.delete(retry[0]); await retry[1].fn();
+  assert.deepEqual(delivered.at(-1), recovered, 'recovery retries the original result');
+  assert.deepEqual(nativeActions, ['hya:run!'], 'first run starts native tasks exactly once across retries');
+  assert.equal(userLoads, 1, 'first run reloads the mounted store exactly once across retries');
+  assert.equal(nativeLogouts, 0); assert.equal(browserUrls.length, 0);
+  state.session = null; state.busy = false;
+  calls.length = delivered.length = nativeActions.length = 0;
   await tick();
   assert.deepEqual(created, ['style'], 'native sign-in receives no account controls');
   assert.equal(document.querySelector('.launch-game__profile-dropdown'), null);
@@ -344,6 +370,7 @@ vm.runInNewContext(source, {
   assert(schedulingDelay <= 100, 'three native stages have no multi-second artificial delay');
   assert.equal(user.getUserProfile.uuid, accountA.uuid);
   assert.equal(timers.size, 0, 'fast polling stops after the transition');
+  console.log('PASS first-update run uses the mounted Pinia store with renamed assets, waits for readiness, and retries results without repeating recovery');
   console.log('PASS production Play handler blocks pending, busy, disconnected and mismatched accounts; verified matching identity reaches native Play');
   console.log('PASS dropdown renders usable saved accounts and Add, dispatches click/keyboard actions, and leaves native sign-in free of addon controls');
   console.log('PASS Add opens native Hytale login once, retains current account, confirms callbacks, and preserves login state/PKCE');
