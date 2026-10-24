@@ -270,6 +270,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     {
         var confirmed = false;
         var requested = false;
+        var cleanupWarning = "";
         busy = true; holdLogin = true;
         message = "Logging out " + target.Label + "…"; await Publish();
         try
@@ -286,7 +287,10 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             logoutRequest = null;
             verifiedSession = false;
             stores.MarkSignedOut(target);
-            stores.Capture(target);
+            // Durable sign-out excludes the revoked snapshot even when cleanup is blocked.
+            try { stores.Capture(target); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            { cleanupWarning = " Saved session cleanup failed: " + ex.Message; }
             // Verify remaining sessions through their native backend, never by reading credentials.
             var candidates = stores.Catalog.Stores.Where(s => s.Folder != target.Folder && !s.SignedOut).ToArray();
             foreach (var candidate in candidates)
@@ -305,7 +309,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         }
         catch (Exception ex)
         {
-            message = ex.Message + (confirmed ? " Other accounts were preserved." : " Other accounts and selection were preserved.");
+            message = ex.Message + (confirmed ? " Native logout succeeded, but account recovery did not complete. Other accounts were preserved." : " Other accounts and selection were preserved.");
             logoutRequest = null;
             try
             {
@@ -314,7 +318,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             }
             catch (Exception recovery) { verifiedSession = false; message += " Native recovery failed: " + recovery.Message; }
         }
-        finally { logoutRequest = null; logoutResult = null; holdLogin = false; busy = false; await Publish(); }
+        finally { logoutRequest = null; logoutResult = null; holdLogin = false; busy = false; message += cleanupWarning; await Publish(); }
     }
     private static void RequireNoGame()
     {
