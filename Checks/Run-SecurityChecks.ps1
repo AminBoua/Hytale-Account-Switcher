@@ -13,6 +13,7 @@ $report.Environment.Node = (& node --version | Out-String).Trim()
 $steps = @(
     @{Name='build';Exe='dotnet';Arguments=@('build','Checks/Checks.csproj','-c','Release','--nologo','--configfile','Checks/VmValidation/NuGet.Config','-p:NuGetAudit=false')},
     @{Name='csharp-safe';Exe='dotnet';Arguments=@('run','--project','Checks/Checks.csproj','-c','Release','--no-build','--no-restore','--','--safe')},
+    @{Name='update-ordering';Exe='dotnet';Arguments=@('run','--project','Checks/UpdateOrdering/UpdateOrdering.csproj','-c','Release','-p:NuGetAudit=false')},
     @{Name='frontend';Exe='node';Arguments=@('Checks/NativeLoginChecks.cjs')}
 )
 foreach ($entry in @(@('installer-fixtures','Checks/InstallerScriptChecks.ps1'),@('shortcut-races','Checks/ShortcutRaceChecks.ps1'),

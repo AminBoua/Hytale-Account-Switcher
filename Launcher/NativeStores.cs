@@ -263,11 +263,11 @@ public sealed class NativeStores
         await IntegrationSafety.VerifyPublisher(path);
         _ = PatchInstaller.PatchCurrent(bytes, 49152, new string('a', 43));
         var updated = Path.Combine(Root, "launcher-update.exe"); RegularPath(updated);
-        if (StorageSafety.FileExists(updated) && !NewerBuild(path, updated)) return false;
+        if (StorageSafety.FileExists(updated) && !NewerBuild(path, updated, nativeUpdate: true)) return false;
         AtomicWrite(updated, bytes, privateFile: true);
         return true;
     }
-    internal static bool NewerBuild(string candidate, string previous)
+    internal static bool NewerBuild(string candidate, string previous, bool nativeUpdate = false)
     {
         static string? Version(string path)
         {
@@ -277,8 +277,9 @@ public sealed class NativeStores
         }
         var version = Version(candidate);
         var old = Version(previous);
-        // Commit hashes aren't ordered; Hytale's updater determines which same-day build supersedes another.
-        return version != old && string.CompareOrdinal(version?.Split('-')[0], old?.Split('-')[0]) >= 0;
+        // Unordered same-day hashes favor the official image unless Hytale's updater observed the replacement.
+        var date = string.CompareOrdinal(version?.Split('-')[0], old?.Split('-')[0]);
+        return version != old && (date > 0 || (nativeUpdate && date == 0));
     }
     public static void RequireIdle()
     {
