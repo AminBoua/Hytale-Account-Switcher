@@ -107,9 +107,11 @@
       document.documentElement?.setAttribute('data-account-ready', '');
       document.documentElement?.toggleAttribute('data-account-transition', !!state.holdLogin);
       refresh();
+      if (!user) user = document.querySelector('#app')?.__vue_app__?.config.globalProperties.$pinia?._s.get('user');
       if (state.session) {
         if (!sessionResult) {
           const operation = state.session.operation, requestId = state.session.request;
+          if (operation === 'run' && !user) return;
           let success = false, profile = null, loggedIn = null;
           try {
             if (!['stop', 'load', 'run', 'clear'].includes(operation)) throw new Error('Invalid native operation.');
@@ -122,7 +124,6 @@
               loggedIn = await window.go.account.Service.IsUserLoggedIn();
               if (loggedIn) profile = await window.go.user.Service.GetUserProfile();
               if (operation === 'run') {
-                user ||= (await import(location.origin + '/assets/index-C4Qf_qVT.js')).S();
                 await user.load();
                 reported = '';
                 window.runtime.EventsEmit('reload');
@@ -169,7 +170,6 @@
         wake();
         return;
       }
-      if (!user) user = document.querySelector('#app')?.__vue_app__?.config.globalProperties.$pinia?._s.get('user');
       if (!user) return;
       if (loginRequest && loginCompleted === loginRequest) await user.load();
       if (!current()) return;
