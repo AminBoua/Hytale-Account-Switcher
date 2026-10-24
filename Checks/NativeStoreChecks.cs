@@ -186,11 +186,23 @@ try
     new NativeStores(root).Activate(first);
     Check(File.ReadAllText(Path.Combine(root, "account.dat")) == "latest-accountB", "normal restart retains latest official refresh rather than stale snapshot");
     stores.Capture(first);
+    foreach (var missing in new[] { false, true })
+    {
+        var metadata = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
+        if (missing) File.Delete(Path.Combine(root, "account.dat")); else File.WriteAllText(Path.Combine(root, "account.dat"), "");
+        try { stores.Capture(first); throw new Exception("Missing or empty authenticated capture succeeded"); }
+        catch (IOException) { }
+        Check(File.ReadAllText(Path.Combine(stores.Folder(first.Folder), "AppData", "Hytale", "account.dat")) == "latest-accountB" &&
+            File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(metadata),
+            $"authenticated capture rejects {(missing ? "missing" : "empty")} native session without changing the snapshot or metadata");
+    }
     stores.Activate(other);
     File.WriteAllText(Path.Combine(root, "account.dat"), "accountA-session"); stores.Capture(other); stores.Select(other);
     stores.Activate(first);
     File.Delete(Path.Combine(root, "account.dat")); // Native logout deletes the active session.
-    stores.MarkSignedOut(first); stores.Capture(first);
+    stores.MarkSignedOut(first); stores.Capture(first, requireSession: false);
+    Check(!File.Exists(Path.Combine(stores.Folder(first.Folder), "AppData", "Hytale", "account.dat")),
+        "confirmed native logout intentionally clears its saved snapshot");
     stores.Activate(other); stores.Select(other);
     Check(File.ReadAllText(Path.Combine(root, "account.dat")) == "accountA-session" && stores.Catalog.Selected == other.Folder,
         "accountB login, accountA login, accountB logout preserves and restores accountA");

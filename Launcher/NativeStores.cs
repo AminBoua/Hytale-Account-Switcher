@@ -190,17 +190,19 @@ public sealed class NativeStores
             capturedFiles?.Add(target);
         }
     }
-    public void Capture(NativeStore store)
+    public void Capture(NativeStore store, bool requireSession = true)
     {
         var storage = Storage(store); PrivateFiles.CreateDirectory(storage);
         using var directories = new SetupPayload.PinnedDirectories(storage, requireTrusted: false, forMutation: true);
         using var nativeDirectories = new SetupPayload.PinnedDirectories(HytaleRoot, requireTrusted: false, forMutation: true);
         pendingFiles.TryGetValue(store.Folder, out var capturedFiles);
-        CopyKeys(Path.Combine(HytaleRoot, ".keys"), Path.Combine(storage, ".keys"), privateFiles: true, capturedFiles);
         var source = Path.Combine(HytaleRoot, "account.dat"); RegularPath(source);
         var target = Path.Combine(storage, "account.dat"); RegularPath(target);
         var previousBytes = StorageSafety.FileExists(target) ? ReadFile(target) : null;
         var nextBytes = StorageSafety.FileExists(source) ? ReadFile(source) : null;
+        if (requireSession && nextBytes is not { Length: > 0 })
+            throw new IOException("Native session is missing or empty; previous snapshot preserved.");
+        CopyKeys(Path.Combine(HytaleRoot, ".keys"), Path.Combine(storage, ".keys"), privateFiles: true, capturedFiles);
         var previous = Catalog.Active;
         var written = false;
         try

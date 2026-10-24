@@ -36,14 +36,21 @@ internal static class NativeExitChecks
                 using (var released = new Mutex(false, MutexName(root), out var first)) check(first, "App exit releases the single-instance mutex");
                 var log = File.ReadAllText(Path.Combine(root, "helper.log"));
                 check(log.Contains(failure is "none" or "pending-login" ? "Native launcher closed." : "Native launcher cleanup failed; files preserved."), "exit outcome is logged: " + failure);
-                check(File.ReadAllText(Path.Combine(root, "account.dat")) == "opaque-current" &&
+                check(File.ReadAllText(Path.Combine(root, "account.dat")) == (failure == "pending-login" ? "opaque-accountB" : "opaque-current") &&
                     File.ReadAllText(Path.Combine(root, "Accounts", "run", "hytale-launcher.exe")) == "generated runtime fixture" &&
                     File.ReadAllText(Directory.GetFiles(Path.Combine(root, "Accounts"), "account.dat", SearchOption.AllDirectories).Single()) ==
-                        (failure is "snapshot" or "pending-login" ? "opaque-saved" : "opaque-current"), "affected native session and runtime files are preserved: " + failure);
+                        (failure is "snapshot" or "pending-login" ? "opaque-saved" : "opaque-current"), "shutdown preserves pending snapshots and captures refreshed sessions otherwise: " + failure);
                 if (failure == "pending-login")
+                {
                     check(File.ReadAllBytes(Path.Combine(root, "Accounts", "native-stores.json")).SequenceEqual(metadata) &&
-                        File.ReadAllText(Path.Combine(root, ".keys", "recovery")) == "opaque-accountB-key",
-                        "exit during unacknowledged Add preserves account A identity/selection and account B native recovery data");
+                        File.ReadAllBytes(Path.Combine(root, "expected-metadata.json")).SequenceEqual(
+                        File.ReadAllBytes(Path.Combine(root, "Accounts", "native-stores.json"))), "pending-login shutdown preserves account A's identity and selection");
+                    var snapshot = Path.GetDirectoryName(Directory.GetFiles(Path.Combine(root, "Accounts"), "account.dat", SearchOption.AllDirectories).Single())!;
+                    check(File.ReadAllText(Path.Combine(root, ".keys", "saved.key")) == "opaque-saved-key" &&
+                        File.ReadAllText(Path.Combine(root, ".keys", "callback.key")) == "opaque-callback-key" &&
+                        File.ReadAllText(Path.Combine(snapshot, ".keys", "saved.key")) == "opaque-saved-key" &&
+                        !File.Exists(Path.Combine(snapshot, ".keys", "callback.key")), "pending-login shutdown preserves official keys and account A's pre-Add snapshot keys");
+                }
             }
             finally
             {
@@ -64,6 +71,11 @@ internal static class NativeExitChecks
                 var stores = new NativeStores(root);
                 var account = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), "fixture");
                 var official = Path.Combine(root, "account.dat");
+                if (failure == "pending-login")
+                {
+                    Directory.CreateDirectory(Path.Combine(root, ".keys"));
+                    File.WriteAllText(Path.Combine(root, ".keys", "saved.key"), "opaque-saved-key");
+                }
                 File.WriteAllText(official, "opaque-saved"); stores.Capture(account);
                 File.WriteAllText(official, "opaque-current");
                 var runtime = Path.Combine(stores.Root, "run", "hytale-launcher.exe");
@@ -87,14 +99,14 @@ internal static class NativeExitChecks
                 if (failure == "pending-login")
                 {
                     File.WriteAllText(official, "opaque-saved");
+                    File.Copy(Path.Combine(stores.Root, "native-stores.json"), Path.Combine(root, "expected-metadata.json"));
                     Set(session, "launcher", replacement);
                     if (!await session.AddAccount() || !session.IsOpen || !stores.Catalog.Stores.SequenceEqual(new[] { account }) ||
                         stores.Catalog.Selected != account.Folder || stores.Catalog.Active != account.Folder)
                         throw new Exception("Add changed account A identity, selection or launcher ownership.");
-                    // Native authentication writes account B before its completion is acknowledged.
-                    File.WriteAllText(official, "opaque-current");
-                    Directory.CreateDirectory(Path.Combine(root, ".keys"));
-                    File.WriteAllText(Path.Combine(root, ".keys", "recovery"), "opaque-accountB-key");
+                    // Native callback writes B before the addon receives a completion report.
+                    File.WriteAllText(official, "opaque-accountB");
+                    File.WriteAllText(Path.Combine(root, ".keys", "callback.key"), "opaque-callback-key");
                     Set(session, "launcher", owned);
                 }
                 if (failure == "runtime") Set(session, "runImage", runtime);
