@@ -137,16 +137,18 @@ try {
             $path = Join-Path $destination $name
             $recovery[$path] = (Get-FileHash -LiteralPath $path).Hash
         }
-        # Allow journal reads but deny deletion, without running any fixture executable.
-        $locked = [IO.File]::Open((Join-Path $destination $lockedName), 'Open', 'Read', 'ReadWrite')
+        $uninstallString = (Get-ItemProperty -LiteralPath $registry).UninstallString
+        # Journal locks allow reads and writes but deny deletion; payload locks also deny writes.
+        $sharing = if ($lockedName -eq 'shortcuts.json') { 'ReadWrite' } else { 'Read' }
+        $locked = [IO.File]::Open((Join-Path $destination $lockedName), 'Open', 'Read', $sharing)
         $failure = $null
         try { & (Join-Path $destination 'Uninstall.ps1') @options } catch { $failure = $_ }
         finally { $locked.Dispose() }
-        Check ($null -ne $failure) ('locked ' + $lockedName + ' prevents addon removal')
+        Check ($failure -and $failure.Exception.GetBaseException() -is [ComponentModel.Win32Exception] -and $failure.Exception.GetBaseException().NativeErrorCode -eq 32) ("locked $lockedName rejects removal with a sharing violation")
         foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'failed removal leaves original user and system shortcuts restored' }
         $missing = @($recovery.Keys | Where-Object { !(Test-Path -LiteralPath $_) })
-        Check (!$missing.Count -and (Test-Path -LiteralPath $registry)) ('failed removal with locked ' + $lockedName + ' retains recovery files and Windows Apps entry; missing: ' + ($missing -join ', ') + '; Apps entry: ' + (Test-Path -LiteralPath $registry))
-        Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -eq ('"' + (Join-Path $destination 'HytaleAccounts.exe') + '" --uninstall')) 'failed removal preserves the Windows Apps retry command'
+        Check (!$missing.Count -and (Test-Path -LiteralPath $registry)) ('failed removal retains recovery files and Windows Apps entry; missing: ' + ($missing -join ', ') + '; Apps entry: ' + (Test-Path -LiteralPath $registry))
+        Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -eq $uninstallString -and $uninstallString -eq ('"' + (Join-Path $destination 'HytaleAccounts.exe') + '" --uninstall')) 'failed removal retains the executable entry point for retry from Windows Apps'
         foreach ($path in $recovery.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $recovery[$path]) 'failed removal preserves recovery bytes' }
         $rejected = $false
         try { & (Join-Path $destination 'Uninstall.ps1') @wrongUser } catch { $rejected = $true }
