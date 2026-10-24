@@ -29,7 +29,7 @@ try {
             Replace-Once 'if ((effective & mutation) != 0)' 'if (false)'
         } elseif ($Mutation -eq 'PrivateReplacement') {
             $path = Join-Path $launcher 'NativeStores.cs'; $source = Get-Content -LiteralPath $path -Raw
-            Replace-Once 'AtomicWrite(target, ReadFile(source), privateFile: true)' 'AtomicWrite(target, ReadFile(source), privateFile: false)'
+            Replace-Once 'AtomicWrite(target, nextBytes, privateFile: true)' 'AtomicWrite(target, nextBytes, privateFile: false)'
         }
     } elseif ($Storage) {
         if ($Mutation -ne 'None') { throw 'Storage races do not accept ACL mutations.' }
