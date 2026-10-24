@@ -441,7 +441,8 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             try { await launcher.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15)); }
             catch (TimeoutException) { throw new IOException("Native launcher did not close; switch cancelled."); }
         }
-        if (launcher is not null && active is not null && verifiedSession) stores.Capture(active);
+        // A pending native callback may already have replaced the official session with another account.
+        if (launcher is not null && active is not null && verifiedSession && pendingLogin is null) stores.Capture(active);
         launcher?.Dispose(); launcher = null;
         image?.Dispose(); image = null;
         if (runImage is not null)
