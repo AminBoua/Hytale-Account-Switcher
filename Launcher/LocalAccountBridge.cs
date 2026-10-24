@@ -18,33 +18,24 @@ public sealed class LocalAccountBridge : IAsyncDisposable
     private readonly List<Task> pending = [];
     private readonly SemaphoreSlim commandSlots = new(16);
     private bool disposed;
-    private int scriptLoads, stateReads;
-    public object Evidence => new { scriptLoads = Volatile.Read(ref scriptLoads), authenticatedStateReads = Volatile.Read(ref stateReads) };
     private byte[] state = JsonSerializer.SerializeToUtf8Bytes(new { profiles = Array.Empty<object>(), busy = false, message = "Connecting account backend…" });
     public string Endpoint { get; }
     public int Port => new Uri(Endpoint).Port;
     public string Capability => capability;
-    // Only the ephemeral bridge capability crosses into the private frontend.
-    public string Bootstrap => $"<script src=\"{Endpoint}{capability}/ui.js\"></script>";
-
-    // Integrated mode serves UI only. Legacy companion commands cannot reach credentials.
-    public static LocalAccountBridge ForNativeUi(int? port = null, string? capability = null) =>
-        new(_ => Task.FromResult(false), port, capability);
-
-    public LocalAccountBridge(Func<JsonElement, Task<bool>> command, int? installedPort = null, string? installedCapability = null)
+    public LocalAccountBridge(Func<JsonElement, Task<bool>> command)
     {
         this.command = command;
-        capability = installedCapability ?? Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        capability = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         for (var attempt = 0; ; attempt++)
         {
             using var reservation = new TcpListener(IPAddress.Loopback, 0);
             reservation.Start();
-            var port = installedPort ?? ((IPEndPoint)reservation.LocalEndpoint).Port;
+            var port = ((IPEndPoint)reservation.LocalEndpoint).Port;
             reservation.Stop();
             Endpoint = $"http://127.0.0.1:{port}/";
             listener.Prefixes.Clear(); listener.Prefixes.Add(Endpoint);
             try { listener.Start(); break; }
-            catch (HttpListenerException) when (installedPort is null && attempt < 9) { }
+            catch (HttpListenerException) when (attempt < 9) { }
         }
         serving = Serve();
     }
@@ -87,7 +78,7 @@ public sealed class LocalAccountBridge : IAsyncDisposable
                 var script = await reader.ReadToEndAsync(timeout.Token);
                 response.ContentType = "application/javascript; charset=utf-8";
                 await Write(response, Encoding.UTF8.GetBytes(script), timeout.Token);
-                Interlocked.Increment(ref scriptLoads); return;
+                return;
             }
             if (origin != Origin) { response.StatusCode = 403; return; }
             response.Headers["Access-Control-Allow-Origin"] = Origin;
@@ -103,7 +94,7 @@ public sealed class LocalAccountBridge : IAsyncDisposable
             }
             if (!Authorized(request.Headers["Authorization"])) { response.StatusCode = 401; return; }
             if (path == "/state" && request.HttpMethod == "GET")
-            { response.ContentType = "application/json"; await Write(response, Volatile.Read(ref state), timeout.Token); Interlocked.Increment(ref stateReads); return; }
+            { response.ContentType = "application/json"; await Write(response, Volatile.Read(ref state), timeout.Token); return; }
             if (path != "/command") { response.StatusCode = 404; return; }
             if (request.HttpMethod != "POST") { response.StatusCode = 405; return; }
             if (!string.Equals(request.ContentType?.Split(';')[0].Trim(), "application/json", StringComparison.OrdinalIgnoreCase)) { response.StatusCode = 415; return; }
