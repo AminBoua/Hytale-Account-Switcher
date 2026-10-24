@@ -37,6 +37,8 @@ if (args.Length == 2 && args[0] == "--verify-image")
 }
 
 void Check(bool result, string message) { if (!result) throw new Exception(message); Console.WriteLine("PASS " + message); }
+if (safe || args.Contains("--native-startup")) NativeStartupChecks.Run(Check);
+if (args.Contains("--native-startup")) return;
 if (args.Contains("--acl-access")) { EffectiveAccessChecks.Run(Check); return; }
 if (args.Contains("--acl-propagation")) { AclPropagationChecks.Run(Check); return; }
 if (args.Contains("--storage-safety")) { StorageSafetyChecks.Run(Check); return; }

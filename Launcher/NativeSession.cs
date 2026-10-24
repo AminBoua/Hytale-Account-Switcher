@@ -111,14 +111,16 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         await Publish();
         return true;
     }
-    public Task OpenInitial()
+    public Task OpenInitial() => OpenCore(InitialStore(), false);
+    internal NativeStore InitialStore()
     {
+        var hasNativeSession = File.Exists(Path.Combine(stores.HytaleRoot, "account.dat"));
         var selected = stores.Catalog.Stores.FirstOrDefault(s => s.Folder == stores.Catalog.Selected && !s.SignedOut);
-        if (selected is not null) return OpenCore(selected, false);
+        if (!hasNativeSession && selected is not null) return selected;
         var initial = stores.CreatePending();
-        // Adopt an existing official session through native verification on first launch.
-        if (File.Exists(Path.Combine(stores.HytaleRoot, "account.dat"))) stores.Capture(initial);
-        return OpenCore(initial, false);
+        // The official session may have changed accounts; verify it before updating any saved snapshot.
+        if (hasNativeSession) stores.Capture(initial);
+        return initial;
     }
     private void CommitProfile(Guid profile, bool select)
     {
