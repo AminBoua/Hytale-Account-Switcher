@@ -30,7 +30,9 @@ if ($RegressionControls) {
         @('PrivateReplacement','Checks/AclMigrationRaceChecks.ps1','System.Exception: capture replaces existing permissive snapshot'),
         @('BodyTimeout','Checks/BridgeRegressionChecks.ps1','System.TimeoutException:'),
         @('HandlerTimeout','Checks/BridgeRegressionChecks.ps1','System.TimeoutException:'),
-        @('HandlerSlots','Checks/BridgeRegressionChecks.ps1','FAIL timed-out handlers retain their slots until actual completion'))) {
+        @('HandlerSlots','Checks/BridgeRegressionChecks.ps1','FAIL timed-out handlers retain their slots until actual completion'),
+        @('AdapterJump','Checks/NativeAdapterRegressionChecks.ps1','System.Exception: adapter jump destination: network'),
+        @('AdapterMetadata','Checks/NativeAdapterRegressionChecks.ps1','System.Exception: adapter stack pcsp offset is relative to pc table'))) {
         $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$entry[1],'-Mutation',$entry[0])
         if ($entry[0] -eq 'Pins') { $arguments += '-PinsOnly' }
         if ($entry[0] -in @('Policy','PrivateReplacement')) { $arguments += '-StorageSafety' }

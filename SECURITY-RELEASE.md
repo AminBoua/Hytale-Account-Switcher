@@ -13,18 +13,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Build-Installer.ps1 -Che
 # Same checks followed by local installer packaging (does not distribute a release).
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Build-Installer.ps1
 
-# Audit/release-candidate run: also prove that eight deliberately broken copies fail.
+# Audit/release-candidate run: also prove that ten deliberately broken copies fail.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Build-Installer.ps1 -ChecksOnly -RegressionControls
 ```
 
 `Build-Installer.ps1` is the repository's build/release entry point. All its paths run the safe gate first. A direct `dotnet build` is compilation only and supplies no security validation. There is no skip-checks build option. Safe checks refuse an elevated token; never elevate to fix a failure.
 
-The checked-in [GitHub Actions workflow](.github/workflows/checks.yml) runs safe checks and all eight regression controls for pushes and pull requests, then packages a development installer with its licenses. GitHub's hosted Windows runner starts as administrator, so `Checks/Run-CiChecks.ps1` creates a disposable standard user, loads its profile, runs the unchanged safe gate with that token, and removes the user afterward. This bootstrap is allowed only on GitHub-hosted runners and must not be run on a personal machine. It does not run the actual privileged VM matrix or publish releases. CI retains synthetic logs and the development ZIP for 14 days; preserve release evidence separately. Require the `Windows safe checks` status on `main` when GitHub branch protection is available.
+The checked-in [GitHub Actions workflow](.github/workflows/checks.yml) runs safe checks and all ten regression controls for pushes and pull requests, then packages a development installer with its licenses. GitHub's hosted Windows runner starts as administrator, so `Checks/Run-CiChecks.ps1` creates a disposable standard user, loads its profile, runs the unchanged safe gate with that token, and removes the user afterward. This bootstrap is allowed only on GitHub-hosted runners and must not be run on a personal machine. It does not run the actual privileged VM matrix or publish releases. CI retains synthetic logs and the development ZIP for 14 days; preserve release evidence separately. Require the `Windows safe checks` status on `main` when GitHub branch protection is available.
 
 | Recorded step | Coverage |
 | --- | --- |
 | `build` | Compile launcher/checks with package sources cleared and NuGet audit disabled; missing local prerequisites fail |
-| `csharp-safe` | Storage ownership/mutation policy, profile/group/capability ACL compatibility, private replacement, rollback, links, ACL migration/propagation, Authz access simulations, fake setup extraction/failure cleanup, embedded resources, synthetic add/logout/catalog, bridge authentication, request/handler timeouts, saturation/recovery and shutdown |
+| `csharp-safe` | Generated PE/Go fixtures for adapter jump destinations, pc metadata, relocation, incompatible layouts and `PatchCurrent` frontend/input preservation; storage ownership/mutation policy, profile/group/capability ACL compatibility, private replacement, rollback, links, ACL migration/propagation, Authz access simulations, fake setup extraction/failure cleanup, embedded resources, synthetic add/logout/catalog, bridge authentication, request/handler timeouts, saturation/recovery and shutdown |
 | `frontend` | Node assertions over the injected frontend using mocked browser/bridge state |
 | `installer-fixtures` | Fake install/repair/remove lifecycle, sentinel preservation, temporary shortcuts and unique HKCU marker; all task mutations mocked |
 | `shortcut-races` | Directory, junction, hard-link and leaf substitutions against temporary shortcut fixtures |
@@ -34,9 +34,9 @@ The checked-in [GitHub Actions workflow](.github/workflows/checks.yml) runs safe
 | `evidence-gate` | Disposable fabricated evidence and Git fixtures test missing/failed/simulated/tampered/stale evidence rejection, actor/ACL validation and source invalidation; **not a VM pass** |
 | `runtime-notices` | Synthetic pack fixtures verify component/version attribution, complete license/notice text, and rejection of missing licenses or an empty pack set |
 
-The optional eight negative controls disable membership checking, ACL propagation suppression, path pins, mutation policy, private replacement, body timeout, handler timeout, or outstanding-handler slot retention in disposable source copies. Each must exit nonzero at its expected regression; compile errors or surviving mutations fail the gate. Normal builds run the positive suites; mutation builds are an explicit audit cost.
+The optional ten negative controls disable membership checking, ACL propagation suppression, path pins, mutation policy, private replacement, body timeout, handler timeout, or outstanding-handler slot retention, or introduce a wrong adapter jump destination or pc metadata offset in disposable source copies. Each must exit nonzero at its expected regression; compile errors or surviving mutations fail the gate. Normal builds run the positive suites; mutation builds are an explicit audit cost.
 
-The default C# entry point and `--safe` stop before legacy lifecycle/native executable checks. They use fake bytes and loopback listeners; they do not inspect the installed launcher or credential storage. Native binary and live integration checks are separate opt-in work and are not evidence from this gate. See [the audit](SECURITY-REAUDIT.md) for remaining limitations.
+The default C# entry point and `--safe` run the generated adapter fixtures before stopping at the legacy lifecycle/native executable checks. `--native-adapter` runs just those fixtures. Safe checks use fake bytes and loopback listeners; they do not inspect the installed launcher or credential storage. Native binary and live integration checks are separate opt-in work and are not evidence from this gate. See [the audit](SECURITY-REAUDIT.md) for remaining limitations.
 
 ## Actual VM evidence and the release claim
 

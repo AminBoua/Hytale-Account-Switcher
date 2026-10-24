@@ -38,6 +38,8 @@ if (args.Length == 2 && args[0] == "--verify-image")
 }
 
 void Check(bool result, string message) { if (!result) throw new Exception(message); Console.WriteLine("PASS " + message); }
+if (safe || args.Contains("--native-adapter")) NativeAdapterChecks.Run(Check);
+if (args.Contains("--native-adapter")) return;
 if (safe || args.Contains("--native-exit")) await NativeExitChecks.Run(Check);
 if (args.Contains("--native-exit")) return;
 if (safe || args.Contains("--native-startup")) NativeStartupChecks.Run(Check);
