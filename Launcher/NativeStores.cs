@@ -80,24 +80,6 @@ public sealed class NativeStores
     private bool RedundantPending(string folder) => folder.StartsWith("pending-", StringComparison.OrdinalIgnoreCase) &&
         !pending.Contains(folder) && !Catalog.Stores.Any(s => s.Folder.Equals(folder, StringComparison.OrdinalIgnoreCase)) &&
         !string.Equals(Catalog.Active, folder, StringComparison.OrdinalIgnoreCase);
-    // Only called after verification and capture succeed; cancellation/failure keeps its recovery snapshot.
-    internal void RemoveRedundantPending(NativeStore staged, NativeStore committed)
-    {
-        if (!RedundantPending(staged.Folder) || !Catalog.Stores.Contains(committed) || Catalog.Active != committed.Folder) return;
-        var storage = Storage(staged);
-        var keys = Path.Combine(storage, ".keys"); RegularPath(keys);
-        if (StorageSafety.DirectoryExists(keys))
-        {
-            using var directories = new SetupPayload.PinnedDirectories(keys, requireTrusted: false);
-            foreach (var key in Directory.EnumerateFiles(keys))
-            {
-                var saved = Path.Combine(Storage(committed), ".keys", Path.GetFileName(key)); RegularPath(saved);
-                if (StorageSafety.FileExists(saved) && ReadFile(key).AsSpan().SequenceEqual(ReadFile(saved))) DeleteFile(key);
-            }
-        }
-        DeleteFile(Path.Combine(storage, "account.dat"));
-        PrunePending(staged.Folder);
-    }
     internal void PrunePending(string folder)
     {
         if (!RedundantPending(folder)) return;
@@ -198,6 +180,48 @@ public sealed class NativeStores
         var previous = Catalog.Active;
         Catalog.Active = store.Folder;
         try { Save(); } catch { Catalog.Active = previous; throw; }
+    }
+    // Only called after native verification reconciles staging and Capture saves the current session.
+    internal void RemoveRedundantPending(NativeStore staging, NativeStore saved)
+    {
+        if (!RedundantPending(staging.Folder) ||
+            string.Equals(Catalog.Selected, staging.Folder, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(Catalog.Active, staging.Folder, StringComparison.OrdinalIgnoreCase) ||
+            !Catalog.Stores.Contains(saved) || saved.Profile is null || Catalog.Active != saved.Folder) return;
+        try
+        {
+            {
+                var source = Storage(staging); var destination = Storage(saved);
+                if (!StorageSafety.DirectoryExists(source) || !StorageSafety.FileExists(Path.Combine(destination, "account.dat"))) return;
+                using var sourceDirectories = new SetupPayload.PinnedDirectories(source, requireTrusted: false);
+                using var savedDirectories = new SetupPayload.PinnedDirectories(destination, requireTrusted: false);
+                using var capturedSession = SetupPayload.OpenSource(Path.Combine(destination, "account.dat"));
+                if (capturedSession.Length == 0) return;
+                var keys = Path.Combine(source, ".keys"); RegularPath(keys);
+                if (StorageSafety.DirectoryExists(keys))
+                {
+                    using var keyDirectories = new SetupPayload.PinnedDirectories(keys, requireTrusted: false);
+                    foreach (var key in Directory.EnumerateFiles(keys))
+                    {
+                        var captured = Path.Combine(destination, ".keys", Path.GetFileName(key)); RegularPath(captured);
+                        if (!StorageSafety.FileExists(captured)) continue;
+                        using var capturedDirectories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(captured)!, requireTrusted: false);
+                        using var capturedKey = SetupPayload.OpenSource(captured);
+                        using var stagingKey = SetupPayload.OpenSource(key, allowDelete: true);
+                        using var savedBytes = new MemoryStream(); capturedKey.CopyTo(savedBytes);
+                        using var stagedBytes = new MemoryStream(); stagingKey.CopyTo(stagedBytes);
+                        if (savedBytes.ToArray().AsSpan().SequenceEqual(stagedBytes.ToArray())) File.Delete(key);
+                    }
+                }
+                // The refreshed, verified capture supersedes this older session; leave runtime and unrelated files alone.
+                DeleteFile(Path.Combine(source, "account.dat"));
+            }
+            PrunePending(staging.Folder);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Trace.TraceWarning("Reconciled staging snapshot cleanup skipped; remaining files retained. " + ex.Message);
+        }
     }
     public void Activate(NativeStore store)
     {
