@@ -5,12 +5,13 @@ let tick, nativeLogouts = 0, generated = 0, requestId = 0, failLogin = false;
 const calls = [], created = [], browserUrls = [], events = {}, nativeActions = [];
 const deliveryFailures = new Map(), delivered = [];
 const timers = new Map();
-let timerId = 0, automaticSwitch = false, showDropdown = false, clickHandler, loadGate, urlGate;
+let timerId = 0, automaticSwitch = false, disconnected = false, loadGate, urlGate, commandGate, refresh;
 const accountB = { uuid: 'accountB-profile', username: 'accountB' };
 const accountA = { uuid: 'accountA-profile', username: 'accountA' };
 let nativeProfile = accountB;
 const user = { getUserProfile: accountB, async load() { const profile = nativeProfile; await loadGate; this.getUserProfile = profile; } };
-const state = { stores: [{ id: 'accountB', label: 'accountB' }, { id: 'accountA', label: 'accountA' }], active: 'accountB', selected: 'accountB', profile: accountB.uuid, busy: false, login: null };
+const state = { stores: [{ id: 'accountB', label: 'accountB' }, { id: 'accountA', label: 'accountA' },
+  { id: 'signed-out', label: 'Signed out', signedOut: true }], active: 'accountB', selected: 'accountB', profile: accountB.uuid, busy: false, holdLogin: false, login: null };
 const window = {
   go: { account: { Service: {
     GenerateOauthURL: async () => { generated++; await urlGate; if (failLogin) throw Error('native login failed'); return 'https://oauth.accounts.hytale.com/oauth2/auth?state=native-state&code_challenge=native-pkce'; },
@@ -24,30 +25,81 @@ const window = {
   } }, user: { Service: { GetUserProfile: async () => nativeProfile } } },
   runtime: { BrowserOpenURL: url => browserUrls.push(url), EventsOn: (name, fn) => { events[name] = fn; }, EventsEmit: name => events[name]?.() }
 };
-function element() {
-  return { dataset: {}, attributes: [], children: [], handlers: {}, attrs: {},
-    append(child) { this.children.push(child); }, setAttribute(name, value) { this.attrs[name] = value; },
-    addEventListener(name, fn) { this.handlers[name] = fn; }, remove() { list.children.splice(list.children.indexOf(this), 1); } };
+// shortcut: only the selectors/events used here are modeled; extend when production needs more DOM APIs.
+function element(className = '') {
+  return { className, dataset: {}, children: [], handlers: {}, attrs: {},
+    get attributes() { return Object.keys(this.attrs).map(name => ({ name })); },
+    append(child) { child.parent = this; this.children.push(child); },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    toggleAttribute(name, enabled) { if (enabled) this.attrs[name] = ''; else delete this.attrs[name]; },
+    addEventListener(name, fn, capture = false) { this.handlers[name] = { fn, capture }; },
+    remove() { this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null; },
+    matches(selector) {
+      if (selector === '[data-native-store]') return Object.hasOwn(this.dataset, 'nativeStore');
+      if (selector.startsWith('#')) return this.id === selector.slice(1);
+      assert(selector.startsWith('.') && !selector.includes(' '), 'unsupported fixture selector: ' + selector);
+      return this.className.split(' ').includes(selector.slice(1));
+    },
+    querySelectorAll(selector) {
+      return this.children.flatMap(child => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]);
+    },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; },
+    closest(selector) {
+      const parts = selector.split(' '), last = parts.pop();
+      for (let node = this; node; node = node.parent) {
+        if (node.matches(last) && (!parts.length || node.parent?.closest(parts.join(' ')))) return node;
+      }
+      return null;
+    }
+  };
 }
-const list = element();
-list.querySelector = () => list.children[0]; list.querySelectorAll = () => [...list.children];
-const document = {
-  addEventListener(name, fn) { if (name === 'click') clickHandler = fn; }, currentScript: { src: 'http://127.0.0.1:1234/cap/ui.js' },
-  createElement: tag => { created.push(tag); return element(); }, body: { append() {} },
-  querySelector: selector => selector === '.launch-game__profile-dropdown' && showDropdown ? { querySelector: () => list } : selector === '.login__container' ? {} : selector === '#app' ?
-    { __vue_app__: { config: { globalProperties: { $pinia: { _s: new Map([['user', user]]) } } } } } : null
+const document = element(), body = element(), login = element('login__container'), app = element();
+document.documentElement = element(); document.append(document.documentElement);
+document.body = body; document.documentElement.append(body); body.append(login); body.append(app);
+app.id = 'app'; app.__vue_app__ = { config: { globalProperties: { $pinia: { _s: new Map([['user', user]]) } } } };
+document.currentScript = { src: 'http://127.0.0.1:1234/cap/ui.js' };
+document.createElement = tag => { created.push(tag); return element(); };
+const dropdown = element('launch-game__profile-dropdown'), list = element('hy-dropdown__list');
+const nativeRow = element('hy-dropdown__item'); nativeRow.setAttribute('data-v-native', ''); list.append(nativeRow); dropdown.append(list);
+const play = element('launch-game__play-hytale'), playButton = element('hybutton-split__main'), playLabel = element();
+play.append(playButton); playButton.append(playLabel);
+let nativePlays = 0;
+playButton.addEventListener('click', () => { nativePlays++; });
+function dispatch(target, type = 'click', key) {
+  const event = { target, key, defaultPrevented: false, stopped: false,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() { this.stopped = true; }, stopImmediatePropagation() { this.stopped = true; } };
+  const capture = document.handlers[type];
+  if (capture) { assert.equal(capture.capture, true, 'Play protection must run before native handlers'); capture.fn(event); }
+  for (let node = target; node && !event.stopped; node = node.parent) {
+    if (!node.handlers[type]?.capture) node.handlers[type]?.fn(event);
+  }
+  return event;
+}
+const rows = () => list.querySelectorAll('[data-native-store]');
+const actionRow = () => rows().at(-1);
+async function command(action, store) {
+  const row = ['add', 'cancel'].includes(action) ? actionRow() : rows().find(row => row.dataset.nativeStore === store);
+  assert(row, 'account action must have a rendered row');
+  dispatch(row.children[0]);
+  await new Promise(setImmediate);
+}
+const playBlocked = () => {
+  const before = nativePlays, event = dispatch(playLabel);
+  assert.equal(event.stopped, event.defaultPrevented, 'blocked Play stops native propagation too');
+  assert.equal(nativePlays - before, event.defaultPrevented ? 0 : 1, 'verified Play retains the native handler');
+  return event.defaultPrevented;
 };
-const source = fs.readFileSync('Launcher/NativeDropdown.js', 'utf8')
-  .replace('  new MutationObserver', '  window.testCommand = command;\n  new MutationObserver');
+const source = fs.readFileSync('Launcher/NativeDropdown.js', 'utf8');
 vm.runInNewContext(source, {
   location: { origin: 'http://wails.localhost', pathname: '/launch-game' }, window, document, URL, AbortSignal, Date,
-  MutationObserver: class { observe() {} }, setInterval: fn => { tick = fn; },
+  MutationObserver: class { constructor(fn) { refresh = fn; } observe() {} }, setInterval: fn => { tick = fn; },
   setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; },
   clearTimeout: id => timers.delete(id),
   alert: message => { throw Error(message); },
   fetch: async (url, options) => {
     if (options.body) {
-      const data = JSON.parse(options.body); calls.push(data);
+      const data = JSON.parse(options.body); calls.push(data); await commandGate;
       if (deliveryFailures.get(data.request)) {
         deliveryFailures.set(data.request, deliveryFailures.get(data.request) - 1);
         throw Error('result POST failed before delivery');
@@ -70,6 +122,7 @@ vm.runInNewContext(source, {
         state.login = null; state.active = state.selected = data.username; state.profile = data.profile;
       }
     }
+    if (!options.body && disconnected) throw Error('helper disconnected');
     return { ok: true, json: async () => structuredClone(state) };
   }
 });
@@ -77,13 +130,62 @@ vm.runInNewContext(source, {
   await new Promise(setImmediate); // Allow the initial asynchronous poll to finish.
   await tick();
   assert.deepEqual(created, ['style'], 'native sign-in receives no account controls');
-  showDropdown = true;
-  await window.testCommand('add'); await tick(); await tick();
-  const actionRow = () => list.children.at(-1);
+  assert.equal(document.querySelector('.launch-game__profile-dropdown'), null);
+  assert.equal(login.children.length, 0, 'native sign-in receives no addon children');
+  login.remove(); body.append(dropdown); body.append(play); refresh();
+  assert.deepEqual(rows().map(row => [row.dataset.nativeStore, row.children[0].textContent]),
+    [['accountB', 'accountB'], ['accountA', 'accountA'], ['', 'Add account']], 'only usable saved accounts and Add render');
+  for (const row of rows()) {
+    assert.equal(row.className, 'hy-dropdown__item'); assert.equal(row.attrs['data-v-native'], '');
+    assert.equal(row.attrs.role, 'option'); assert.equal(row.attrs['aria-disabled'], 'false'); assert.equal(row.tabIndex, 0);
+    assert.equal(row.attrs['aria-selected'], String(row.dataset.nativeStore === state.active));
+  }
+  const initialRows = rows(); refresh();
+  assert.deepEqual(rows(), initialRows, 'unchanged refresh reuses existing rows');
+  assert(list.children.includes(nativeRow), 'refresh preserves the original native row');
+  assert(!playBlocked(), 'verified matching account permits native Play');
+  for (const change of [{ busy: true }, { holdLogin: true }, { selected: 'accountA' }, { profile: null }, { profile: accountA.uuid }]) {
+    const original = { ...state }; Object.assign(state, change); await tick();
+    assert(playBlocked(), 'Play blocked for ' + JSON.stringify(change));
+    if (change.busy) {
+      const before = calls.length;
+      await command('select', 'accountA'); await command('add');
+      assert.equal(calls.length, before, 'busy rows cannot invoke account commands');
+      assert(rows().every(row => row.attrs['aria-disabled'] === 'true' && row.tabIndex === -1));
+    }
+    Object.assign(state, original); await tick();
+    assert(!playBlocked(), 'verified state restores native Play');
+  }
+  user.getUserProfile = null;
+  assert(playBlocked(), 'missing native identity blocks Play'); user.getUserProfile = accountB;
+  disconnected = true; await tick();
+  assert(playBlocked(), 'disconnected helper blocks Play'); disconnected = false; await tick();
+  assert(!playBlocked(), 'verified reconnection restores native Play');
+  const beforeIgnoredKey = calls.length;
+  dispatch(rows()[1], 'keydown', 'Escape');
+  assert.equal(calls.length, beforeIgnoredKey, 'unrelated keys do not select an account');
+  let releaseCommand; commandGate = new Promise(resolve => { releaseCommand = resolve; });
+  const selecting = command('select', 'accountA');
+  assert(playBlocked(), 'pending command blocks Play before the helper responds');
+  assert.deepEqual(calls.at(-1), { action: 'select', store: 'accountA' }, 'saved-row click invokes select for its store');
+  const beforePendingClick = calls.length; dispatch(actionRow());
+  assert.equal(calls.length, beforePendingClick, 'pending command blocks a second row action');
+  releaseCommand(); await selecting; commandGate = null;
+  assert(!playBlocked(), 'completed command permits Play only after re-verification');
+  dispatch(rows()[1], 'keydown', ' '); await new Promise(setImmediate);
+  assert.deepEqual(calls.at(-1), { action: 'select', store: 'accountA' }, 'Space selects the saved account');
+  dispatch(rows()[0], 'keydown', 'Enter'); await new Promise(setImmediate);
+  assert.deepEqual(calls.at(-1), { action: 'select', store: 'accountB' }, 'Enter selects the correct saved account');
+  const beforeAdd = calls.length;
+  await command('add'); await tick(); await tick();
+  assert.deepEqual(calls[beforeAdd], { action: 'add' }, 'Add click invokes add without a store');
   assert.equal(actionRow().children[0].textContent, 'Cancel login');
-  assert.equal(list.children.length, state.stores.length + 1, 'Cancel reuses the Add row without an extra control');
+  assert.equal(rows().length, state.stores.filter(store => !store.signedOut).length + 1, 'Cancel reuses the Add row without an extra control');
   assert.equal(actionRow().attrs['aria-disabled'], 'false'); assert.equal(actionRow().tabIndex, 0);
-  assert.equal(list.children[0].attrs['aria-disabled'], 'true', 'switching stays disabled during login');
+  assert.equal(rows()[0].attrs['aria-disabled'], 'true', 'switching stays disabled during login');
+  const beforeDisabledClick = calls.length;
+  await command('select', 'accountA');
+  assert.equal(calls.length, beforeDisabledClick, 'login disables saved-account selection');
   assert.equal(generated, 1); assert.equal(browserUrls.length, 1, 'one Add opens the default browser exactly once');
   const authorization = new URL(browserUrls[0]);
   assert.equal(authorization.origin, 'https://oauth.accounts.hytale.com');
@@ -98,38 +200,31 @@ vm.runInNewContext(source, {
   assert.equal(state.active, 'accountA');
   assert.equal([...timers.values()].at(-1).delay, 0, 'completion refreshes the Add row without waiting for the idle poll');
   await tick(); assert.equal(actionRow().children[0].textContent, 'Add account', 'completion restores the existing Add row');
-  await window.testCommand('add'); await tick(); events.profile_changed(); await tick();
+  await command('add'); await tick(); events.profile_changed(); await tick();
   assert.equal(calls.at(-1).loginRequest, 'login-2', 'same-account login is confirmed by the native callback too');
   assert.equal(browserUrls.length, 2);
   await tick();
-  failLogin = true; await window.testCommand('add'); await tick();
+  failLogin = true; await command('add'); await tick();
   assert.equal(calls.at(-1).action, 'login-failed'); assert.equal(state.active, 'accountA');
   assert.equal(calls.at(-1).loginRequest, 'login-3', 'login failure is bound to its attempt');
   assert.equal([...timers.values()].at(-1).delay, 0, 'login failure begins native recovery immediately');
   assert.equal(browserUrls.length, 2, 'failed native URL generation preserves the current account');
   await tick();
-  assert(!calls.some(call => ['select', 'logout'].includes(call.action)), 'Add never requests a launcher switch or logout');
+  assert(!calls.slice(beforeAdd).some(call => ['select', 'logout'].includes(call.action)), 'Add never requests a launcher switch or logout');
   failLogin = false;
-  const playBlocked = () => {
-    let blocked = false;
-    clickHandler({ target: { closest: selector => selector.includes('play-hytale') ? {} : null },
-      preventDefault() { blocked = true; }, stopImmediatePropagation() {} });
-    return blocked;
-  };
-  await window.testCommand('add'); await tick();
+  await command('add'); await tick();
   assert(playBlocked(), 'Play is blocked while browser login is pending');
-  const rowEvent = { preventDefault() {}, stopPropagation() {}, key: 'Enter' };
-  actionRow().handlers.keydown(rowEvent); await new Promise(setImmediate); await tick();
+  dispatch(actionRow(), 'keydown', 'Enter'); await new Promise(setImmediate); await tick();
   assert(calls.some(call => call.action === 'cancel' && call.loginRequest === 'login-4'), 'keyboard activates Cancel on the reused row');
   assert.equal(state.login, null); assert.equal(state.active, 'accountA'); assert.equal(state.selected, 'accountA');
   assert.equal(actionRow().children[0].textContent, 'Add account'); assert(!playBlocked(), 'verified current account can Play after cancellation');
-  assert.equal(list.children[0].attrs['aria-disabled'], 'false', 'switching is enabled again');
+  assert.equal(rows()[0].attrs['aria-disabled'], 'false', 'switching is enabled again');
   events.reload(); await tick();
   assert(!calls.some(call => call.loginRequest === 'login-4' && call.action === 'ready'), 'late event after cancel cannot complete the cancelled login');
-  await window.testCommand('add'); await tick();
+  await command('add'); await tick();
   let releaseLoad; loadGate = new Promise(resolve => { releaseLoad = resolve; });
   events.profile_changed(); const oldCompletion = tick(); await new Promise(setImmediate);
-  await window.testCommand('cancel'); await window.testCommand('add');
+  await command('cancel'); await command('add');
   releaseLoad(); await oldCompletion; loadGate = null;
   assert(!calls.some(call => call.action === 'ready' && ['login-5', 'login-6'].includes(call.loginRequest)),
     'an in-flight old profile load cannot complete a cancelled or newer login');
@@ -137,19 +232,19 @@ vm.runInNewContext(source, {
   assert.equal(calls.at(-1).loginRequest, 'login-6', 'a fresh native event completes the newer login');
   await tick();
   let releaseUrl; urlGate = new Promise(resolve => { releaseUrl = resolve; });
-  await window.testCommand('add'); const oldOpen = tick(); await new Promise(setImmediate);
+  await command('add'); const oldOpen = tick(); await new Promise(setImmediate);
   events.reload();
   const beforeCancelledOpen = browserUrls.length;
-  await window.testCommand('cancel'); await window.testCommand('add');
+  await command('cancel'); await command('add');
   releaseUrl(); await oldOpen; urlGate = null;
   assert.equal(browserUrls.length, beforeCancelledOpen, 'cancelled URL generation cannot open the browser after retry');
   await tick();
   assert(!calls.some(call => call.action === 'ready' && call.loginRequest === 'login-8'), 'events before the new browser login opens cannot complete it');
-  actionRow().handlers.click(rowEvent); await new Promise(setImmediate); await tick();
+  dispatch(actionRow()); await new Promise(setImmediate); await tick();
   let rejectUrl;
   urlGate = new Promise((resolve, reject) => { rejectUrl = reject; });
-  await window.testCommand('add'); const oldFailure = tick(); await new Promise(setImmediate);
-  await window.testCommand('cancel'); await window.testCommand('add');
+  await command('add'); const oldFailure = tick(); await new Promise(setImmediate);
+  await command('cancel'); await command('add');
   rejectUrl(Error('old authentication failed')); await oldFailure; urlGate = null;
   assert(!calls.some(call => call.action === 'login-failed' && ['login-9', 'login-10'].includes(call.loginRequest)),
     'late URL failure cannot cancel a newer login');
@@ -184,6 +279,12 @@ vm.runInNewContext(source, {
   assert.equal(user.getUserProfile, null, 'native sign-in clears the existing frontend profile');
   assert.equal(nativeLogouts, 1, 'clearing cached state never logs out a fallback account');
   assert.equal(browserUrls.length, browserCount, 'logout and sign-in refresh never open the browser automatically');
+  dropdown.remove(); play.remove(); body.append(login);
+  const beforeSignIn = created.length; refresh(); await tick();
+  assert.equal(created.length, beforeSignIn, 'returning to native sign-in creates no addon controls');
+  assert.equal(document.querySelectorAll('[data-native-store]').length, 0);
+  assert.equal(login.children.length, 0, 'native sign-in stays free of Choose/Add account controls');
+  login.remove(); body.append(dropdown); body.append(play); refresh();
   state.session = null; state.busy = false; state.login = null;
   for (const operation of ['stop', 'load', 'run', 'clear', 'logout']) {
     timers.clear();
@@ -229,7 +330,7 @@ vm.runInNewContext(source, {
   assert.equal(timers.size, 0, 'idle frontend does not schedule fast polls');
   automaticSwitch = true;
   const beforeFastSwitch = nativeActions.length;
-  await window.testCommand('select', 'accountA');
+  await command('select', 'accountA');
   assert.equal([...timers.values()][0].delay, 0, 'the account click starts native processing immediately');
   let schedulingDelay = 0, polls = 0;
   while (state.busy || timers.size) {
@@ -243,6 +344,8 @@ vm.runInNewContext(source, {
   assert(schedulingDelay <= 100, 'three native stages have no multi-second artificial delay');
   assert.equal(user.getUserProfile.uuid, accountA.uuid);
   assert.equal(timers.size, 0, 'fast polling stops after the transition');
+  console.log('PASS production Play handler blocks pending, busy, disconnected and mismatched accounts; verified matching identity reaches native Play');
+  console.log('PASS dropdown renders usable saved accounts and Add, dispatches click/keyboard actions, and leaves native sign-in free of addon controls');
   console.log('PASS Add opens native Hytale login once, retains current account, confirms callbacks, and preserves login state/PKCE');
   console.log('PASS switching pauses, reloads and resumes native state once per request without logout or browser login');
   console.log('PASS logout executes once and final-account sign-in clears cached identity without logging out other accounts');
