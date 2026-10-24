@@ -37,7 +37,21 @@ $before = Get-LauncherSnapshot $official
 if (!$UserOnly -and (Test-Path -LiteralPath $RegistryPath)) {
     if ((Get-ItemProperty -LiteralPath $RegistryPath).InstallLocation -ne $destination) { throw 'Another installation owns the uninstall entry; preserved.' }
 }
-if (!$UserOnly) { Stop-InstalledLauncher $installed -IncludeOfficial }
+if (!$UserOnly) {
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '"')
+    $repairTask = Get-ScheduledTask -TaskName 'HytaleAccounts-Repair' -ErrorAction SilentlyContinue
+    if ($repairTask -and (@($repairTask.Actions).Count -ne 1 -or $repairTask.Actions[0].Execute -cne $powershell -or $repairTask.Actions[0].Arguments -cne $action.Arguments)) { throw 'Another task owns the shortcut repair entry; preserved.' }
+    if ($UserSid) {
+        $sid = [Security.Principal.SecurityIdentifier]::new($UserSid)
+        if (!$sid.IsAccountSid()) { throw 'Invalid shortcut user SID.' }
+        $userAction = New-ScheduledTaskAction -Execute $powershell -Argument ($action.Arguments + ' -UserOnly')
+        $userTaskName = 'HytaleAccounts-Repair-' + $sid.Value
+        $existingTask = Get-ScheduledTask -TaskName $userTaskName -ErrorAction SilentlyContinue
+        if ($existingTask -and (@($existingTask.Actions).Count -ne 1 -or $existingTask.Actions[0].Execute -cne $powershell -or $existingTask.Actions[0].Arguments -cne $userAction.Arguments)) { throw 'Another task owns the user shortcut repair entry; preserved.' }
+    }
+    Stop-InstalledLauncher $installed -IncludeOfficial
+}
 $journalLock = Open-ShortcutJournal $state
 $manifestPath = Join-Path $state 'shortcuts.json'
 Assert-RegularPath $manifestPath
@@ -79,22 +93,12 @@ $properties = @{
     UninstallString = '"' + $installed + '" --uninstall'; DisplayIcon = "$official,0"
 }
 foreach ($name in $properties.Keys) { New-ItemProperty -LiteralPath $RegistryPath -Name $name -Value $properties[$name] -PropertyType String -Force | Out-Null }
-$powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$action = New-ScheduledTaskAction -Execute $powershell -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '"')
-$repairTask = Get-ScheduledTask -TaskName 'HytaleAccounts-Repair' -ErrorAction SilentlyContinue
-if ($repairTask -and (@($repairTask.Actions).Count -ne 1 -or $repairTask.Actions[0].Execute -cne $powershell -or $repairTask.Actions[0].Arguments -cne $action.Arguments)) { throw 'Another task owns the shortcut repair entry; preserved.' }
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
 $settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName 'HytaleAccounts-Repair' -Action $action -Trigger $trigger -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
 if ($UserSid) {
-    $sid = [Security.Principal.SecurityIdentifier]::new($UserSid)
-    if (!$sid.IsAccountSid()) { throw 'Invalid shortcut user SID.' }
-    $userAction = New-ScheduledTaskAction -Execute $powershell -Argument ($action.Arguments + ' -UserOnly')
-    $name = 'HytaleAccounts-Repair-' + $sid.Value
-    $existingTask = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-    if ($existingTask -and (@($existingTask.Actions).Count -ne 1 -or $existingTask.Actions[0].Execute -cne $powershell -or $existingTask.Actions[0].Arguments -cne $userAction.Arguments)) { throw 'Another task owns the user shortcut repair entry; preserved.' }
     $principal = New-ScheduledTaskPrincipal -UserId $sid.Value -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $name -Action $userAction -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    Register-ScheduledTask -TaskName $userTaskName -Action $userAction -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 }
 Assert-LauncherSnapshot $official $before
 Write-Output 'Installed. Official launcher bytes and permissions preserved.'
