@@ -1,6 +1,4 @@
 using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.AccessControl;
 using System.Text;
@@ -163,46 +161,6 @@ public sealed class PatchInstaller
             throw new IOException(IntegrationSafety.CompatibilityMessage(Target));
         await publisher(Target); RequireHash(Target, IntegrationSafety.SupportedHash);
         _ = Patch(File.ReadAllBytes(Target), 49152, new string('a', 43));
-    }
-    public async Task Install(string helper)
-    {
-        using var gate = Lock();
-        if (File.Exists(Journal))
-        {
-            var old = await RecoverCore();
-            if (old.Phase == "installed")
-            {
-                // Reinstall can repair/upgrade the helper without changing the launcher or bootstrap.
-                RequireHash(Target, old.PatchedHash);
-                var replacement = File.ReadAllBytes(helper);
-                var helperHash = Hash(replacement);
-                if (!File.Exists(HelperPath) || Hash(HelperPath) != helperHash)
-                {
-                    NativeStores.AtomicWrite(HelperPath, replacement); RequireHash(HelperPath, helperHash);
-                    Checkpoint?.Invoke("helper");
-                }
-                if (old.HelperHash != helperHash) Save(old = old with { HelperHash = helperHash });
-                VerifyInstalled(old); return;
-            }
-        }
-        await CheckOriginal();
-        var permissions = Permissions(Target);
-        var original = File.ReadAllBytes(Target);
-        if (Hash(original) != IntegrationSafety.SupportedHash) throw new IOException("Official launcher changed before installation; files preserved.");
-        if (File.Exists(BackupPath)) RequireHash(BackupPath, IntegrationSafety.SupportedHash);
-        else NativeStores.AtomicWrite(BackupPath, original);
-        Checkpoint?.Invoke("backup");
-        RequireHash(BackupPath, IntegrationSafety.SupportedHash); await publisher(BackupPath);
-        var helperBytes = File.ReadAllBytes(helper);
-        NativeStores.AtomicWrite(HelperPath, helperBytes); RequireHash(HelperPath, Hash(helperBytes));
-        using var reservation = new TcpListener(IPAddress.Loopback, 0); reservation.Start();
-        var port = ((IPEndPoint)reservation.LocalEndpoint).Port; reservation.Stop();
-        var capability = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
-        var patched = Patch(original, port, capability);
-        var record = new PatchRecord(2, Target, IntegrationSafety.SupportedHash, Hash(patched), Hash(helperBytes), port, capability, "prepared", permissions);
-        Save(record); await VerifyBackup(record);
-        Swap(patched, record.OriginalHash, record.PatchedHash, record.OriginalPermissions);
-        Save(record with { Phase = "installed" });
     }
     public async Task<PatchRecord> Recover() { using var gate = Lock(); return await RecoverCore(); }
     private async Task<PatchRecord> RecoverCore()
