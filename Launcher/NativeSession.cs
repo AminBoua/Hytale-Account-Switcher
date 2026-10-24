@@ -116,6 +116,8 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         RequireNoGame();
         stores.Capture(active);
         pendingLogin = stores.CreatePending();
+        // Native authentication may replace account.dat before its completion is acknowledged.
+        verifiedSession = false;
         message = "Complete Hytale authentication in your browser.";
         await Publish();
         return true;

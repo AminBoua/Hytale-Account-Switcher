@@ -16,7 +16,7 @@ internal static class NativeExitChecks
 
     public static async Task Run(Action<bool, string> check)
     {
-        foreach (var failure in new[] { "snapshot", "runtime", "status", "none" })
+        foreach (var failure in new[] { "snapshot", "runtime", "status", "none", "pending-login" })
         {
             var root = SecurityFixture.Create("native-exit-");
             var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "Checks.exe"))
@@ -27,6 +27,7 @@ internal static class NativeExitChecks
             try
             {
                 check(await child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)) == "ready", "synthetic hidden helper starts: " + failure);
+                var metadata = File.ReadAllBytes(Path.Combine(root, "Accounts", "native-stores.json"));
                 using (var held = new Mutex(false, MutexName(root), out var first)) check(!first, "helper holds its single-instance mutex before native exit");
                 await child.StandardInput.WriteLineAsync("exit"); await child.StandardInput.FlushAsync();
                 try { await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); }
@@ -34,11 +35,15 @@ internal static class NativeExitChecks
                 check(child.ExitCode == 0, "helper exits through App shutdown after " + failure + ": " + await errors);
                 using (var released = new Mutex(false, MutexName(root), out var first)) check(first, "App exit releases the single-instance mutex");
                 var log = File.ReadAllText(Path.Combine(root, "helper.log"));
-                check(log.Contains(failure == "none" ? "Native launcher closed." : "Native launcher cleanup failed; files preserved."), "exit outcome is logged: " + failure);
+                check(log.Contains(failure is "none" or "pending-login" ? "Native launcher closed." : "Native launcher cleanup failed; files preserved."), "exit outcome is logged: " + failure);
                 check(File.ReadAllText(Path.Combine(root, "account.dat")) == "opaque-current" &&
                     File.ReadAllText(Path.Combine(root, "Accounts", "run", "hytale-launcher.exe")) == "generated runtime fixture" &&
                     File.ReadAllText(Directory.GetFiles(Path.Combine(root, "Accounts"), "account.dat", SearchOption.AllDirectories).Single()) ==
-                        (failure == "snapshot" ? "opaque-saved" : "opaque-current"), "affected native session and runtime files are preserved: " + failure);
+                        (failure is "snapshot" or "pending-login" ? "opaque-saved" : "opaque-current"), "affected native session and runtime files are preserved: " + failure);
+                if (failure == "pending-login")
+                    check(File.ReadAllBytes(Path.Combine(root, "Accounts", "native-stores.json")).SequenceEqual(metadata) &&
+                        File.ReadAllText(Path.Combine(root, ".keys", "recovery")) == "opaque-accountB-key",
+                        "exit during unacknowledged Add preserves account A identity/selection and account B native recovery data");
             }
             finally
             {
@@ -79,6 +84,19 @@ internal static class NativeExitChecks
                 using var owned = ExitedProcess(); await owned.WaitForExitAsync();
                 session = new NativeSession(stores, Dispatcher);
                 Set(session, "launcher", owned); Set(session, "active", account); Set(session, "verifiedSession", true);
+                if (failure == "pending-login")
+                {
+                    File.WriteAllText(official, "opaque-saved");
+                    Set(session, "launcher", replacement);
+                    if (!await session.AddAccount() || !session.IsOpen || !stores.Catalog.Stores.SequenceEqual(new[] { account }) ||
+                        stores.Catalog.Selected != account.Folder || stores.Catalog.Active != account.Folder)
+                        throw new Exception("Add changed account A identity, selection or launcher ownership.");
+                    // Native authentication writes account B before its completion is acknowledged.
+                    File.WriteAllText(official, "opaque-current");
+                    Directory.CreateDirectory(Path.Combine(root, ".keys"));
+                    File.WriteAllText(Path.Combine(root, ".keys", "recovery"), "opaque-accountB-key");
+                    Set(session, "launcher", owned);
+                }
                 if (failure == "runtime") Set(session, "runImage", runtime);
                 using var locked = failure is "snapshot" or "runtime" ? new FileStream(failure == "snapshot" ? official : runtime,
                     FileMode.Open, FileAccess.Read, failure == "snapshot" ? FileShare.None : FileShare.Read) : null;
