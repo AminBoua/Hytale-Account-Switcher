@@ -46,23 +46,35 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         }
         if (action.GetString() is "cancel" or "login-failed")
         {
-            if (pendingLogin is null) return false;
+            if (busy || pendingLogin is null || active is null || !data.TryGetProperty("loginRequest", out var request) || request.GetString() != pendingLogin.Folder) return false;
             stores.DiscardPending(pendingLogin); pendingLogin = null;
-            message = "Browser login cancelled. Current account kept.";
+            var previous = active;
+            // Shutdown closes native OAuth's loopback; restore the pre-Add snapshot if a callback already wrote account.dat.
+            verifiedSession = false; busy = true; holdLogin = true;
+            _ = dispatcher.BeginInvoke(new Action(async () =>
+            {
+                await SwitchCore(previous, false);
+                if (verifiedSession) { message = "Browser login cancelled. Current account kept."; await Publish(); }
+            }), DispatcherPriority.Background);
             await Publish();
             return true;
         }
         if (action.GetString() == "ready")
         {
+            // Validate the attempt before touching native identity or completing startup.
+            if (data.TryGetProperty("loginRequest", out var request))
+            {
+                if (pendingLogin is null || request.GetString() != pendingLogin.Folder) return false;
+            }
+            else if (pendingLogin is not null) return false;
             Guid? profile = data.TryGetProperty("profile", out var value) && Guid.TryParse(value.GetString(), out var id) ? id : null;
-            nativeName = data.TryGetProperty("username", out var name) ? name.GetString() : null;
             if (profile == Guid.Empty) return false;
+            nativeName = data.TryGetProperty("username", out var name) ? name.GetString() : null;
             ready?.TrySetResult(profile);
             if (!busy && active is not null && profile is Guid verified)
             {
                 if (pendingLogin is not null)
                 {
-                    if (!data.TryGetProperty("loginRequest", out var request) || request.GetString() != pendingLogin.Folder) return false;
                     active = pendingLogin;
                 }
                 CommitProfile(verified, true);

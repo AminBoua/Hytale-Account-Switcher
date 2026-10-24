@@ -9,7 +9,7 @@
   (document.head ?? document.body).append(style);
   const url = new URL(document.currentScript.src);
   const capability = url.pathname.split('/')[1];
-  let state, user, pending = false, signature = '', reported = '', loginSince = 0, loginOpened = '', loginCompleted = false;
+  let state, user, pending = false, signature = '', reported = '', loginSince = 0, loginOpened = '', loginCompleted = '';
   let logoutAttempt = '';
   let sessionAttempt = '', updating = false;
   let listening = false;
@@ -30,14 +30,17 @@
   }
   async function command(action, store) {
     if (!state || ((state.busy || state.login) && action !== 'cancel') || pending) return;
+    const loginRequest = state.login;
     pending = true; commandVersion++;
-    try { await request('command', { action, ...(store ? { store } : {}) }); }
+    if (action === 'cancel') { loginCompleted = ''; reported = ''; }
+    try { await request('command', { action, ...(store ? { store } : {}), ...(action === 'cancel' ? { loginRequest } : {}) }); }
     catch (error) { alert(error.message); }
     finally {
       // Discard polls started before this command; never allow Play against stale switch state.
       commandVersion++; state = null;
       try { state = await request('state'); } catch { /* Keep Play blocked while disconnected. */ }
       pending = false;
+      refresh();
       wake();
     }
   }
@@ -80,7 +83,7 @@
       list.append(item);
     }
     state.stores.filter(store => !store.signedOut).forEach(store => row(store.label, store.id, 'select'));
-    row('Add account', '', 'add');
+    row(state.login ? 'Cancel login' : 'Add account', '', state.login ? 'cancel' : 'add');
     // Verified Play retains its native handler; settings has its own independent control.
   }
   async function update() {
@@ -91,13 +94,18 @@
       const next = await request('state');
       if (version !== commandVersion) return;
       state = next;
+      const loginRequest = state.login;
+      const current = () => version === commandVersion && state?.login === loginRequest;
       if (!listening && window.runtime?.EventsOn) {
         for (const event of ['reload', 'profile_changed'])
-          window.runtime.EventsOn(event, () => { if (state?.login) { loginCompleted = true; reported = ''; } });
+          window.runtime.EventsOn(event, () => {
+            if (!pending && state?.login && loginOpened === state.login) { loginCompleted = loginOpened; reported = ''; }
+          });
         listening = true;
       }
       document.documentElement?.setAttribute('data-account-ready', '');
       document.documentElement?.toggleAttribute('data-account-transition', !!state.holdLogin);
+      refresh();
       if (state.session) {
         if (sessionAttempt !== state.session.request) {
           const operation = state.session.operation, requestId = state.session.request;
@@ -139,31 +147,39 @@
         }
         return;
       }
-      if (state.login && loginOpened !== state.login) {
-        loginOpened = state.login; loginCompleted = false;
+      if (loginRequest && loginOpened !== loginRequest) {
+        loginCompleted = '';
         try {
           const authorization = new URL(await window.go.account.Service.GenerateOauthURL());
+          if (!current()) return;
           if (authorization.protocol !== 'https:' || authorization.hostname !== 'oauth.accounts.hytale.com') throw new Error('Invalid native login URL.');
           authorization.searchParams.set('prompt', 'login');
+          loginOpened = loginRequest;
           await window.runtime.BrowserOpenURL(authorization.href);
         } catch {
-          await request('command', { action: 'login-failed' });
+          if (current()) { await request('command', { action: 'login-failed', loginRequest }); wake(); }
           return;
         }
       }
-      if (state.login && location.pathname.startsWith('/error')) {
-        await request('command', { action: 'login-failed' });
+      if (!current()) return;
+      if (loginRequest && location.pathname.startsWith('/error')) {
+        await request('command', { action: 'login-failed', loginRequest });
+        wake();
+        return;
       }
       if (!user) user = document.querySelector('#app')?.__vue_app__?.config.globalProperties.$pinia?._s.get('user');
       if (!user) return;
-      if (state.login && loginCompleted) await user.load();
+      if (loginRequest && loginCompleted === loginRequest) await user.load();
+      if (!current()) return;
       const profile = user.getUserProfile?.uuid;
       if (!profile && document.querySelector('.login__container')) loginSince ||= Date.now();
       else loginSince = 0;
       const identity = profile || 'signed-out';
-      if ((!state.login || loginCompleted) && reported !== identity && (profile || (loginSince && Date.now() - loginSince >= 3000))) {
+      if ((!loginRequest || loginCompleted === loginRequest) && reported !== identity && (profile || (loginSince && Date.now() - loginSince >= 3000))) {
         await request('command', { action: 'ready', profile: profile ?? null, username: user.getUserProfile?.username ?? null,
-          ...(state.login ? { loginRequest: state.login } : {}) }); reported = identity;
+          ...(loginRequest ? { loginRequest } : {}) });
+        if (current()) reported = identity;
+        wake();
       }
       refresh();
     } catch { state = null; /* Block new Play until the selected native identity is verified again. */ }

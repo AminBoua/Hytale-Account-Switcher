@@ -167,7 +167,7 @@ public sealed class NativeStores
     public void Activate(NativeStore store)
     {
         RequireIdle();
-        ActivateCore(store);
+        ActivateCore(store, restoreSnapshot: false);
     }
     // Caller has acknowledged native Shutdown, which pauses refresh without revoking login.
     internal void ActivatePaused(NativeStore store, Process owner)
@@ -181,13 +181,13 @@ public sealed class NativeStores
         var games = Process.GetProcessesByName("HytaleClient");
         try { if (games.Length != 0) throw new IOException("Close the game before switching accounts."); }
         finally { foreach (var game in games) game.Dispose(); }
-        ActivateCore(store);
+        ActivateCore(store, restoreSnapshot: true);
     }
-    private void ActivateCore(NativeStore store)
+    private void ActivateCore(NativeStore store, bool restoreSnapshot)
     {
         if (!Catalog.Stores.Contains(store) && !IsPending(store)) throw new IOException("Unknown native store.");
         // A normal restart keeps Hytale's latest refreshed session, not an older snapshot.
-        if (Catalog.Active == store.Folder) return;
+        if (!restoreSnapshot && Catalog.Active == store.Folder) return;
         var storage = Storage(store); RegularPath(storage);
         using var nativeDirectories = new SetupPayload.PinnedDirectories(HytaleRoot, requireTrusted: false, forMutation: true);
         using var sourceDirectories = new SetupPayload.PinnedDirectories(StorageSafety.DirectoryExists(storage) ? storage : Folder(store.Folder), requireTrusted: false, forMutation: true);

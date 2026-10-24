@@ -74,7 +74,8 @@ internal static class NativeSessionChecks
                             http.DefaultRequestHeaders.Add("Origin", LocalAccountBridge.Origin);
                             http.DefaultRequestHeaders.Add("Authorization", "Bearer " + bootstrap.Groups["cap"].Value);
                             using var response = await http.PostAsync("http://127.0.0.1:" + bootstrap.Groups["port"].Value + "/command",
-                                new System.Net.Http.StringContent(JsonSerializer.Serialize(new { action = abort }), Encoding.UTF8, "application/json"));
+                                new System.Net.Http.StringContent(JsonSerializer.Serialize(new { action = abort,
+                                    loginRequest = ((NativeStore?)typeof(NativeSession).GetField("pendingLogin", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(login))?.Folder }), Encoding.UTF8, "application/json"));
                             response.EnsureSuccessStatusCode();
                         }
                         var loginDeadline = DateTime.UtcNow.AddMinutes(5);

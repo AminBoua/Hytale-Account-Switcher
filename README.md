@@ -50,6 +50,7 @@ On first launch, an existing official session is adopted after Hytale verifies i
 | To… | Do this |
 | --- | --- |
 | Add an account | Open the profile dropdown, choose **Add account**, and finish Hytale authentication in your normal browser. |
+| Cancel an unfinished login | Choose **Cancel login** in the same dropdown. Your current account stays selected, and the row returns to **Add account**. |
 | Switch accounts | Close the game, then select a saved account from the dropdown. No browser login or launcher restart is needed for a usable saved session. |
 | Play | Wait for the selected account to finish loading, then use Hytale's normal **Play** button. |
 | Log out | Use Hytale's logout action in settings. Only the current account is logged out; another usable saved account is restored if available. |
