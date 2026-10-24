@@ -66,10 +66,13 @@ try {
     if ($before) { Assert-LauncherSnapshot $official $before }
     # Only exact addon-owned files; accounts, encryption keys, worlds and Hytale remain untouched.
     $files = @('HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json')
-    foreach ($name in $files) { Assert-RegularPath (Join-Path $destination $name) }
-    # Keep recovery state and the Apps entry until payload removal succeeds, starting with the executable.
-    foreach ($name in $files) { $path = Join-Path $destination $name; if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }
-    Remove-ShortcutStateFiles
+    $files += @('shortcuts.json','shortcuts.new') + @($records | Where-Object Backup | ForEach-Object Backup)
+    $removalFiles = @()
+    try {
+        # Validate and hold every target before deleting any, preserving the Apps retry path on a lock.
+        foreach ($name in $files) { $removalFiles += Open-ShortcutFile (Join-Path $destination $name) }
+        foreach ($file in $removalFiles) { if ($file.Exists) { $file.Delete() } }
+    } finally { foreach ($file in $removalFiles) { $file.Dispose() } }
     $journalLock.Delete(); $journalLock.Dispose(); $journalLock = $null
     if (!(Get-ChildItem -LiteralPath $destination -Force)) { [IO.Directory]::Delete($destination) }
     if (Test-Path -LiteralPath $RegistryPath) {
