@@ -73,7 +73,8 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             ready?.TrySetResult(profile);
             if (!busy && active is not null && profile is Guid verified)
             {
-                if (pendingLogin is not null)
+                // A failed capture may already have resolved this attempt to a saved account.
+                if (pendingLogin is not null && stores.IsPending(pendingLogin))
                 {
                     active = pendingLogin;
                 }

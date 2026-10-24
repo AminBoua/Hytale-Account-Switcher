@@ -103,9 +103,10 @@ vm.runInNewContext(source, {
   fetch: async (url, options) => {
     if (options.body) {
       const data = JSON.parse(options.body); calls.push(data); await commandGate;
-      if (deliveryFailures.get(data.request)) {
-        deliveryFailures.set(data.request, deliveryFailures.get(data.request) - 1);
-        throw Error('result POST failed before delivery');
+      const failureKey = data.request ?? data.loginRequest;
+      if (deliveryFailures.get(failureKey)) {
+        deliveryFailures.set(failureKey, deliveryFailures.get(failureKey) - 1);
+        throw Error('command POST failed before delivery');
       }
       delivered.push(data);
       if (data.action === 'add') state.login = 'login-' + ++requestId;
@@ -226,8 +227,16 @@ vm.runInNewContext(source, {
   assert.equal(state.active, 'accountA');
   assert.equal([...timers.values()].at(-1).delay, 0, 'completion refreshes the Add row without waiting for the idle poll');
   await tick(); assert.equal(actionRow().children[0].textContent, 'Add account', 'completion restores the existing Add row');
+  deliveryFailures.set('login-2', 1);
   await command('add'); await tick(); events.profile_changed(); await tick();
   assert.equal(calls.at(-1).loginRequest, 'login-2', 'same-account login is confirmed by the native callback too');
+  const completion = calls.at(-1);
+  assert(playBlocked(), 'failed account completion keeps Play blocked');
+  await tick();
+  assert.deepEqual(delivered.at(-1), completion, 'account completion retries the same request and identity');
+  assert(playBlocked(), 'Play stays blocked until the completed transition is read back');
+  await tick();
+  assert(!playBlocked(), 'Play resumes after the retried completion is verified');
   assert.equal(browserUrls.length, 2);
   await tick();
   failLogin = true; await command('add'); await tick();
