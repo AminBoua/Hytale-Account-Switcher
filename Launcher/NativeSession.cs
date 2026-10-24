@@ -137,7 +137,8 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     private void CommitProfile(Guid profile, bool select)
     {
         if (active is null) throw new IOException("No active native account.");
-        if (stores.IsPending(active))
+        var staging = stores.IsPending(active) ? active : null;
+        if (staging is not null)
         {
             active = stores.CommitPending(active, profile, nativeName);
         }
@@ -149,6 +150,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         }
         verifiedSession = true;
         stores.Capture(active);
+        if (staging is not null) stores.RemoveReconciledSnapshot(staging, active);
     }
     private async Task OpenCore(NativeStore store, bool commit)
     {
