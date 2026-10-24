@@ -137,6 +137,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     private void CommitProfile(Guid profile, bool select)
     {
         if (active is null) throw new IOException("No active native account.");
+        var staged = stores.IsPending(active) ? active : null;
         if (stores.IsPending(active))
         {
             active = stores.CommitPending(active, profile, nativeName);
@@ -149,6 +150,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         }
         verifiedSession = true;
         stores.Capture(active);
+        if (staged is not null) stores.RemoveRedundantPending(staged, active);
     }
     private async Task OpenCore(NativeStore store, bool commit)
     {
@@ -435,6 +437,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             File.Delete(runImage);
             var directory = Path.GetDirectoryName(runImage)!;
             if (!Directory.EnumerateFileSystemEntries(directory).Any()) Directory.Delete(directory);
+            stores.PrunePending(Path.GetFileName(Path.GetDirectoryName(directory)!));
             runImage = null;
         }
         if (bridge is not null) { await bridge.DisposeAsync(); bridge = null; }
