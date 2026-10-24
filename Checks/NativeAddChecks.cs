@@ -112,6 +112,26 @@ internal static class NativeAddChecks
             check(await Command(new { action = "ready", loginRequest = second, profile = oldProfile, username = "accountB" }) &&
                 Get("pendingLogin") is null && stores.Catalog.Selected == current.Folder && stores.Catalog.Stores.Count == 2,
                 "a matching same-account completion clears pending login without duplicating the saved account");
+            check(await session.AddAccount(), "Add can reauthenticate another saved account");
+            var retry = (NativeStore)Get("pendingLogin")!;
+            var previousMetadata = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
+            File.WriteAllText(officialSession, "opaque-refreshed-A-session");
+            using (var locked = File.Open(Path.Combine(stores.Folder(other.Folder), "AppData", "Hytale", "account.dat"), FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                try { await Command(new { action = "ready", loginRequest = retry.Folder, profile = other.Profile, username = "accountA" }); throw new Exception("Locked capture committed"); }
+                catch (IOException) { }
+                check((NativeStore?)Get("pendingLogin") == retry && stores.IsPending(retry) && (NativeStore?)Get("active") == current && Get("verifiedSession") is false &&
+                    stores.Catalog.Selected == current.Folder && File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(previousMetadata) &&
+                    session.IsOpen && !process.HasExited, "failed saved-account capture keeps a recoverable attempt, prior selection and existing process unverified");
+            }
+            check(await Command(new { action = "ready", loginRequest = retry.Folder, profile = other.Profile, username = "accountA" }) &&
+                Get("pendingLogin") is null && Get("verifiedSession") is true && stores.Catalog.Selected == other.Folder &&
+                stores.Catalog.Stores.Count == 2 && File.ReadAllText(Path.Combine(stores.Folder(other.Folder), "AppData", "Hytale", "account.dat")) == "opaque-refreshed-A-session",
+                "retry after unlocking captures and selects the existing account without losing the pending marker or duplicating accounts");
+            File.WriteAllText(officialSession, "opaque-accountA-session"); stores.Capture(other);
+            restored = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            check(await Command(new { action = "select", store = current.Folder }), "switching back is accepted after capture retry");
+            await restored.Task.WaitAsync(TimeSpan.FromSeconds(5));
             restored = new(TaskCreationOptions.RunContinuationsAsynchronously);
             check(await Command(new { action = "select", store = other.Folder }), "switching is accepted after cancellation and completion");
             await restored.Task.WaitAsync(TimeSpan.FromSeconds(5));

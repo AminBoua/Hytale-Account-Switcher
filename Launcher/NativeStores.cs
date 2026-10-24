@@ -15,12 +15,14 @@ public sealed class NativeCatalog
 }
 public sealed class NativeStores
 {
+    private sealed record LauncherUpdate(string ImageHash, string BaseHash);
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
     public string HytaleRoot { get; }
     public string Root => Path.Combine(HytaleRoot, "Accounts");
     private string Metadata => Path.Combine(Root, "native-stores.json");
     public NativeCatalog Catalog { get; }
     private readonly HashSet<string> pending = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HashSet<string>> pendingFiles = new(StringComparer.OrdinalIgnoreCase);
     public bool IsPending(NativeStore store) => pending.Contains(store.Folder);
     public NativeStores(string? root = null)
     {
@@ -73,10 +75,9 @@ public sealed class NativeStores
         var store = new NativeStore("pending-" + Guid.NewGuid().ToString("N"), "New native account");
         PrivateFiles.CreateDirectory(Folder(store.Folder));
         pending.Add(store.Folder);
+        pendingFiles.Add(store.Folder, new(StringComparer.OrdinalIgnoreCase));
         return store;
     }
-    // Native files remain private and undiscovered after cancellation; never traverse shared junctions.
-    public void DiscardPending(NativeStore store) => pending.Remove(store.Folder);
     private bool RedundantPending(string folder) => folder.StartsWith("pending-", StringComparison.OrdinalIgnoreCase) &&
         !pending.Contains(folder) && !Catalog.Stores.Any(s => s.Folder.Equals(folder, StringComparison.OrdinalIgnoreCase)) &&
         !string.Equals(Catalog.Active, folder, StringComparison.OrdinalIgnoreCase);
@@ -84,6 +85,7 @@ public sealed class NativeStores
     internal void RemoveRedundantPending(NativeStore staged, NativeStore committed)
     {
         if (!RedundantPending(staged.Folder) || !Catalog.Stores.Contains(committed) || Catalog.Active != committed.Folder) return;
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var storage = Storage(staged);
         var keys = Path.Combine(storage, ".keys"); RegularPath(keys);
         if (StorageSafety.DirectoryExists(keys))
@@ -92,11 +94,12 @@ public sealed class NativeStores
             foreach (var key in Directory.EnumerateFiles(keys))
             {
                 var saved = Path.Combine(Storage(committed), ".keys", Path.GetFileName(key)); RegularPath(saved);
-                if (StorageSafety.FileExists(saved) && ReadFile(key).AsSpan().SequenceEqual(ReadFile(saved))) DeleteFile(key);
+                if (StorageSafety.FileExists(saved) && ReadFile(key).AsSpan().SequenceEqual(ReadFile(saved))) files.Add(key);
             }
         }
-        DeleteFile(Path.Combine(storage, "account.dat"));
-        PrunePending(staged.Folder);
+        files.Add(Path.Combine(storage, "account.dat"));
+        pendingFiles[staged.Folder] = files;
+        CleanupPending();
     }
     internal void PrunePending(string folder)
     {
@@ -112,13 +115,34 @@ public sealed class NativeStores
             Directory.Delete(path); // Nonrecursive: runtime images and unexpected files keep their directories alive.
         }
     }
+    public void DiscardPending(NativeStore store)
+    {
+        pending.Remove(store.Folder);
+        CleanupPending();
+    }
+    internal void CleanupPending()
+    {
+        foreach (var (folder, files) in pendingFiles.ToArray())
+        {
+            if (Catalog.Stores.Any(s => s.Folder == folder)) { pendingFiles.Remove(folder); continue; }
+            if (pending.Contains(folder)) continue;
+            foreach (var file in files.ToArray())
+            {
+                try { DeleteFile(file); files.Remove(file); }
+                // Keep blocked files queued for another attempt after the runtime image is released.
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Trace.TraceWarning(ex.Message); }
+            }
+            PrunePending(folder);
+            if (files.Count == 0) pendingFiles.Remove(folder);
+        }
+    }
     public NativeStore CommitPending(NativeStore store, Guid profile, string? username)
     {
         if (!IsPending(store) || profile == Guid.Empty) throw new IOException("Pending native login is not verified.");
         var existing = Catalog.Stores.FirstOrDefault(s => s.Profile == profile);
         if (existing is not null)
         {
-            VerifyProfile(existing, profile, true, username); DiscardPending(store);
+            VerifyProfile(existing, profile, true, username); pending.Remove(store.Folder);
             return Catalog.Stores.Single(s => s.Folder == existing.Folder);
         }
         var previous = Catalog.Selected;
@@ -165,7 +189,7 @@ public sealed class NativeStores
     // Hytale writes the active encrypted session in its official location. Snapshots only
     // retain other accounts for switching; credentials are never decoded or re-encrypted.
     private string Storage(NativeStore store) => Path.Combine(Folder(store.Folder), "AppData", "Hytale");
-    private static void CopyKeys(string source, string destination, bool privateFiles = false)
+    private static void CopyKeys(string source, string destination, bool privateFiles = false, HashSet<string>? capturedFiles = null)
     {
         RegularPath(source); RegularPath(destination);
         if (!StorageSafety.DirectoryExists(source)) return;
@@ -183,6 +207,7 @@ public sealed class NativeStores
                 if (privateFiles) AtomicWrite(target, bytes, privateFile: true);
             }
             else AtomicWrite(target, bytes, privateFile: privateFiles);
+            capturedFiles?.Add(target);
         }
     }
     public void Capture(NativeStore store)
@@ -190,14 +215,31 @@ public sealed class NativeStores
         var storage = Storage(store); PrivateFiles.CreateDirectory(storage);
         using var directories = new SetupPayload.PinnedDirectories(storage, requireTrusted: false, forMutation: true);
         using var nativeDirectories = new SetupPayload.PinnedDirectories(HytaleRoot, requireTrusted: false, forMutation: true);
-        CopyKeys(Path.Combine(HytaleRoot, ".keys"), Path.Combine(storage, ".keys"), privateFiles: true);
+        pendingFiles.TryGetValue(store.Folder, out var capturedFiles);
+        CopyKeys(Path.Combine(HytaleRoot, ".keys"), Path.Combine(storage, ".keys"), privateFiles: true, capturedFiles);
         var source = Path.Combine(HytaleRoot, "account.dat"); RegularPath(source);
         var target = Path.Combine(storage, "account.dat"); RegularPath(target);
-        if (StorageSafety.FileExists(source)) AtomicWrite(target, ReadFile(source), privateFile: true);
-        else DeleteFile(target);
+        var previousBytes = StorageSafety.FileExists(target) ? ReadFile(target) : null;
+        var nextBytes = StorageSafety.FileExists(source) ? ReadFile(source) : null;
         var previous = Catalog.Active;
-        Catalog.Active = store.Folder;
-        try { Save(); } catch { Catalog.Active = previous; throw; }
+        var written = false;
+        try
+        {
+            if (nextBytes is not null) AtomicWrite(target, nextBytes, privateFile: true); else DeleteFile(target);
+            capturedFiles?.Add(target);
+            written = true;
+            Catalog.Active = store.Folder;
+            Save();
+        }
+        catch
+        {
+            Catalog.Active = previous;
+            if (written)
+            {
+                if (previousBytes is not null) AtomicWrite(target, previousBytes, privateFile: true); else DeleteFile(target);
+            }
+            throw;
+        }
     }
     public void Activate(NativeStore store)
     {
@@ -222,13 +264,18 @@ public sealed class NativeStores
     {
         if (!Catalog.Stores.Contains(store) && !IsPending(store)) throw new IOException("Unknown native store.");
         // A normal restart keeps Hytale's latest refreshed session, not an older snapshot.
-        if (!restoreSnapshot && Catalog.Active == store.Folder) return;
+        var target = Path.Combine(HytaleRoot, "account.dat"); RegularPath(target);
+        if (!restoreSnapshot && Catalog.Active == store.Folder && StorageSafety.FileExists(target))
+        {
+            using var directories = new SetupPayload.PinnedDirectories(HytaleRoot, requireTrusted: false);
+            using var session = SetupPayload.OpenSource(target);
+            return;
+        }
         var storage = Storage(store); RegularPath(storage);
         using var nativeDirectories = new SetupPayload.PinnedDirectories(HytaleRoot, requireTrusted: false, forMutation: true);
         using var sourceDirectories = new SetupPayload.PinnedDirectories(StorageSafety.DirectoryExists(storage) ? storage : Folder(store.Folder), requireTrusted: false, forMutation: true);
         CopyKeys(Path.Combine(storage, ".keys"), Path.Combine(HytaleRoot, ".keys"));
         var source = Path.Combine(storage, "account.dat"); RegularPath(source);
-        var target = Path.Combine(HytaleRoot, "account.dat"); RegularPath(target);
         byte[]? previousBytes = null;
         FileSecurity? previousPermissions = null;
         if (StorageSafety.FileExists(target))
@@ -251,13 +298,16 @@ public sealed class NativeStores
             throw;
         }
     }
-    public async Task<(ProcessStartInfo Start, string Hash)> PrepareIntegrated(NativeStore store, LocalAccountBridge bridge)
+    public async Task<(ProcessStartInfo Start, string Hash, string UpdateBase)> PrepareIntegrated(NativeStore store, LocalAccountBridge bridge)
     {
         RequireIdle();
         var original = IntegrationSafety.OfficialPath;
+        using var installedDirectories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(original)!, requireTrusted: false);
+        using var installed = SetupPayload.OpenSource(original);
+        var updateBase = Hash(ReadFile(original));
         var updated = Path.Combine(Root, "launcher-update.exe");
         RegularPath(updated);
-        if (StorageSafety.FileExists(updated) && NewerBuild(updated, original)) original = updated;
+        if (StorageSafety.FileExists(updated) && UseCachedUpdate(updated, original, updateBase)) original = updated;
         async Task<byte[]> ReadOriginal(string path)
         {
             RegularPath(path);
@@ -284,9 +334,9 @@ public sealed class NativeStores
         var start = IntegrationSafety.StartInfo(executable);
         start.Environment["HYTALE_LAUNCHER_NO_SELF_UPDATE"] = "1";
         Activate(store);
-        return (start, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant());
+        return (start, Hash(bytes), updateBase);
     }
-    internal async Task<bool> PreserveLauncherUpdate(string path, string previousHash)
+    internal async Task<bool> PreserveLauncherUpdate(string path, string previousHash, string updateBase)
     {
         RegularPath(path);
         if (!StorageSafety.FileExists(path)) return false;
@@ -298,11 +348,35 @@ public sealed class NativeStores
         await IntegrationSafety.VerifyPublisher(path);
         _ = PatchInstaller.PatchCurrent(bytes, 49152, new string('a', 43));
         var updated = Path.Combine(Root, "launcher-update.exe"); RegularPath(updated);
-        if (StorageSafety.FileExists(updated) && !NewerBuild(path, updated, nativeUpdate: true)) return false;
-        AtomicWrite(updated, bytes, privateFile: true);
+        if (StorageSafety.FileExists(updated) && NewerBuild(updated, path)) return false;
+        return SaveLauncherUpdate(bytes, updateBase);
+    }
+    private static string Hash(byte[] bytes) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+    private LauncherUpdate? ReadLauncherUpdate()
+    {
+        var path = Path.Combine(Root, "launcher-update.json"); RegularPath(path);
+        if (!StorageSafety.FileExists(path)) return null;
+        try { return JsonSerializer.Deserialize<LauncherUpdate>(ReadFile(path)); }
+        catch (JsonException) { return null; }
+    }
+    internal bool SaveLauncherUpdate(byte[] bytes, string updateBase)
+    {
+        var updated = Path.Combine(Root, "launcher-update.exe"); RegularPath(updated);
+        var record = new LauncherUpdate(Hash(bytes), updateBase);
+        var identical = StorageSafety.FileExists(updated) && Hash(ReadFile(updated)) == record.ImageHash;
+        if (identical && ReadLauncherUpdate() == record) return false;
+        if (!identical) AtomicWrite(updated, bytes, privateFile: true);
+        AtomicWrite(Path.Combine(Root, "launcher-update.json"), JsonSerializer.SerializeToUtf8Bytes(record, Json), privateFile: true);
         return true;
     }
-    internal static bool NewerBuild(string candidate, string previous, bool nativeUpdate = false)
+    internal bool UseCachedUpdate(string candidate, string official, string officialHash)
+    {
+        if (NewerBuild(candidate, official)) return true;
+        // Hytale's updater supplies same-day ordering only for the exact installed build it replaced.
+        var record = ReadLauncherUpdate();
+        return record?.BaseHash == officialHash && record.ImageHash == Hash(ReadFile(candidate)) && record.ImageHash != officialHash;
+    }
+    internal static bool NewerBuild(string candidate, string previous)
     {
         static string? Version(string path)
         {
@@ -312,10 +386,13 @@ public sealed class NativeStores
         }
         var version = Version(candidate);
         var old = Version(previous);
-        // Unordered same-day hashes favor the official image unless Hytale's updater observed the replacement.
-        var date = string.CompareOrdinal(version?.Split('-')[0], old?.Split('-')[0]);
-        return version != old && (date > 0 || (nativeUpdate && date == 0));
+        return NewerVersion(version, old);
     }
+    internal static bool NewerVersion(string? candidate, string? previous) =>
+        DateOnly.TryParseExact(candidate?.Split('-')[0], "yyyy.MM.dd", System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out var date) &&
+        DateOnly.TryParseExact(previous?.Split('-')[0], "yyyy.MM.dd", System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out var old) && date > old;
     public static void RequireIdle()
     {
         foreach (var name in new[] { "hytale-launcher", "HytaleClient" })

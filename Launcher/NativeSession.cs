@@ -15,6 +15,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     private string? nativeName;
     private string? runImage;
     private string? runHash;
+    private string? updateBase;
     private bool busy, holdLogin, verifiedSession;
     private NativeStore? pendingLogin;
     private string? logoutRequest;
@@ -73,11 +74,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             ready?.TrySetResult(profile);
             if (!busy && active is not null && profile is Guid verified)
             {
-                if (pendingLogin is not null)
-                {
-                    active = pendingLogin;
-                }
-                CommitProfile(verified, true);
+                CommitProfile(verified, true, pendingLogin);
                 pendingLogin = null;
                 message = "Native account verified and selected.";
                 await Publish();
@@ -126,7 +123,9 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     public Task OpenInitial() => OpenCore(InitialStore(), false);
     internal NativeStore InitialStore()
     {
-        var hasNativeSession = File.Exists(Path.Combine(stores.HytaleRoot, "account.dat"));
+        var nativeSession = Path.Combine(stores.HytaleRoot, "account.dat");
+        NativeStores.RegularPath(nativeSession);
+        var hasNativeSession = StorageSafety.FileExists(nativeSession);
         var selected = stores.Catalog.Stores.FirstOrDefault(s => s.Folder == stores.Catalog.Selected && !s.SignedOut);
         if (!hasNativeSession && selected is not null) return selected;
         var initial = stores.CreatePending();
@@ -134,23 +133,28 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         if (hasNativeSession) stores.Capture(initial);
         return initial;
     }
-    private void CommitProfile(Guid profile, bool select)
+    private void CommitProfile(Guid profile, bool select, NativeStore? login = null)
     {
-        if (active is null) throw new IOException("No active native account.");
-        var staged = stores.IsPending(active) ? active : null;
-        if (stores.IsPending(active))
+        var store = login ?? active ?? throw new IOException("No active native account.");
+        verifiedSession = false;
+        var pending = stores.IsPending(store);
+        var target = pending ? stores.Catalog.Stores.FirstOrDefault(s => s.Profile == profile) ?? store :
+            stores.Catalog.Stores.Single(s => s.Folder == store.Folder);
+        if (profile == Guid.Empty || (target.Profile is not null && target.Profile != profile))
+            throw new IOException("Native profile does not match this store. Previous selection kept.");
+        // Keep the attempt and previous selection until its required snapshot is safely captured.
+        stores.Capture(target);
+        if (pending)
         {
-            active = stores.CommitPending(active, profile, nativeName);
+            active = stores.CommitPending(store, profile, nativeName);
         }
         else
         {
-            var current = stores.Catalog.Stores.Single(s => s.Folder == active.Folder);
-            stores.VerifyProfile(current, profile, select, nativeName);
-            active = stores.Catalog.Stores.Single(s => s.Folder == active.Folder);
+            stores.VerifyProfile(target, profile, select, nativeName);
+            active = stores.Catalog.Stores.Single(s => s.Folder == target.Folder);
         }
         verifiedSession = true;
-        stores.Capture(active);
-        if (staged is not null) stores.RemoveRedundantPending(staged, active);
+        if (pending) stores.RemoveRedundantPending(store, active);
     }
     private async Task OpenCore(NativeStore store, bool commit)
     {
@@ -327,6 +331,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         var start = prepared.Start;
         runImage = start.FileName;
         runHash = prepared.Hash;
+        updateBase = prepared.UpdateBase;
         image = new FileStream(start.FileName, FileMode.Open, FileAccess.Read, FileShare.Read);
         if (PatchInstaller.Hash(start.FileName) != prepared.Hash) throw new IOException("Native launch image changed before startup; files preserved.");
         launcher = Process.Start(start) ?? throw new IOException("Could not open native launcher.");
@@ -385,7 +390,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     }
     private async Task<bool> ResumeAfterUpdate()
     {
-        if (runImage is null || runHash is null) return false;
+        if (runImage is null || runHash is null || updateBase is null) return false;
         var deadline = DateTime.UtcNow.AddSeconds(45);
         bool Matches(Process process)
         {
@@ -406,7 +411,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
                 if (updates.Length == 0) return false;
                 // Hytale's updater owns replacement and verification; wait for its restarted window.
                 var restarted = updates.FirstOrDefault(p => p.MainWindowHandle != IntPtr.Zero);
-                if (restarted is not null && await stores.PreserveLauncherUpdate(runImage, runHash))
+                if (restarted is not null && await stores.PreserveLauncherUpdate(runImage, runHash, updateBase))
                 {
                     RequireNoGame();
                     restarted.CloseMainWindow();
@@ -440,6 +445,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             stores.PrunePending(Path.GetFileName(Path.GetDirectoryName(directory)!));
             runImage = null;
         }
+        stores.CleanupPending();
         if (bridge is not null) { await bridge.DisposeAsync(); bridge = null; }
         active = null;
     }

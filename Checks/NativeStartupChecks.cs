@@ -47,7 +47,7 @@ internal static class NativeStartupChecks
                 var commit = typeof(NativeSession).GetMethod("CommitProfile", flags)!;
                 using (var locked = new FileStream(Path.Combine(stores.Root, "native-stores.json"), FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
-                    try { commit.Invoke(session, [profileB, false]); throw new Exception("Locked startup reconciliation committed"); }
+                    try { commit.Invoke(session, [profileB, false, null]); throw new Exception("Locked startup reconciliation committed"); }
                     catch (TargetInvocationException ex) when (ex.InnerException is IOException or UnauthorizedAccessException) { }
                     check(stores.Catalog.Selected == accountA.Folder && stores.IsPending(initial) &&
                         File.ReadAllText(Snapshot(initial)) == "opaque-current-B" && File.ReadAllText(Key(initial)) == "opaque-key" &&
@@ -55,7 +55,7 @@ internal static class NativeStartupChecks
                         (accountB is null || File.ReadAllText(Snapshot(accountB)) == "opaque-old-B"),
                         "failed startup commit keeps the previous selection and both saved snapshots");
                 }
-                commit.Invoke(session, [profileB, false]);
+                commit.Invoke(session, [profileB, false, null]);
                 var reloaded = new NativeStores(root);
                 var verifiedB = reloaded.Catalog.Stores.Single(s => s.Profile == profileB);
                 check(reloaded.Catalog.Selected == verifiedB.Folder && reloaded.Catalog.Active == verifiedB.Folder &&
@@ -77,7 +77,7 @@ internal static class NativeStartupChecks
                     using var image = new FileStream(executable, FileMode.Open, FileAccess.Read, FileShare.Read);
                     typeof(NativeSession).GetField("image", flags)!.SetValue(session, image);
                     typeof(NativeSession).GetField("runImage", flags)!.SetValue(session, executable);
-                    commit.Invoke(session, [profileB, false]);
+                    commit.Invoke(session, [profileB, false, null]);
                     check(!File.Exists(Snapshot(initial)) && !File.Exists(Key(initial)) &&
                         File.ReadAllText(executable) == "synthetic-runtime" && !image.SafeFileHandle.IsClosed,
                         "repeated startup removes redundant credentials while retaining the owned runtime");
@@ -94,7 +94,7 @@ internal static class NativeStartupChecks
                 typeof(NativeSession).GetField("active", flags)!.SetValue(session, recovery);
                 using (var locked = new FileStream(official, FileMode.Open, FileAccess.Read, FileShare.None))
                 {
-                    try { commit.Invoke(session, [profileB, false]); throw new Exception("Locked startup capture succeeded"); }
+                    try { commit.Invoke(session, [profileB, false, null]); throw new Exception("Locked startup capture succeeded"); }
                     catch (TargetInvocationException ex) when (ex.InnerException is IOException or UnauthorizedAccessException) { }
                 }
                 check(File.ReadAllText(Snapshot(recovery)) == "opaque-recovery-B" && File.ReadAllText(Key(recovery)) == "opaque-key" &&
@@ -106,13 +106,27 @@ internal static class NativeStartupChecks
                 var unknown = Path.Combine(stores.Folder(initial.Folder), "recovery.txt"); File.WriteAllText(unknown, "keep");
                 File.WriteAllText(Key(initial), "unique-key");
                 var extraKey = Path.Combine(Path.GetDirectoryName(Key(initial))!, "recovery.bin"); File.WriteAllText(extraKey, "extra-key");
-                commit.Invoke(session, [profileB, false]);
+                commit.Invoke(session, [profileB, false, null]);
                 check(File.ReadAllText(unknown) == "keep" && File.ReadAllText(Snapshot(recovery)) == "opaque-recovery-B" &&
                     File.ReadAllText(Key(recovery)) == "opaque-key" && File.ReadAllText(Key(initial)) == "unique-key" &&
                     File.ReadAllText(extraKey) == "extra-key" && !File.Exists(Snapshot(initial)),
                     "later success preserves unknown files, unmatched keys and earlier failed-operation recovery data");
+                check(File.ReadAllText(Snapshot(verifiedB)) == "opaque-recovery-B", "successful retry captures the latest official session before committing selection");
                 File.Delete(official);
                 check(session.InitialStore() == verifiedB, "startup without an official session retains the saved-selection fallback");
+                using (var locked = File.Open(Snapshot(verifiedB), FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    try { stores.Activate(stores.Catalog.Stores.Single(s => s.Folder == verifiedB.Folder)); throw new Exception("Locked missing-session restoration succeeded"); }
+                    catch (IOException) { }
+                    check(!File.Exists(official) && stores.Catalog.Active == verifiedB.Folder && stores.Catalog.Selected == verifiedB.Folder,
+                        "missing-session restoration reports a locked snapshot without changing selection or the active marker");
+                }
+                stores.Activate(stores.Catalog.Stores.Single(s => s.Folder == verifiedB.Folder));
+                check(File.ReadAllText(official) == "opaque-recovery-B" && stores.Catalog.Active == verifiedB.Folder,
+                    "startup restores a missing official session even when the active marker already matches the saved fallback");
+                File.WriteAllText(official, "opaque-latest-B");
+                stores.Activate(stores.Catalog.Stores.Single(s => s.Folder == verifiedB.Folder));
+                check(File.ReadAllText(official) == "opaque-latest-B", "matching existing native session keeps the latest refresh");
             }
             finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         }

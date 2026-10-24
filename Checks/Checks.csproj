@@ -3,4 +3,5 @@
   <ItemGroup><ProjectReference Include="../Launcher/Launcher.csproj"/><Compile Include="NativeStoreChecks.cs"/><Compile Include="NativeSessionChecks.cs"/><Compile Include="LifecycleChecks.cs"/><Compile Include="BridgeShutdownChecks.cs"/><Compile Include="NativeAddChecks.cs"/><Compile Include="NativeLogoutChecks.cs"/><Compile Include="AclChecks.cs"/></ItemGroup>
   <ItemGroup><Compile Include="SetupChecks.cs"/><Compile Include="BridgeAuthenticationChecks.cs"/><Compile Include="BridgeLimitChecks.cs"/><Compile Include="EffectiveAccessChecks.cs"/><Compile Include="AclPropagationChecks.cs"/><Compile Include="SecurityFixture.cs"/><Compile Include="StorageSafetyChecks.cs"/></ItemGroup>
   <ItemGroup><Compile Include="NativeStartupChecks.cs"/><Compile Include="NativeExitChecks.cs"/><Compile Include="NativeAdapterChecks.cs"/></ItemGroup>
+  <ItemGroup><Compile Include="AccountStorageChecks.cs"/></ItemGroup>
 </Project>

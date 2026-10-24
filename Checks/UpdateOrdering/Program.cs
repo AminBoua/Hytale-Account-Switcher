@@ -60,22 +60,24 @@ try
         (Previous: later, Next: a, Accept: false) })
     {
         File.Copy(pair.Previous, cached, true);
+        var updateBase = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(pair.Previous))).ToLowerInvariant();
+        stores.SaveLauncherUpdate(File.ReadAllBytes(pair.Previous), updateBase);
         IntegrationSafety.Verified.Clear();
-        var accepted = await stores.PreserveLauncherUpdate(pair.Next, new string('0', 64));
+        var accepted = await stores.PreserveLauncherUpdate(pair.Next, new string('0', 64), updateBase);
         Check(accepted == pair.Accept && IntegrationSafety.Verified.SequenceEqual(new[] { pair.Next }) &&
             File.ReadAllBytes(cached).SequenceEqual(File.ReadAllBytes(pair.Accept ? pair.Next : pair.Previous)),
             $"PreserveLauncherUpdate orders {Path.GetFileName(pair.Next)} after {Path.GetFileName(pair.Previous)} (accept: {pair.Accept})");
     }
     var previous = File.ReadAllBytes(cached);
     var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(b)));
-    Check(!await stores.PreserveLauncherUpdate(b, hash), "unchanged running image is not an updater replacement");
+    Check(!await stores.PreserveLauncherUpdate(b, hash, new string('1', 64)), "unchanged running image is not an updater replacement");
     foreach (var publisherFailure in new[] { true, false })
     {
         IntegrationSafety.RejectPublisher = publisherFailure;
         PatchInstaller.RejectCompatibility = !publisherFailure;
         try
         {
-            await stores.PreserveLauncherUpdate(b, new string('0', 64));
+            await stores.PreserveLauncherUpdate(b, new string('0', 64), new string('1', 64));
             throw new Exception("Invalid update accepted");
         }
         catch (IOException) { }
