@@ -394,7 +394,10 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
                 return;
             }
             message = "Native launcher closed.";
-            await Stop(); await Publish();
+            var stopped = active;
+            await Stop();
+            if (stopped is not null) stores.ReleasePending(stopped);
+            await Publish();
         }
         catch (Exception ex)
         {

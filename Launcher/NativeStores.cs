@@ -100,6 +100,20 @@ public sealed class NativeStores
         pending.Remove(store.Folder);
         CleanupPending();
     }
+    internal void ReleasePending(NativeStore store)
+    {
+        if (!IsPending(store) || Catalog.Stores.Any(s => s.Folder.Equals(store.Folder, StringComparison.OrdinalIgnoreCase))) return;
+        var previous = Catalog.Active;
+        if (string.Equals(previous, store.Folder, StringComparison.OrdinalIgnoreCase))
+        {
+            Catalog.Active = null;
+            try { Save(); } catch { Catalog.Active = previous; throw; }
+        }
+        pending.Remove(store.Folder);
+        // Shutdown releases staging without making its recovery snapshots or keys disposable.
+        pendingFiles.Remove(store.Folder);
+        PrunePending(store.Folder);
+    }
     internal void CleanupPending()
     {
         foreach (var (folder, files) in pendingFiles.ToArray())
