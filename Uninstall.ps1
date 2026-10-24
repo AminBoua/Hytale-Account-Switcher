@@ -65,11 +65,12 @@ try {
     if ($UserOnly) { Remove-ShortcutStateFiles; return }
     if ($before) { Assert-LauncherSnapshot $official $before }
     # Only exact addon-owned files; accounts, encryption keys, worlds and Hytale remain untouched.
-    $files = @('HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json')
-    $files += @('shortcuts.json','shortcuts.new') + @($records | Where-Object Backup | ForEach-Object Backup)
+    $files = @('Install.ps1','Repair-Integration.ps1','launcher-baseline.json','HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs')
+    foreach ($name in $files) { Assert-RegularPath (Join-Path $destination $name) }
+    $files += @('shortcuts.new') + @($records | Where-Object Backup | ForEach-Object Backup) + @('shortcuts.json')
     $removalFiles = @()
     try {
-        # Validate and hold every target before deleting any, preserving the Apps retry path on a lock.
+        # Hold exclusive delete-capable handles for the entire set before removing any recovery files.
         foreach ($name in $files) { $removalFiles += Open-ShortcutFile (Join-Path $destination $name) }
         foreach ($file in $removalFiles) { if ($file.Exists) { $file.Delete() } }
     } finally { foreach ($file in $removalFiles) { $file.Dispose() } }

@@ -126,28 +126,29 @@ try {
         try { & (Join-Path $package $operation) @wrongUser } catch { $rejected = $true }
         Check ($rejected -and (Get-FileHash -LiteralPath $shortcutPath).Hash -eq $ownedHash) 'another Windows account cannot orphan the owner shortcut journal'
     }
-    foreach ($lockedName in @('HytaleAccounts.exe','Repair-Integration.ps1','shortcuts.json')) {
+    foreach ($lockedName in @('HytaleAccounts.exe','Repair-Integration.ps1','launcher-baseline.json','shortcuts.new','shortcuts.json')) {
         & (Join-Path $package 'Install.ps1') @options
         & (Join-Path $package 'Install.ps1') @options -UserOnly
         & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
+        Set-Content -LiteralPath (Join-Path $destination 'shortcuts.new') -Value 'unfinished journal fixture'
         $manifest = Join-Path $destination 'shortcuts.json'
         $journal = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
         $recovery = @{}
-        foreach ($name in @('shortcuts.json','HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json') + @($journal.Shortcuts | ForEach-Object Backup)) {
+        foreach ($name in @('shortcuts.json','shortcuts.new','HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json') + @($journal.Shortcuts | ForEach-Object Backup)) {
             $path = Join-Path $destination $name
             $recovery[$path] = (Get-FileHash -LiteralPath $path).Hash
         }
-        # Allow journal reads but deny deletion, without running any fixture executable.
+        # A read handle without delete sharing reproduces a lock without executing fixture files.
         $locked = [IO.File]::Open((Join-Path $destination $lockedName), 'Open', 'Read', 'ReadWrite')
         $failure = $null
         try { & (Join-Path $destination 'Uninstall.ps1') @options } catch { $failure = $_ }
         finally { $locked.Dispose() }
-        Check ($null -ne $failure) ('locked ' + $lockedName + ' prevents addon removal')
+        Check ($failure -and $failure.Exception.InnerException -is [ComponentModel.Win32Exception] -and $failure.Exception.InnerException.NativeErrorCode -eq 32) ($lockedName + ' lock blocks removal')
         foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'failed removal leaves original user and system shortcuts restored' }
         $missing = @($recovery.Keys | Where-Object { !(Test-Path -LiteralPath $_) })
-        Check (!$missing.Count -and (Test-Path -LiteralPath $registry)) ('failed removal with locked ' + $lockedName + ' retains recovery files and Windows Apps entry; missing: ' + ($missing -join ', ') + '; Apps entry: ' + (Test-Path -LiteralPath $registry))
-        Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -eq ('"' + (Join-Path $destination 'HytaleAccounts.exe') + '" --uninstall')) 'failed removal preserves the Windows Apps retry command'
+        Check (!$missing.Count -and (Test-Path -LiteralPath $registry)) ('failed removal retains recovery files and Windows Apps entry; missing: ' + ($missing -join ', ') + '; Apps entry: ' + (Test-Path -LiteralPath $registry))
         foreach ($path in $recovery.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $recovery[$path]) 'failed removal preserves recovery bytes' }
+        Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -ceq ('"' + (Join-Path $destination 'HytaleAccounts.exe') + '" --uninstall')) 'Windows Apps still points to the preserved removal executable'
         $rejected = $false
         try { & (Join-Path $destination 'Uninstall.ps1') @wrongUser } catch { $rejected = $true }
         Check $rejected 'retry still enforces the shortcut journal owner'
