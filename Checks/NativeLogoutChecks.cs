@@ -61,8 +61,13 @@ internal static class NativeLogoutChecks
                         FileMode.Open, FileAccess.Read, FileShare.Read) : null;
                     void CheckCleanup(NativeStore store)
                     {
-                        if (!lockSnapshot) return;
                         var snapshot = Path.Combine(stores.Folder(store.Folder), "AppData", "Hytale", "account.dat");
+                        if (!lockSnapshot)
+                        {
+                            check(!File.Exists(snapshot) && !status.Contains("Could not clear signed-out snapshot:"),
+                                "confirmed logout clears its obsolete snapshot despite the authenticated capture requirement");
+                            return;
+                        }
                         var saved = JsonSerializer.Deserialize<NativeCatalog>(File.ReadAllText(Path.Combine(stores.Root, "native-stores.json")))!;
                         check(File.ReadAllText(snapshot) == store.Label && saved.Stores.Single(s => s.Folder == store.Folder).SignedOut &&
                             saved.Selected != store.Folder && status.Contains("Could not clear signed-out snapshot:") && status.Contains(snapshot),

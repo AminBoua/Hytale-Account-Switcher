@@ -249,8 +249,24 @@ internal static class NativeAddChecks
                     "repeated native sign-in reports reuse the same pending store");
                 Set("busy", false);
                 var profile = login == "saved-A" ? accountA.Profile!.Value : profileB;
+                var completion = new { action = "ready", profile, username = login == "saved-A" ? "accountA" : "accountB" };
+                var metadata = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
+                foreach (var missing in new[] { false, true })
+                {
+                    if (missing) File.Delete(official); else File.WriteAllText(official, "");
+                    try { await Command(completion); throw new Exception("Unusable fallback login capture succeeded"); }
+                    catch (IOException) { }
+                    stores.CleanupPending();
+                    check(Equals(Get("active"), staged) && stores.IsPending(staged) && Get("verifiedSession") is false &&
+                        Get("pendingLogin") is null && stores.Catalog.Selected == accountA.Folder &&
+                        File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(metadata) &&
+                        File.ReadAllText(Snapshot(accountA)) == "opaque-A" &&
+                        (accountB is null || File.ReadAllText(Snapshot(accountB)) == "opaque-old-B") &&
+                        session.IsOpen && ReferenceEquals(Get("launcher"), process),
+                        $"{login} rejects {(missing ? "missing" : "empty")} native capture after fallback, preserving identity, snapshots and retry while blocking Play");
+                }
                 File.WriteAllText(official, "opaque-new-login");
-                check(await Command(new { action = "ready", profile, username = login == "saved-A" ? "accountA" : "accountB" }),
+                check(await Command(completion),
                     "native login after saved fallback is accepted");
                 var reloaded = new NativeStores(root);
                 var selected = reloaded.Catalog.Stores.Single(s => s.Folder == reloaded.Catalog.Selected);
