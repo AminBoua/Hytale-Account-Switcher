@@ -73,6 +73,57 @@ internal static class SetupChecks
         }
         try
         {
+            File.WriteAllText(Path.Combine(root, "Uninstall.ps1"), "non-executed removal fixture");
+            File.WriteAllText(Path.Combine(root, "ShortcutIntegration.ps1"), "non-executed integration fixture");
+            foreach (var failure in new Exception[] { new Win32Exception(1223), new IOException("Could not start uninstall.") })
+            {
+                var phases = new List<string>();
+                Task Integrate(ProcessStartInfo start)
+                {
+                    check(!start.UseShellExecute && start.CreateNoWindow && start.ArgumentList.Contains("-UserOnly"), "uninstall recovery remains unelevated and hidden");
+                    if (start.ArgumentList.Contains(Path.Combine(root, "Uninstall.ps1")))
+                    {
+                        check(start.ArgumentList.Contains("-KeepJournal"), "pre-elevation removal retains restoration records");
+                        phases.Add("prepare");
+                    }
+                    else { check(start.ArgumentList.Contains(Path.Combine(root, "Install.ps1")), "failed elevation restores existing user integration"); phases.Add("recover"); }
+                    return Task.CompletedTask;
+                }
+                try
+                {
+                    await Setup.Remove(root, Integrate, start =>
+                    {
+                        check(phases.SequenceEqual(["prepare"]), "synthetic start failure occurs after the per-user phase");
+                        check(start.UseShellExecute && start.Verb == "runas" && start.WindowStyle == ProcessWindowStyle.Hidden &&
+                            start.ArgumentList.Contains(Environment.ProcessId.ToString()) && start.ArgumentList.Contains(user.Value),
+                            "removal uses hidden elevation and waits for the initiating process");
+                        phases.Add("start"); throw failure;
+                    });
+                    throw new Exception("Synthetic removal failure was ignored.");
+                }
+                catch (Exception ex) when (ReferenceEquals(ex, failure)) { }
+                check(phases.SequenceEqual(["prepare", "start", "recover"]), "cancellation/start failure recovers before returning the original error");
+            }
+            var cancelled = new Win32Exception(1223);
+            var recoveryFailure = new IOException("Synthetic recovery failure.");
+            try
+            {
+                await Setup.Remove(root, start => start.ArgumentList.Contains("-KeepJournal") ? Task.CompletedTask : Task.FromException(recoveryFailure), _ => throw cancelled);
+                throw new Exception("Recovery failure was ignored.");
+            }
+            catch (AggregateException ex)
+            {
+                check(ex.InnerExceptions.SequenceEqual(new Exception[] { cancelled, recoveryFailure }), "failed immediate recovery reports both errors and leaves retained state for background repair");
+            }
+            var successfulPhases = new List<string>();
+            await Setup.Remove(root, start =>
+            {
+                check(start.ArgumentList.Contains(Path.Combine(root, "Uninstall.ps1")), "successful removal only invokes user uninstall");
+                successfulPhases.Add(start.ArgumentList.Contains("-KeepJournal") ? "prepare" : "finalize");
+                return Task.CompletedTask;
+            }, _ => successfulPhases.Add("start"));
+            check(successfulPhases.SequenceEqual(["prepare", "start", "finalize"]), "successful start finalizes user restoration before the parent exits");
+
             using (var directories = new SetupPayload.PinnedDirectories(root, false))
             using (var source = SetupPayload.OpenSource(executable))
             {

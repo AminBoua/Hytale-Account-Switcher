@@ -4,6 +4,7 @@ param(
     [string]$RegistryPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HytaleAccounts',
     [int]$WaitForPid = 0,
     [switch]$UserOnly,
+    [switch]$KeepJournal,
     [string]$UserSid = '',
     [switch]$Interactive
 )
@@ -62,7 +63,7 @@ try {
     }
     }
     foreach ($record in $records) { Update-Shortcut $record.Path Remove $record }
-    if ($UserOnly) { Remove-ShortcutStateFiles; return }
+    if ($UserOnly) { if (!$KeepJournal) { Remove-ShortcutStateFiles }; return }
     if ($before) { Assert-LauncherSnapshot $official $before }
     # Only exact addon-owned files; accounts, encryption keys, worlds and Hytale remain untouched.
     $files = @('Install.ps1','Repair-Integration.ps1','launcher-baseline.json','HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs')
