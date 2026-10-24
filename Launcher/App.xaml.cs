@@ -50,16 +50,17 @@ public partial class App : Application
         {
             var stores = new NativeStores();
             session = new NativeSession(stores, Dispatcher);
-            session.Status += message =>
-            {
-                try { File.AppendAllText(Path.Combine(stores.HytaleRoot, "hytale-accounts.log"), DateTimeOffset.Now.ToString("O") + " " + message + Environment.NewLine); }
-                catch (IOException) { /* Logging must not interrupt account transitions. */ }
-            };
+            session.Status += message => LogStatus(stores.HytaleRoot, message);
             session.Closed += () => Shutdown();
             await session.OpenInitial();
             if (!session.IsOpen) Shutdown(1);
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Hytale Launcher"); Shutdown(1); }
+    }
+    internal static void LogStatus(string root, string message)
+    {
+        try { File.AppendAllText(Path.Combine(root, "hytale-accounts.log"), DateTimeOffset.Now.ToString("O") + " " + message + Environment.NewLine); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* Logging must not interrupt account transitions. */ }
     }
     protected override void OnExit(ExitEventArgs e) { instance?.Dispose(); base.OnExit(e); }
 }
