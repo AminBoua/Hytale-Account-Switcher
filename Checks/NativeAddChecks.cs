@@ -117,6 +117,20 @@ internal static class NativeAddChecks
             var completion = new { action = "ready", loginRequest = retry, profile = other.Profile, username = "accountA" };
             var previousMetadata = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
             var snapshot = Path.Combine(stores.Folder(other.Folder), "AppData", "Hytale", "account.dat");
+            foreach (var missing in new[] { false, true })
+            {
+                if (missing) File.Delete(officialSession); else File.WriteAllText(officialSession, "");
+                try { await Command(completion); throw new Exception("Missing or empty login completion succeeded"); }
+                catch (IOException) { }
+                stores.CleanupPending();
+                check(Pending() == retry && stores.IsPending((NativeStore)Get("pendingLogin")!) &&
+                    Get("verifiedSession") is false && ((NativeStore)Get("active")!).Folder == current.Folder &&
+                    stores.Catalog.Selected == current.Folder && stores.Catalog.Active == current.Folder && stores.Catalog.Stores.Count == 2 &&
+                    File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(previousMetadata) &&
+                    File.ReadAllText(snapshot) == "opaque-accountA-session" &&
+                    session.IsOpen && ReferenceEquals(Get("launcher"), process),
+                    $"{(missing ? "missing" : "empty")} login completion preserves the prior selection, snapshot, retry fence and launcher while blocking Play");
+            }
             File.WriteAllText(officialSession, "opaque-refreshed-accountA-session");
             using (var locked = new FileStream(snapshot, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
