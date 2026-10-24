@@ -197,6 +197,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     }
     private async Task<JsonElement> NativeAction(string operation)
     {
+        if (!IsOpen) throw new IOException("Native launcher has exited.");
         sessionResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
         sessionRequest = Guid.NewGuid().ToString("N"); sessionOperation = operation;
         try
@@ -261,7 +262,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             message = ex.Message + " Previous selection kept.";
             try
             {
-                if (attempted && previous is not null && !previous.SignedOut)
+                if (attempted && IsOpen && previous is not null && !previous.SignedOut)
                 {
                     if (stores.Catalog.Active != previous.Folder || active?.Folder != previous.Folder)
                         await RestoreSession(stores.Catalog.Stores.Single(s => s.Folder == previous.Folder), true);
@@ -373,6 +374,9 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         {
             await process.WaitForExitAsync();
             if (launcher != process) return;
+            // Release transitions before waiting for busy; the exited process cannot acknowledge them.
+            sessionResult?.TrySetException(new IOException("Native launcher exited during a session request."));
+            logoutResult?.TrySetException(new IOException("Native launcher exited during logout."));
             image?.Dispose(); image = null;
             while (busy && launcher == process) await Task.Delay(100);
             if (launcher != process) return;
