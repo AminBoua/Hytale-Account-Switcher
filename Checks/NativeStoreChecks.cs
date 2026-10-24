@@ -204,6 +204,10 @@ try
     try { stores.Activate(first); throw new Exception("Conflicting key accepted"); }
     catch (IOException) { Check(File.ReadAllText(Path.Combine(root, "account.dat")) == "accountA-session", "conflicting native key rejects switch before changing active session"); }
     try { stores.Folder("../escape"); throw new Exception("Traversal accepted"); } catch (IOException) { Check(true, "store traversal rejected"); }
+    var inherited = IntegrationSafety.StartInfo(IntegrationSafety.OfficialPath);
+    foreach (var key in new[] { "APPDATA", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP" })
+        Check(inherited.Environment[key] == Environment.GetEnvironmentVariable(key), "default browser inherits real Windows profile: " + key);
+    Check(!inherited.Environment.Keys.Any(k => k.StartsWith("WEBVIEW2_", StringComparison.OrdinalIgnoreCase)), "native launch removes debug overrides");
     if (safe) return; // Native binary/legacy lifecycle checks are explicitly opt-in.
     var source = IntegrationSafety.OfficialPath;
     if (PatchInstaller.Hash(source) != IntegrationSafety.SupportedHash) source = new PatchInstaller().BackupPath;
@@ -266,10 +270,6 @@ try
     }
     Check(System.Text.Encoding.Latin1.GetString(integrated).Contains(@"Software\Hypixel Studios\Hytale") &&
         !System.Text.Encoding.Latin1.GetString(integrated).Contains(@"Software\Hypixel Studios\Native"), "integrated launcher keeps official registry storage lookup");
-    var inherited = IntegrationSafety.StartInfo(IntegrationSafety.OfficialPath);
-    foreach (var key in new[] { "APPDATA", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP" })
-        Check(inherited.Environment[key] == Environment.GetEnvironmentVariable(key), "default browser inherits real Windows profile: " + key);
-    Check(!inherited.Environment.Keys.Any(k => k.StartsWith("WEBVIEW2_", StringComparison.OrdinalIgnoreCase)), "native launch removes debug overrides");
     Check(!typeof(NativeStores).Assembly.GetTypes().Any(t => t.Name is "BrowserLogin" or "AccountService" or "HytaleApi" or "GameLaunch" or "Store" or "AccountCommands" or "DebugJob"), "credential vault/authentication/helper Play and kill-on-close job excluded from production assembly");
 }
 finally { DeleteFixture(root); }

@@ -257,13 +257,6 @@ public sealed class PatchInstaller
         Swap(File.ReadAllBytes(BackupPath), current, record.OriginalHash, record.OriginalPermissions);
         await publisher(Target); Save(record with { Phase = "uninstalled" });
     }
-    public FileStream OpenRuntimeLock()
-    {
-        SafePaths();
-        var path = Path.Combine(DirectoryPath, "operation.lock");
-        if (!File.Exists(path)) throw new IOException("Account patch installation state is missing. Patches are disabled. Run Install.ps1 to reinstall. If the launcher is modified and its verified backup is missing, reinstall the official launcher first.");
-        return new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-    }
     public void VerifyInstalled(PatchRecord record)
     {
         SafePaths();
