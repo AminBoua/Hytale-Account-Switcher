@@ -44,14 +44,14 @@ internal static class NativeStartupChecks
                 var commit = typeof(NativeSession).GetMethod("CommitProfile", flags)!;
                 using (var locked = new FileStream(Path.Combine(stores.Root, "native-stores.json"), FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
-                    try { commit.Invoke(session, [profileB, false]); throw new Exception("Locked startup reconciliation committed"); }
+                    try { commit.Invoke(session, [profileB, false, null]); throw new Exception("Locked startup reconciliation committed"); }
                     catch (TargetInvocationException ex) when (ex.InnerException is IOException or UnauthorizedAccessException) { }
                     check(stores.Catalog.Selected == accountA.Folder && stores.IsPending(initial) &&
                         File.ReadAllText(Snapshot(accountA)) == "opaque-A" &&
                         (accountB is null || File.ReadAllText(Snapshot(accountB)) == "opaque-old-B"),
                         "failed startup commit keeps the previous selection and both saved snapshots");
                 }
-                commit.Invoke(session, [profileB, false]);
+                commit.Invoke(session, [profileB, false, null]);
                 var reloaded = new NativeStores(root);
                 var verifiedB = reloaded.Catalog.Stores.Single(s => s.Profile == profileB);
                 check(reloaded.Catalog.Selected == verifiedB.Folder && reloaded.Catalog.Active == verifiedB.Folder &&
@@ -60,8 +60,23 @@ internal static class NativeStartupChecks
                 check(File.ReadAllText(official) == "opaque-current-B" && File.ReadAllText(Snapshot(verifiedB)) == "opaque-current-B" &&
                     File.ReadAllText(Snapshot(accountA)) == "opaque-A" && reloaded.Catalog.Stores.Single(s => s.Folder == accountA.Folder) == accountA,
                     "startup reconciliation preserves A's identity and snapshot and captures B only under B");
+                check(savedB ? !File.Exists(Snapshot(initial)) : File.Exists(Snapshot(initial)),
+                    "successful startup reconciliation removes disposable snapshots and retains newly committed snapshots");
                 File.Delete(official);
                 check(session.InitialStore() == verifiedB, "startup without an official session retains the saved-selection fallback");
+                using (var locked = File.Open(Snapshot(verifiedB), FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    try { stores.Activate(stores.Catalog.Stores.Single(s => s.Folder == verifiedB.Folder)); throw new Exception("Locked missing-session restoration succeeded"); }
+                    catch (IOException) { }
+                    check(!File.Exists(official) && stores.Catalog.Active == verifiedB.Folder && stores.Catalog.Selected == verifiedB.Folder,
+                        "missing-session restoration reports a locked snapshot without changing selection or the active marker");
+                }
+                stores.Activate(stores.Catalog.Stores.Single(s => s.Folder == verifiedB.Folder));
+                check(File.ReadAllText(official) == "opaque-current-B" && stores.Catalog.Active == verifiedB.Folder,
+                    "startup restores a missing official session even when the active marker already matches the saved fallback");
+                File.WriteAllText(official, "opaque-latest-B");
+                stores.Activate(stores.Catalog.Stores.Single(s => s.Folder == verifiedB.Folder));
+                check(File.ReadAllText(official) == "opaque-latest-B", "matching existing native session keeps the latest refresh");
             }
             finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         }

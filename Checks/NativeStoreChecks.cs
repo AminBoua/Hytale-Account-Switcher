@@ -17,13 +17,14 @@ if (args.Length == 2 && args[0] == "--verify-image")
     var updateRoot = SecurityFixture.Create("native-update-check-");
     var updatedStores = new NativeStores(updateRoot);
     var cached = Path.Combine(updatedStores.Root, "launcher-update.exe");
+    var updateBase = new string('1', 64);
     try
     {
-        if (!await updatedStores.PreserveLauncherUpdate(args[1], new string('0', 64)) || PatchInstaller.Hash(cached) != PatchInstaller.Hash(args[1]))
+        if (!await updatedStores.PreserveLauncherUpdate(args[1], new string('0', 64), updateBase) || PatchInstaller.Hash(cached) != PatchInstaller.Hash(args[1]))
             throw new Exception("Signed native update was not preserved exactly.");
-        if (await updatedStores.PreserveLauncherUpdate(args[1], new string('0', 64))) throw new Exception("Same native update was adopted twice.");
+        if (await updatedStores.PreserveLauncherUpdate(args[1], new string('0', 64), updateBase)) throw new Exception("Same native update was adopted twice.");
         var invalid = Path.Combine(updateRoot, "unsigned.exe"); File.WriteAllText(invalid, "unsigned update fixture");
-        try { await updatedStores.PreserveLauncherUpdate(invalid, new string('0', 64)); throw new Exception("Unsigned update accepted"); }
+        try { await updatedStores.PreserveLauncherUpdate(invalid, new string('0', 64), updateBase); throw new Exception("Unsigned update accepted"); }
         catch (InvalidOperationException) { }
         if (PatchInstaller.Hash(cached) != PatchInstaller.Hash(args[1])) throw new Exception("Failed update replaced the preserved signed image.");
         File.Delete(invalid);
@@ -31,13 +32,15 @@ if (args.Length == 2 && args[0] == "--verify-image")
     }
     finally
     {
-        File.Delete(cached); File.Delete(Path.Combine(updatedStores.Root, "native-stores.json"));
+        File.Delete(cached); File.Delete(Path.Combine(updatedStores.Root, "launcher-update.json")); File.Delete(Path.Combine(updatedStores.Root, "native-stores.json"));
         Directory.Delete(updatedStores.Root); Directory.Delete(updateRoot);
     }
     return;
 }
 
 void Check(bool result, string message) { if (!result) throw new Exception(message); Console.WriteLine("PASS " + message); }
+if (safe || args.Contains("--account-storage")) await AccountStorageChecks.Run(Check);
+if (args.Contains("--account-storage")) return;
 if (safe || args.Contains("--native-adapter")) NativeAdapterChecks.Run(Check);
 if (args.Contains("--native-adapter")) return;
 if (safe || args.Contains("--native-exit")) await NativeExitChecks.Run(Check);
