@@ -62,18 +62,19 @@ try {
     }
     }
     foreach ($record in $records) { Update-Shortcut $record.Path Remove $record }
+    if ($UserOnly) { Remove-ShortcutStateFiles; return }
+    if ($before) { Assert-LauncherSnapshot $official $before }
+    # Only exact addon-owned files; accounts, encryption keys, worlds and Hytale remain untouched.
+    $files = @('HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json')
+    foreach ($name in $files) { Assert-RegularPath (Join-Path $destination $name) }
+    # Keep recovery state and the Apps entry until payload removal succeeds, starting with the executable.
+    foreach ($name in $files) { $path = Join-Path $destination $name; if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }
     Remove-ShortcutStateFiles
-    if ($UserOnly) { return }
+    $journalLock.Delete(); $journalLock.Dispose(); $journalLock = $null
+    if (!(Get-ChildItem -LiteralPath $destination -Force)) { [IO.Directory]::Delete($destination) }
     if (Test-Path -LiteralPath $RegistryPath) {
         if ((Get-ItemProperty -LiteralPath $RegistryPath).InstallLocation -eq $destination) { Remove-Item -LiteralPath $RegistryPath }
     }
-    if ($before) { Assert-LauncherSnapshot $official $before }
-    # Only exact addon-owned files; accounts, encryption keys, worlds and Hytale remain untouched.
-    $files = @('HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json') + @($records | Where-Object Backup | ForEach-Object Backup)
-    foreach ($name in $files) { Assert-RegularPath (Join-Path $destination $name) }
-    foreach ($name in $files) { $path = Join-Path $destination $name; if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }
-    $journalLock.Delete(); $journalLock.Dispose(); $journalLock = $null
-    if (!(Get-ChildItem -LiteralPath $destination -Force)) { [IO.Directory]::Delete($destination) }
     Write-Output 'Addon removed. Hytale, accounts and game data preserved.'
 } catch {
     if ($Interactive) { Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show($_.Exception.Message, 'Hytale Accounts uninstall') | Out-Null }
