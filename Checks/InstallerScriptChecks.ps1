@@ -385,6 +385,46 @@ try {
     Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $foreignHash) 'uninstall preserves a replaced foreign shortcut and updated launcher'
     Check (!(Test-Path -LiteralPath (Join-Path $destination 'HytaleAccounts.exe'))) 'addon executable removed'
     Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) 'opaque stores, encryption keys, installation and UserData preserved'
+    $restorationCases = @()
+    foreach ($folder in @($programs,$commonPrograms)) {
+        foreach ($scenario in @('renamed','deleted','unchanged','replaced')) {
+            $path = Join-Path $folder ($scenario + '.lnk')
+            $previous = $shell.CreateShortcut($path); $previous.TargetPath = $official
+            $previous.Description = "$folder $scenario"; $previous.Save()
+            $restorationCases += [pscustomobject]@{ Scenario = $scenario; Path = $path; Current = $path; Hash = (Get-FileHash -LiteralPath $path).Hash; ForeignHash = '' }
+        }
+    }
+    & (Join-Path $package 'Install.ps1') @options
+    & (Join-Path $package 'Install.ps1') @options -UserOnly
+    foreach ($case in $restorationCases) {
+        if ($case.Scenario -in @('renamed','replaced')) {
+            $case.Current = Join-Path (Split-Path $case.Path) ('moved-' + (Split-Path $case.Path -Leaf))
+            [IO.File]::Move($case.Path, $case.Current)
+        }
+        if ($case.Scenario -eq 'deleted') { [IO.File]::Delete($case.Path) }
+        if ($case.Scenario -eq 'replaced') {
+            $foreign = $shell.CreateShortcut($case.Path); $foreign.TargetPath = Join-Path $root 'other.exe'; $foreign.Save()
+            $case.ForeignHash = (Get-FileHash -LiteralPath $case.Path).Hash
+        }
+    }
+    $beforeRemoval = (@($programs,$desktop,$commonPrograms,$commonDesktop) | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -Recurse | ForEach-Object FullName } | Sort-Object) -join "`n"
+    & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
+    & (Join-Path $package 'Uninstall.ps1') @options
+    foreach ($case in $restorationCases) {
+        if ($case.Scenario -eq 'deleted') {
+            Check (!(Test-Path -LiteralPath $case.Path)) 'uninstall does not recreate a deleted shortcut'
+        } else {
+            Check ((Get-FileHash -LiteralPath $case.Current).Hash -eq $case.Hash) "uninstall restores $($case.Scenario) shortcut byte-for-byte at its current location"
+        }
+        if ($case.Scenario -eq 'renamed') { Check (!(Test-Path -LiteralPath $case.Path)) 'renamed shortcut does not reappear under its original name' }
+        if ($case.Scenario -eq 'replaced') { Check ((Get-FileHash -LiteralPath $case.Path).Hash -eq $case.ForeignHash) 'unrelated replacement at the original path is preserved' }
+    }
+    $afterRemoval = (@($programs,$desktop,$commonPrograms,$commonDesktop) | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -Recurse | ForEach-Object FullName } | Sort-Object) -join "`n"
+    Check ($afterRemoval -ceq $beforeRemoval) 'restoration creates no duplicate launcher entries or deleted shortcuts'
+    Check (!$global:HytaleFixtureTasks.Count -and !(Test-Path -LiteralPath $destination)) 'renamed shortcut restoration completes removal with mocked tasks'
+    foreach ($case in $restorationCases) {
+        foreach ($path in @($case.Path,$case.Current) | Select-Object -Unique) { if (Test-Path -LiteralPath $path) { [IO.File]::Delete($path) } }
+    }
     $link = Join-Path $root 'linked'
     New-Item -ItemType Junction -Path $link -Target $env:LOCALAPPDATA | Out-Null
     $rejected = $false

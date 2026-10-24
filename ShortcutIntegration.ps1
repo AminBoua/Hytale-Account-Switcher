@@ -50,14 +50,15 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
     $file = Open-ShortcutFile $Path
     $scratch = Join-Path $state ([Guid]::NewGuid().ToString('N') + '.lnk')
     try {
-        if (!$file.Exists) {
-            if ($Operation -ne 'Remove' -or !$Record.Backup) { return }
-            $file.Dispose()
-            $file = Open-ShortcutFile $Path -Create # CREATE_NEW refuses a leaf planted since the missing-file check.
-            $file.Write((Read-ShortcutBytes (Join-Path $state $Record.Backup)))
-            return
-        }
+        if (!$file.Exists) { return }
         $bytes = $file.Read()
+        if ($Operation -eq 'Remove' -and !$Record) {
+            # Identify renamed links only by unchanged bytes held through restoration.
+            $hash = Get-ShortcutHash $bytes
+            $matches = @($records | Where-Object { $_.AppliedHash -and $_.AppliedHash -eq $hash })
+            if ($matches.Count -ne 1) { return }
+            $Record = $matches[0]
+        }
         Write-ShortcutBytes $scratch $bytes
         $link = $shell.CreateShortcut($scratch)
         if ($Operation -eq 'Remove') {
