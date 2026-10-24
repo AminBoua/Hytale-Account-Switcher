@@ -130,7 +130,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         if (!hasNativeSession && selected is not null) return selected;
         var initial = stores.CreatePending();
         // The official session may have changed accounts; verify it before updating any saved snapshot.
-        if (hasNativeSession) stores.Capture(initial);
+        if (hasNativeSession) stores.Capture(initial, requireSession: false);
         return initial;
     }
     private void CommitProfile(Guid profile, bool select, NativeStore? login = null)
@@ -284,7 +284,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             logoutRequest = null;
             verifiedSession = false;
             stores.MarkSignedOut(target);
-            stores.Capture(target);
+            stores.Capture(target, requireSession: false);
             // Verify remaining sessions through their native backend, never by reading credentials.
             var candidates = stores.Catalog.Stores.Where(s => s.Folder != target.Folder && !s.SignedOut).ToArray();
             foreach (var candidate in candidates)

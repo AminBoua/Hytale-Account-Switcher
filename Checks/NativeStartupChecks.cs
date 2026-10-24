@@ -129,6 +129,13 @@ internal static class NativeStartupChecks
                 File.WriteAllText(official, "opaque-latest-B");
                 stores.Activate(stores.Catalog.Stores.Single(s => s.Folder == verifiedB.Folder));
                 check(File.ReadAllText(official) == "opaque-latest-B", "matching existing native session keeps the latest refresh");
+                File.WriteAllText(official, "");
+                session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+                var signedOut = session.InitialStore(); stores.Activate(signedOut);
+                check(stores.IsPending(signedOut) && new FileInfo(official).Length == 0 &&
+                    stores.Catalog.Selected == verifiedB.Folder && File.ReadAllText(Snapshot(verifiedB)) == "opaque-recovery-B" &&
+                    typeof(NativeSession).GetField("verifiedSession", flags)!.GetValue(session) is false,
+                    "empty unauthenticated startup staging keeps native sign-in available without verifying or overwriting the saved account");
             }
             finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         }
@@ -197,18 +204,31 @@ internal static class NativeStartupChecks
             stores.RemoveRedundantPending(account with { Folder = account.Folder.ToUpperInvariant() }, account);
             check(File.ReadAllText(Path.Combine(Storage(account), "account.dat")) == "opaque-refreshed-2",
                 "catalog-referenced pending-named stores remain protected regardless of path casing");
+            foreach (var existing in new[] { false, true })
             foreach (var missing in new[] { false, true })
             {
                 File.WriteAllText(official, "opaque-recovery");
                 var session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
                 var staged = session.InitialStore();
                 typeof(NativeSession).GetField("active", flags)!.SetValue(session, staged);
+                typeof(NativeSession).GetField("verifiedSession", flags)!.SetValue(session, true);
+                var metadata = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
                 if (missing) File.Delete(official); else File.WriteAllText(official, "");
-                typeof(NativeSession).GetMethod("CommitProfile", flags)!.Invoke(session, [account.Profile!.Value, false, null]);
+                try
+                {
+                    typeof(NativeSession).GetMethod("CommitProfile", flags)!.Invoke(session, [existing ? account.Profile!.Value : Guid.NewGuid(), true, null]);
+                    throw new Exception("Missing or empty native session committed");
+                }
+                catch (TargetInvocationException ex) when (ex.InnerException is IOException) { }
                 stores.CleanupPending();
                 check(File.ReadAllText(Path.Combine(Storage(staged), "account.dat")) == "opaque-recovery" &&
-                    File.ReadAllText(Path.Combine(Storage(staged), ".keys", "key")) == "opaque-key",
-                    "missing or empty captured session retains the complete staging snapshot");
+                    File.ReadAllText(Path.Combine(Storage(staged), ".keys", "key")) == "opaque-key" &&
+                    File.ReadAllText(Path.Combine(Storage(account), "account.dat")) == "opaque-refreshed-2" &&
+                    File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(metadata) &&
+                    stores.Catalog.Selected == account.Folder && stores.Catalog.Active == staged.Folder && stores.IsPending(staged) &&
+                    Equals(typeof(NativeSession).GetField("active", flags)!.GetValue(session), staged) &&
+                    typeof(NativeSession).GetField("verifiedSession", flags)!.GetValue(session) is false,
+                    $"{(missing ? "missing" : "empty")} session rejects commit, blocks Play and preserves saved and staging data (existing account: {existing})");
             }
             File.WriteAllText(official, "opaque-locked-cleanup");
             var lockedSession = new NativeSession(stores, Dispatcher.CurrentDispatcher);
