@@ -84,12 +84,52 @@ public static class Setup
         return start;
     }
 
-    private static async Task IntegrateUser(string destination, bool uninstall)
+    private static async Task IntegrateUser(ProcessStartInfo start)
     {
-        using var process = Process.Start(UserIntegrationStart(destination, uninstall)) ?? throw new IOException("Could not update your shortcuts.");
+        using var process = Process.Start(start) ?? throw new IOException("Could not update your shortcuts.");
         var error = process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
         if (process.ExitCode != 0) throw new IOException("Could not update your shortcuts. " + await error);
+    }
+
+    internal static async Task Remove(string destination, Func<ProcessStartInfo, Task> integrateUser, Action<ProcessStartInfo> startRemoval)
+    {
+        var powershell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+        var start = new ProcessStartInfo(powershell) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
+        foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File" }) start.ArgumentList.Add(arg);
+        var script = Path.Combine(destination, "Uninstall.ps1");
+        NativeStores.RegularPath(script);
+        if (!File.Exists(script)) throw new IOException("The addon is not installed.");
+        start.ArgumentList.Add(script);
+        start.ArgumentList.Add("-UserSid");
+        start.ArgumentList.Add(WindowsIdentity.GetCurrent().User!.Value);
+        start.ArgumentList.Add("-WaitForPid");
+        start.ArgumentList.Add(Environment.ProcessId.ToString());
+        start.ArgumentList.Add("-Interactive");
+        // Older installations have only the machine journal; their guarded removal handles migration.
+        var userIntegration = File.Exists(Path.Combine(destination, "ShortcutIntegration.ps1"));
+        try
+        {
+            if (userIntegration)
+            {
+                var prepare = UserIntegrationStart(destination, uninstall: true);
+                prepare.ArgumentList.Add("-KeepJournal");
+                await integrateUser(prepare);
+            }
+            // The separate hidden process waits for this executable to exit before removing it.
+            startRemoval(start);
+        }
+        catch (Exception failure)
+        {
+            if (userIntegration)
+            {
+                try { await integrateUser(UserIntegrationStart(destination, uninstall: false)); }
+                catch (Exception recovery) { throw new AggregateException("Uninstall did not start and shortcut recovery failed. The restoration journal was retained for repair.", failure, recovery); }
+            }
+            throw;
+        }
+        // Repair can run while UAC is open; restore again under the journal lock before deleting state.
+        if (userIntegration) await integrateUser(UserIntegrationStart(destination, uninstall: true));
     }
 
     public static async Task<int> Run(bool uninstall)
@@ -98,22 +138,10 @@ public static class Setup
         if (uninstall)
         {
             if (IsAdministrator) throw new IOException("Remove the addon normally from Windows Settings so your shortcuts are restored as your Windows user.");
-            // Older installations have only the machine journal; their guarded removal handles migration.
-            if (File.Exists(Path.Combine(destination, "ShortcutIntegration.ps1"))) await IntegrateUser(destination, uninstall: true);
-            var powershell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
-            var start = new ProcessStartInfo(powershell) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
-            foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File" }) start.ArgumentList.Add(arg);
-            var script = Path.Combine(destination, "Uninstall.ps1");
-            NativeStores.RegularPath(script);
-            if (!File.Exists(script)) throw new IOException("The addon is not installed.");
-            start.ArgumentList.Add(script);
-            start.ArgumentList.Add("-UserSid");
-            start.ArgumentList.Add(WindowsIdentity.GetCurrent().User!.Value);
-            start.ArgumentList.Add("-WaitForPid");
-            start.ArgumentList.Add(Environment.ProcessId.ToString());
-            start.ArgumentList.Add("-Interactive");
-            // The separate hidden process waits for this executable to exit before removing it.
-            using var removal = Process.Start(start) ?? throw new IOException("Could not start uninstall.");
+            await Remove(destination, IntegrateUser, start =>
+            {
+                using var removal = Process.Start(start) ?? throw new IOException("Could not start uninstall.");
+            });
             return 0;
         }
         if (IsAdministrator) throw new IOException("Open HytaleAccounts-Setup.exe normally so Hytale starts as your Windows user.");
@@ -139,7 +167,7 @@ public static class Setup
             ?? throw new IOException("Could not start setup.");
         await worker.WaitForExitAsync();
         if (worker.ExitCode != 0) return worker.ExitCode; // The worker already displayed the setup error.
-        await IntegrateUser(destination, uninstall: false);
+        await IntegrateUser(UserIntegrationStart(destination, uninstall: false));
         using var launcher = Process.Start(LauncherStart(destination))
             ?? throw new IOException("Installed successfully, but the launcher could not open. Use your usual Hytale Launcher shortcut.");
         return 0;

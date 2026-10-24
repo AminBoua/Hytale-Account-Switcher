@@ -18,6 +18,7 @@ function Get-ScheduledTask { param($TaskName,$ErrorAction) @($global:HytaleFixtu
 function Disable-ScheduledTask { param($TaskName) }
 function Stop-ScheduledTask { param($TaskName) }
 function Unregister-ScheduledTask { param($TaskName,$Confirm) $global:HytaleFixtureTasks.Remove($TaskName) }
+function Get-CimInstance { param($ClassName,$Filter) } # Fixture payloads never have running processes.
 function Check($Condition, [string]$Message) {
     if (!$Condition) { throw "FAIL $Message" }
     Write-Host "PASS $Message"
@@ -92,8 +93,10 @@ try {
     $hashes = @{}; foreach ($file in $protected) { $hashes[$file] = (Get-FileHash -LiteralPath $file).Hash }
     $shell = New-Object -ComObject WScript.Shell
     $shortcutPath = Join-Path $programs 'Hytale Launcher.lnk'
-    $previous = $shell.CreateShortcut($shortcutPath); $previous.TargetPath = $official; $previous.Save()
+    $previous = $shell.CreateShortcut($shortcutPath); $previous.TargetPath = $official
+    $previous.Hotkey = 'CTRL+ALT+H'; $previous.WindowStyle = 7; $previous.Description = 'Original Hytale shortcut'; $previous.Save()
     $previousHash = (Get-FileHash -LiteralPath $shortcutPath).Hash
+    $previousHotkey = $shell.CreateShortcut($shortcutPath).Hotkey
     $originalLinks = @{$shortcutPath = $previousHash}
     foreach ($path in @((Join-Path $commonPrograms 'Hytale Launcher\Hytale Launcher.lnk'),(Join-Path $commonDesktop 'Hytale Launcher.lnk'))) {
         New-Item -ItemType Directory -Path (Split-Path $path) -Force | Out-Null
@@ -103,6 +106,53 @@ try {
     $officialUninstall = Join-Path $commonPrograms 'Hytale Launcher\Uninstall Hytale Launcher.lnk'
     $previous = $shell.CreateShortcut($officialUninstall); $previous.TargetPath = Join-Path (Split-Path $official) 'uninstall.exe'; $previous.Save()
     $uninstallHash = (Get-FileHash -LiteralPath $officialUninstall).Hash
+    # SetupChecks exercises the production orchestration; these phases use real scripts on disposable links.
+    foreach ($failureCode in @(1223, 2)) {
+        & (Join-Path $package 'Install.ps1') @options
+        & (Join-Path $package 'Install.ps1') @options -UserOnly
+        $userState = Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration'
+        $userManifest = Join-Path $userState 'shortcuts.json'
+        $userJournal = Get-Content -LiteralPath $userManifest -Raw | ConvertFrom-Json
+        $recoveryHashes = @{}
+        foreach ($name in @('shortcuts.json') + @($userJournal.Shortcuts | ForEach-Object Backup)) {
+            $path = Join-Path $userState $name
+            $recoveryHashes[$path] = (Get-FileHash -LiteralPath $path).Hash
+        }
+        $installedHash = (Get-FileHash -LiteralPath (Join-Path $destination 'HytaleAccounts.exe')).Hash
+        $entry = Get-ItemProperty -LiteralPath $registry | ConvertTo-Json -Compress
+        $tasks = @($global:HytaleFixtureTasks.Values | Sort-Object TaskName) | ConvertTo-Json -Depth 6 -Compress
+        & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly -KeepJournal
+        Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $previousHash) 'pre-elevation phase restores the original shortcut'
+        foreach ($path in $recoveryHashes.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $recoveryHashes[$path]) 'pre-elevation phase retains journal and original backup bytes' }
+        $failure = $null
+        try { & { throw [ComponentModel.Win32Exception]::new($failureCode) } }
+        catch {
+            $failure = $_
+            & (Join-Path $destination 'Install.ps1') @options -UserOnly
+        }
+        Check ($failure.Exception.NativeErrorCode -eq $failureCode) 'mock elevation cancels or fails after the per-user phase'
+        Check ((Get-FileHash -LiteralPath (Join-Path $destination 'HytaleAccounts.exe')).Hash -eq $installedHash) 'failed elevation leaves the installed addon intact'
+        Check ((Get-ItemProperty -LiteralPath $registry | ConvertTo-Json -Compress) -ceq $entry) 'failed elevation retains the existing Windows Apps entry'
+        Check ((@($global:HytaleFixtureTasks.Values | Sort-Object TaskName) | ConvertTo-Json -Depth 6 -Compress) -ceq $tasks) 'failed elevation retains both repair tasks'
+        $link = $shell.CreateShortcut($shortcutPath)
+        Check ($link.TargetPath -eq (Join-Path $destination 'HytaleAccounts.exe') -and !$link.Arguments -and $link.Hotkey -eq $previousHotkey -and $link.WindowStyle -eq 7) 'failed elevation restores addon launch through the same shortcut with its metadata'
+        $journal = Get-Content -LiteralPath $userManifest -Raw | ConvertFrom-Json
+        Check ($journal.Shortcuts.Count -eq 1 -and (Get-FileHash -LiteralPath (Join-Path $userState $journal.Shortcuts[0].Backup)).Hash -eq $previousHash) 'rollback retains a usable original restoration record'
+        & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly -KeepJournal
+        & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly
+        Check ($shell.CreateShortcut($shortcutPath).TargetPath -eq (Join-Path $destination 'HytaleAccounts.exe')) 'retained journal lets background repair recover if immediate rollback is unavailable'
+        # Simulate repair during UAC, then the successful-start finalization before machine removal.
+        & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly
+        & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly
+        Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $previousHash -and !(Test-Path -LiteralPath $userManifest)) 'finalization restores original bytes and prevents repair from reapplying the addon'
+        & (Join-Path $package 'Uninstall.ps1') @options
+        foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'later uninstall restores existing shortcuts byte-for-byte' }
+        $allLinks = @($programs,$desktop,$commonPrograms,$commonDesktop) | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -Recurse }
+        Check ($allLinks.Count -eq 4 -and (Get-FileHash -LiteralPath $officialUninstall).Hash -eq $uninstallHash) 'failed elevation and retry create no duplicate shortcuts'
+        Check (!(Test-Path -LiteralPath $destination) -and !(Test-Path -LiteralPath $registry) -and !$global:HytaleFixtureTasks.Count) 'later uninstall removes only addon installation, entry and owned tasks'
+        Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) 'cancellation recovery and retry preserve Hytale accounts and game data'
+        Assert-LauncherSnapshot $official $before
+    }
     Check-InstallPreflight 'Fresh installation'
     & (Join-Path $package 'Install.ps1') @options
     Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $previousHash) 'machine installation leaves per-user shortcuts for the unelevated phase'
