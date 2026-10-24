@@ -71,6 +71,12 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             Guid? profile = data.TryGetProperty("profile", out var value) && Guid.TryParse(value.GetString(), out var id) ? id : null;
             if (profile == Guid.Empty) return false;
             nativeName = data.TryGetProperty("username", out var name) ? name.GetString() : null;
+            if (profile is null && !holdLogin && pendingLogin is null && active is not null && !stores.IsPending(active))
+            {
+                // Native sign-in may authenticate a different account; preserve the restored store's identity and snapshot.
+                active = stores.CreatePending(); verifiedSession = false;
+                await Publish();
+            }
             ready?.TrySetResult(profile);
             if (!busy && active is not null && profile is Guid verified)
             {

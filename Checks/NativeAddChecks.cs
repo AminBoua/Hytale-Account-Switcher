@@ -28,6 +28,7 @@ internal static class NativeAddChecks
     }
     private static async Task RunCore(Action<bool, string> check)
     {
+        await SavedFallback(check);
         var root = SecurityFixture.Create("native-add-");
         var log = Path.Combine(root, "hytale-accounts.log");
         try
@@ -72,15 +73,17 @@ internal static class NativeAddChecks
             var handled = new HashSet<string>();
             var restored = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var failLoad = false;
+            var mismatchLoad = false;
             session.Status += _ =>
             {
                 if (Get("sessionRequest") is string request && handled.Add(request))
                 {
                     var operation = (string)Get("sessionOperation")!; operations.Add(operation);
-                    var isOther = File.ReadAllText(officialSession) == "opaque-accountA-session";
+                    var isOther = File.ReadAllText(officialSession) is "opaque-accountA-session" or "opaque-refreshed-accountA-session";
                     ((TaskCompletionSource<JsonElement>)Get("sessionResult")!).TrySetResult(JsonSerializer.SerializeToElement(new
                     {
-                        success = operation != "load" || !failLoad, profile = isOther ? other.Profile : oldProfile,
+                        success = operation != "load" || !failLoad,
+                        profile = operation == "load" && mismatchLoad && isOther ? Guid.NewGuid() : isOther ? other.Profile : oldProfile,
                         username = isOther ? "accountA" : "accountB", loggedIn = true
                     }));
                 }
@@ -151,6 +154,16 @@ internal static class NativeAddChecks
             await restored.Task.WaitAsync(TimeSpan.FromSeconds(5));
             check(session.IsOpen && Get("verifiedSession") is true && stores.Catalog.Selected == current.Folder &&
                 File.ReadAllText(officialSession) == "opaque-accountB-session", "switching still restores another saved account in the existing process");
+            mismatchLoad = true; restored = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            check(await Command(new { action = "select", store = other.Folder }), "saved-account switch begins native verification");
+            await restored.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            check(session.IsOpen && ReferenceEquals(Get("launcher"), process) && Get("verifiedSession") is true &&
+                Get("active") is NativeStore kept && kept.Folder == current.Folder && stores.Catalog.Selected == current.Folder &&
+                stores.Catalog.Active == current.Folder && Get("pendingLogin") is null &&
+                File.ReadAllText(officialSession) == "opaque-accountB-session" && File.ReadAllText(snapshot) == "opaque-refreshed-accountA-session" &&
+                ((string)Get("message")!).Contains("Native profile does not match the selected account."),
+                "mismatched saved-account switch rejects the profile and restores the previous session without rebinding either account or restarting");
+            mismatchLoad = false;
             check(await session.AddAccount(), "another Add can follow switching");
             var third = Pending();
             failLoad = true; restored = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -169,6 +182,75 @@ internal static class NativeAddChecks
         {
             if (File.Exists(log)) File.SetAttributes(log, FileAttributes.Normal);
             if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
+    private static async Task SavedFallback(Action<bool, string> check)
+    {
+        foreach (var login in new[] { "new-B", "saved-B", "saved-A" })
+        foreach (var starting in new[] { true, false })
+        {
+            var root = SecurityFixture.Create("native-saved-fallback-");
+            try
+            {
+                var stores = new NativeStores(root);
+                var official = Path.Combine(root, "account.dat");
+                string Snapshot(NativeStore store) => Path.Combine(stores.Folder(store.Folder), "AppData", "Hytale", "account.dat");
+                var profileB = Guid.NewGuid();
+                NativeStore? accountB = null;
+                if (login == "saved-B")
+                {
+                    accountB = stores.CommitPending(stores.CreatePending(), profileB, "accountB");
+                    File.WriteAllText(official, "opaque-old-B"); stores.Capture(accountB);
+                }
+                var accountA = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), "accountA");
+                File.WriteAllText(official, "opaque-A"); stores.Capture(accountA);
+                File.Delete(official);
+                var session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+                var initial = session.InitialStore();
+                stores.Activate(initial);
+                check(initial == accountA && File.ReadAllText(official) == "opaque-A", "missing official session restores saved fallback A");
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+                void Set(string name, object value) => typeof(NativeSession).GetField(name, flags)!.SetValue(session, value);
+                object? Get(string name) => typeof(NativeSession).GetField(name, flags)!.GetValue(session);
+                var signal = new TaskCompletionSource<Guid?>(); Set("ready", signal);
+                Task<bool> Command(object data) => (Task<bool>)typeof(NativeSession).GetMethod("Command", flags)!
+                    .Invoke(session, [JsonSerializer.SerializeToElement(data), signal])!;
+                using var process = Process.GetCurrentProcess();
+                Set("launcher", process); Set("active", initial); Set("busy", starting);
+                Set("holdLogin", true);
+                check(await Command(new { action = "ready", profile = (Guid?)null }) && Equals(Get("active"), initial),
+                    "signed-out reports during a saved-account transition keep strict store identity");
+                Set("holdLogin", false); Set("verifiedSession", !starting);
+                signal = new TaskCompletionSource<Guid?>(); Set("ready", signal);
+                File.Delete(official); // Native rejected the restored opaque session and displayed sign-in.
+                check(await Command(new { action = "ready", profile = (Guid?)null }) &&
+                    Get("active") is NativeStore pending && stores.IsPending(pending) && Get("pendingLogin") is null &&
+                    Get("verifiedSession") is false && signal.Task.IsCompletedSuccessfully && signal.Task.Result is null &&
+                    stores.Catalog.Selected == accountA.Folder && stores.Catalog.Stores.Single(s => s.Folder == accountA.Folder) == accountA &&
+                    File.ReadAllText(Snapshot(accountA)) == "opaque-A" && (accountB is null || File.ReadAllText(Snapshot(accountB)) == "opaque-old-B"),
+                    $"native signed-out fallback becomes pending without changing saved accounts or opening Add login (startup: {starting})");
+                var staged = (NativeStore)Get("active")!;
+                check(await Command(new { action = "ready", profile = (Guid?)null }) && Equals(Get("active"), staged),
+                    "repeated native sign-in reports reuse the same pending store");
+                Set("busy", false);
+                var profile = login == "saved-A" ? accountA.Profile!.Value : profileB;
+                File.WriteAllText(official, "opaque-new-login");
+                check(await Command(new { action = "ready", profile, username = login == "saved-A" ? "accountA" : "accountB" }),
+                    "native login after saved fallback is accepted");
+                var reloaded = new NativeStores(root);
+                var selected = reloaded.Catalog.Stores.Single(s => s.Folder == reloaded.Catalog.Selected);
+                check(selected.Profile == profile && reloaded.Catalog.Active == selected.Folder && Get("verifiedSession") is true &&
+                    Get("active") is NativeStore active && active.Folder == selected.Folder &&
+                    reloaded.Catalog.Stores.Count == (login == "saved-A" ? 1 : 2) &&
+                    (login == "saved-A" ? selected.Folder == accountA.Folder : accountB is null || selected.Folder == accountB.Folder) &&
+                    reloaded.Catalog.Stores.Single(s => s.Folder == accountA.Folder) == accountA &&
+                    File.ReadAllText(Snapshot(accountA)) == (login == "saved-A" ? "opaque-new-login" : "opaque-A") &&
+                    File.ReadAllText(Snapshot(selected)) == "opaque-new-login" && File.ReadAllText(official) == "opaque-new-login" &&
+                    session.IsOpen && ReferenceEquals(Get("launcher"), process) && !process.HasExited,
+                    $"{login} is saved or reused and selected after native sign-in, preserving A's identity and the launcher process");
+            }
+            finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         }
     }
 }
