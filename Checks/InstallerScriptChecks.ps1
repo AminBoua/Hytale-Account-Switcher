@@ -22,6 +22,44 @@ function Check($Condition, [string]$Message) {
     if (!$Condition) { throw "FAIL $Message" }
     Write-Host "PASS $Message"
 }
+function Get-InstallFixtureSnapshot {
+    [pscustomobject]@{
+        # Setup's diagnostic is expected on rejection; installation state must not change.
+        Files = (@(Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object FullName -ne (Join-Path $package 'install-error.txt') | Sort-Object FullName | ForEach-Object {
+            [pscustomobject]@{ Path = $_.FullName; Hash = if (!$_.PSIsContainer) { (Get-FileHash -LiteralPath $_.FullName).Hash } }
+        }) | ConvertTo-Json -Depth 4 -Compress)
+        Registry = $(if (Test-Path -LiteralPath $registry) { Get-ItemProperty -LiteralPath $registry | ConvertTo-Json -Compress })
+        Tasks = (@($global:HytaleFixtureTasks.Values | Sort-Object TaskName) | ConvertTo-Json -Depth 6 -Compress)
+    }
+}
+function Check-InstallPreflight([string]$Phase) {
+    foreach ($case in @(
+        @{ Name = 'conflicting SYSTEM task'; TaskName = 'HytaleAccounts-Repair'; Error = 'Another task owns the shortcut repair entry; preserved.' },
+        @{ Name = 'conflicting user task'; TaskName = ('HytaleAccounts-Repair-' + $options.UserSid); Error = 'Another task owns the user shortcut repair entry; preserved.' },
+        @{ Name = 'invalid user SID'; UserSid = 'S-1-5-18'; Error = 'Invalid shortcut user SID.' }
+    )) {
+        # An existing journal already rejects a different SID before task preflight.
+        if ($case.UserSid -and (Test-Path -LiteralPath (Join-Path $destination 'shortcuts.json'))) { continue }
+        $savedTasks = $global:HytaleFixtureTasks.Clone()
+        $testOptions = $options.Clone()
+        try {
+            if ($case.TaskName) {
+                $global:HytaleFixtureTasks[$case.TaskName] = [pscustomobject]@{
+                    TaskName = $case.TaskName; Actions = @([pscustomobject]@{ Execute = 'foreign.exe'; Arguments = 'preserve me' }); State = 'Ready'
+                }
+            }
+            if ($case.UserSid) { $testOptions.UserSid = $case.UserSid }
+            $snapshot = Get-InstallFixtureSnapshot
+            $failure = $null
+            try { & (Join-Path $package 'Install.ps1') @testOptions } catch { $failure = $_ }
+            Check ($failure -and $failure.Exception.Message -eq $case.Error) "$Phase rejects $($case.Name)"
+            $after = Get-InstallFixtureSnapshot
+            Check ($after.Files -ceq $snapshot.Files) "$Phase rejection preserves files, directories and shortcuts"
+            Check ($after.Registry -ceq $snapshot.Registry) "$Phase rejection preserves registry entries"
+            Check ($after.Tasks -ceq $snapshot.Tasks) "$Phase rejection preserves all tasks"
+        } finally { $global:HytaleFixtureTasks = $savedTasks }
+    }
+}
 function Remove-Fixture([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     if ($full -ne $root -and !$full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Fixture cleanup escaped its root.' }
@@ -65,6 +103,7 @@ try {
     $officialUninstall = Join-Path $commonPrograms 'Hytale Launcher\Uninstall Hytale Launcher.lnk'
     $previous = $shell.CreateShortcut($officialUninstall); $previous.TargetPath = Join-Path (Split-Path $official) 'uninstall.exe'; $previous.Save()
     $uninstallHash = (Get-FileHash -LiteralPath $officialUninstall).Hash
+    Check-InstallPreflight 'Fresh installation'
     & (Join-Path $package 'Install.ps1') @options
     Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $previousHash) 'machine installation leaves per-user shortcuts for the unelevated phase'
     & (Join-Path $package 'Install.ps1') @options -UserOnly
@@ -77,6 +116,9 @@ try {
     Check ($allLinks.Count -eq 4 -and !@($allLinks | Where-Object Name -match 'with Accounts|Uninstall Hytale Accounts').Count) 'installation creates no duplicate launcher or addon uninstall shortcut'
     Check ((Get-FileHash -LiteralPath $officialUninstall).Hash -eq $uninstallHash) 'official Hytale uninstaller shortcut remains untouched'
     Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -like '*--uninstall') 'Windows uninstall entry invokes the same executable'
+    Set-Content -LiteralPath (Join-Path $destination 'HytaleAccounts.exe') -Value 'previous non-executed helper fixture'
+    Set-ItemProperty -LiteralPath $registry -Name DisplayVersion -Value 'previous fixture version'
+    Check-InstallPreflight 'Existing installation'
     $wrongUser = $options.Clone(); $wrongUser.UserSid = 'S-1-5-21-1-2-3-1001'
     foreach ($operation in @('Install.ps1','Uninstall.ps1')) {
         $ownedHash = (Get-FileHash -LiteralPath $shortcutPath).Hash
