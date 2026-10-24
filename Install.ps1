@@ -64,10 +64,66 @@ if (Test-Path -LiteralPath $manifestPath) {
 }
 $shell = New-Object -ComObject WScript.Shell
 if (!$UserOnly) {
-foreach ($name in @('HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json')) { Assert-RegularPath (Join-Path $destination $name) }
-Copy-Item -LiteralPath $helper -Destination $installed -Force
-foreach ($name in @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $destination $name) -Force }
-$before | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $destination 'launcher-baseline.json') -Encoding UTF8
+$payload = @()
+$backupPrefix = Join-Path $destination ('.upgrade-' + [Guid]::NewGuid().ToString('N') + '-')
+$keepBackups = $false
+try {
+    # Stage every source before acquiring destinations; setup holds its sources read-only.
+    foreach ($name in @('HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json')) {
+        $path = Join-Path $destination $name
+        Assert-RegularPath $path
+        $bytes = if ($name -eq 'launcher-baseline.json') { ,([Text.Encoding]::UTF8.GetBytes(($before | ConvertTo-Json))) }
+        else {
+            $source = if ($name -eq 'HytaleAccounts.exe') { $helper } else { Join-Path $PSScriptRoot $name }
+            Assert-RegularPath $source
+            ,([IO.File]::ReadAllBytes($source))
+        }
+        $payload += [pscustomobject]@{ Path = $path; Bytes = [byte[]]$bytes; File = $null; Original = $null; Created = $false; Changed = $false; Backup = $null; BackupPath = ($backupPrefix + $name + '.bak') }
+    }
+    # Hold the entire existing set before creating or overwriting any payload file.
+    foreach ($entry in $payload) {
+        $entry.File = Open-ShortcutFile $entry.Path
+        if ($entry.File.Exists) { $entry.Original = $entry.File.Read() }
+    }
+    foreach ($entry in $payload) {
+        if (!$entry.File.Exists) {
+            $entry.File.Dispose()
+            $entry.File = Open-ShortcutFile $entry.Path -Create
+            $entry.Created = $true
+        } else {
+            $entry.Backup = Open-ShortcutFile $entry.BackupPath -Create
+            $entry.Backup.Write($entry.Original)
+        }
+    }
+    foreach ($entry in $payload) {
+        $entry.Changed = $true # Include a partially written file in rollback.
+        $entry.File.Write($entry.Bytes)
+    }
+} catch {
+    $failure = $_
+    $rollbackErrors = @()
+    for ($i = $payload.Count - 1; $i -ge 0; $i--) {
+        $entry = $payload[$i]
+        try {
+            if ($entry.Created) { $entry.File.Delete() }
+            elseif ($entry.Changed) { $entry.File.Write($entry.Original) }
+        } catch { $rollbackErrors += $_.Exception.Message }
+    }
+    if ($rollbackErrors.Count) {
+        $keepBackups = $true
+        throw "Addon replacement failed: $failure. Rollback failed: $($rollbackErrors -join '; '). Previous payload backups retained at $backupPrefix*.bak."
+    }
+    throw
+} finally {
+    foreach ($entry in $payload) {
+        if ($entry.Backup) {
+            try { if (!$keepBackups) { $entry.Backup.Delete() } }
+            catch { Write-Warning "Could not remove upgrade backup: $($entry.BackupPath)" }
+            finally { $entry.Backup.Dispose() }
+        }
+        if ($entry.File) { $entry.File.Dispose() }
+    }
+}
 }
 # Keep every existing launcher's name and location, including official system-wide shortcuts.
 foreach ($folder in $scanRoots) {

@@ -26,7 +26,7 @@ function Get-InstallFixtureSnapshot {
     [pscustomobject]@{
         # Setup's diagnostic is expected on rejection; installation state must not change.
         Files = (@(Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object FullName -ne (Join-Path $package 'install-error.txt') | Sort-Object FullName | ForEach-Object {
-            [pscustomobject]@{ Path = $_.FullName; Hash = if (!$_.PSIsContainer) { (Get-FileHash -LiteralPath $_.FullName).Hash } }
+            [pscustomobject]@{ Path = $_.FullName; Hash = if (!$_.PSIsContainer) { (Get-FileHash -LiteralPath $_.FullName).Hash }; Permissions = (Get-Acl -LiteralPath $_.FullName).Sddl }
         }) | ConvertTo-Json -Depth 4 -Compress)
         Registry = $(if (Test-Path -LiteralPath $registry) { Get-ItemProperty -LiteralPath $registry | ConvertTo-Json -Compress })
         Tasks = (@($global:HytaleFixtureTasks.Values | Sort-Object TaskName) | ConvertTo-Json -Depth 6 -Compress)
@@ -81,8 +81,20 @@ try {
     $env:ProgramFiles = Join-Path $root 'program-files'
     $official = Join-Path $env:ProgramFiles 'Hypixel Studios\Hytale Launcher\hytale-launcher.exe'
     foreach ($folder in @($package, $programs, (Split-Path $official))) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
-    foreach ($name in @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1')) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $package }
-    Set-Content -LiteralPath (Join-Path $package 'HytaleAccounts.exe') -Value 'non-executed helper fixture'
+    $scripts = @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1')
+    foreach ($name in $scripts) {
+        Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $package
+        $comment = if ($name -like '*.cs') { '//' } else { '#' }
+        Add-Content -LiteralPath (Join-Path $package $name) -Value "`r`n$comment OLD addon payload: $name"
+    }
+    Set-Content -LiteralPath (Join-Path $package 'HytaleAccounts.exe') -Value 'OLD non-executed helper fixture'
+    # Only the fixture's loaded class has a write fault hook; shipped payloads have none.
+    $source = Get-Content -LiteralPath (Join-Path $package 'ShortcutFile.cs') -Raw
+    $write = 'stream.Position = 0; stream.Write(bytes, 0, bytes.Length);'
+    Check ($source.Contains($write)) 'installer write-fault boundary found'
+    $source = $source.Replace($write, ($write + ' if (InstallerWriteProbe.AfterWrite != null) InstallerWriteProbe.AfterWrite(bytes);'))
+    $source += 'public static class InstallerWriteProbe { public static System.Action<byte[]> AfterWrite; }'
+    Add-Type -TypeDefinition $source
     Set-Content -LiteralPath $official -Value 'official launcher fixture'
     . (Join-Path $package 'InstallerSafety.ps1')
     $before = Get-LauncherSnapshot $official
@@ -116,9 +128,92 @@ try {
     Check ($allLinks.Count -eq 4 -and !@($allLinks | Where-Object Name -match 'with Accounts|Uninstall Hytale Accounts').Count) 'installation creates no duplicate launcher or addon uninstall shortcut'
     Check ((Get-FileHash -LiteralPath $officialUninstall).Hash -eq $uninstallHash) 'official Hytale uninstaller shortcut remains untouched'
     Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -like '*--uninstall') 'Windows uninstall entry invokes the same executable'
-    Set-Content -LiteralPath (Join-Path $destination 'HytaleAccounts.exe') -Value 'previous non-executed helper fixture'
+    $uninstallPath = Join-Path $destination 'Uninstall.ps1'
+    $acl = Get-Acl -LiteralPath $uninstallPath
+    $acl.SetAccessRuleProtection($true, $true)
+    Set-Acl -LiteralPath $uninstallPath -AclObject $acl
+    foreach ($name in $scripts) {
+        Copy-Item -LiteralPath (Join-Path $repository $name) -Destination (Join-Path $package $name) -Force
+        $comment = if ($name -like '*.cs') { '//' } else { '#' }
+        Add-Content -LiteralPath (Join-Path $package $name) -Value "`r`n$comment NEW addon payload: $name"
+    }
+    Set-Content -LiteralPath (Join-Path $package 'HytaleAccounts.exe') -Value 'NEW non-executed helper fixture with different length'
     Set-ItemProperty -LiteralPath $registry -Name DisplayVersion -Value 'previous fixture version'
     Check-InstallPreflight 'Existing installation'
+    $replacementNames = @('HytaleAccounts.exe') + $scripts + @('launcher-baseline.json')
+    $oldPayload = @{}
+    foreach ($name in $replacementNames) {
+        $path = Join-Path $destination $name
+        $oldPayload[$name] = [pscustomobject]@{ Bytes = [IO.File]::ReadAllBytes($path); Hash = (Get-FileHash -LiteralPath $path).Hash; Permissions = (Get-Acl -LiteralPath $path).Sddl }
+    }
+    foreach ($name in @('HytaleAccounts.exe') + $scripts) {
+        Check ($oldPayload[$name].Hash -ne (Get-FileHash -LiteralPath (Join-Path $package $name)).Hash) "upgrade fixture has distinct old/new $name bytes"
+    }
+    # Include a missing destination in rollback, as when an upgrade introduces a script.
+    foreach ($scenario in @('locked later destination','partial later write','missing destination','rollback write failure')) {
+        foreach ($name in $replacementNames) { [IO.File]::WriteAllBytes((Join-Path $destination $name), $oldPayload[$name].Bytes) }
+        Set-ItemProperty -LiteralPath $registry -Name DisplayVersion -Value 'previous fixture version'
+        $missingPath = Join-Path $destination 'InstallerSafety.ps1'
+        if ($scenario -eq 'missing destination') { [IO.File]::Delete($missingPath) }
+        $snapshot = Get-InstallFixtureSnapshot
+        $locked = $null
+        $probe = [pscustomobject]@{ HelperReplaced = $false; WriteFaultReached = $false }
+        $newHelper = [IO.File]::ReadAllText((Join-Path $package 'HytaleAccounts.exe'))
+        try {
+            if ($scenario -eq 'locked later destination') {
+                $locked = [IO.File]::Open((Join-Path $destination 'Repair-Integration.ps1'), 'Open', 'Read', 'Read')
+            } else {
+                [InstallerWriteProbe]::AfterWrite = {
+                    param($bytes)
+                    $text = [Text.Encoding]::UTF8.GetString($bytes)
+                    if ($text -ceq $newHelper) { $probe.HelperReplaced = $true }
+                    if ($text.Contains('# NEW addon payload: Repair-Integration.ps1')) {
+                        if ($scenario -ne 'rollback write failure') { [InstallerWriteProbe]::AfterWrite = $null }
+                        Check $probe.HelperReplaced 'earlier helper replacement completed before the injected failure'
+                        $probe.WriteFaultReached = $true
+                        throw 'Controlled failure after later payload write.'
+                    }
+                    if ($scenario -eq 'rollback write failure' -and $probe.WriteFaultReached -and $text.Contains('# OLD addon payload: Repair-Integration.ps1')) {
+                        [InstallerWriteProbe]::AfterWrite = $null
+                        throw 'Controlled rollback write failure.'
+                    }
+                }
+            }
+            $failure = $null
+            try { & (Join-Path $package 'Install.ps1') @options } catch { $failure = $_ }
+        } finally {
+            if ($locked) { $locked.Dispose() }
+            [InstallerWriteProbe]::AfterWrite = $null
+        }
+        if ($scenario -eq 'locked later destination') {
+            Check ($null -ne $failure) 'upgrade rejects a locked later destination'
+        } else {
+            Check ($failure -and $probe.WriteFaultReached -and $failure.ToString().Contains('Controlled failure after later payload write.')) "$scenario exercises rollback after replacement begins: $failure"
+        }
+        if ($scenario -eq 'rollback write failure') {
+            $backups = @(Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*.bak' -Force)
+            Check ($backups.Count -eq $replacementNames.Count -and $failure.ToString().Contains('Controlled rollback write failure.') -and $failure.ToString().Contains('Previous payload backups retained')) 'rollback failure reports and retains the entire previous payload for recovery'
+            # Exercise manual recovery using only the retained bytes, preserving destination ACLs.
+            foreach ($name in $replacementNames) {
+                $backup = @($backups | Where-Object Name -like ('*-' + $name + '.bak'))
+                Check ($backup.Count -eq 1 -and (Get-FileHash -LiteralPath $backup[0].FullName).Hash -eq $oldPayload[$name].Hash) "retained backup has the previous $name bytes"
+                [IO.File]::WriteAllBytes((Join-Path $destination $name), [IO.File]::ReadAllBytes($backup[0].FullName))
+                [IO.File]::Delete($backup[0].FullName)
+            }
+        }
+        $after = Get-InstallFixtureSnapshot
+        Check ($after.Files -ceq $snapshot.Files) "$scenario preserves or restores all bytes, permissions, directories and shortcuts"
+        Check ($after.Registry -ceq $snapshot.Registry -and $after.Tasks -ceq $snapshot.Tasks) "$scenario preserves Windows Apps uninstall availability and task ownership"
+        Assert-LauncherSnapshot $official $before
+        Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) "$scenario leaves Hytale data untouched"
+        & (Join-Path $package 'Install.ps1') @options
+        foreach ($name in @('HytaleAccounts.exe') + $scripts) {
+            Check ((Get-FileHash -LiteralPath (Join-Path $destination $name)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $package $name)).Hash) "$scenario retry installs the new $name"
+        }
+        foreach ($name in $replacementNames) { Check ((Get-Acl -LiteralPath (Join-Path $destination $name)).Sddl -ceq $oldPayload[$name].Permissions) "$scenario retry preserves $name permissions" }
+        Check (!@(Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*' -Force).Count) "$scenario retry leaves no upgrade backups"
+        Check ((Get-ItemProperty -LiteralPath $registry).DisplayVersion -eq '0.1.2') "$scenario retry completes Windows Apps registration"
+    }
     $wrongUser = $options.Clone(); $wrongUser.UserSid = 'S-1-5-21-1-2-3-1001'
     foreach ($operation in @('Install.ps1','Uninstall.ps1')) {
         $ownedHash = (Get-FileHash -LiteralPath $shortcutPath).Hash
@@ -243,6 +338,7 @@ try {
         Check $fixtureHelper.Closed 'setup closes a leftover helper error dialog before waiting for exit'
     }
 } finally {
+    if ('InstallerWriteProbe' -as [type]) { [InstallerWriteProbe]::AfterWrite = $null }
     if (Test-Path -LiteralPath $registry) { Remove-Item -LiteralPath $registry }
     $env:LOCALAPPDATA = $oldLocal
     $env:ProgramFiles = $oldPrograms
