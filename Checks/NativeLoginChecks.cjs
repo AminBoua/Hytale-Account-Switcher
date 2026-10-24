@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 let tick, nativeLogouts = 0, generated = 0, requestId = 0, failLogin = false;
 const calls = [], created = [], browserUrls = [], events = {}, nativeActions = [];
+const deliveryFailures = new Map(), delivered = [];
 const timers = new Map();
 let timerId = 0, automaticSwitch = false, showDropdown = false, clickHandler, loadGate, urlGate;
 const accountB = { uuid: 'accountB-profile', username: 'accountB' };
@@ -47,6 +48,11 @@ vm.runInNewContext(source, {
   fetch: async (url, options) => {
     if (options.body) {
       const data = JSON.parse(options.body); calls.push(data);
+      if (deliveryFailures.get(data.request)) {
+        deliveryFailures.set(data.request, deliveryFailures.get(data.request) - 1);
+        throw Error('result POST failed before delivery');
+      }
+      delivered.push(data);
       if (data.action === 'add') state.login = 'login-' + ++requestId;
       if (['cancel', 'login-failed'].includes(data.action) && data.loginRequest === state.login) state.login = null;
       if (automaticSwitch && data.action === 'select') {
@@ -179,6 +185,43 @@ vm.runInNewContext(source, {
   assert.equal(nativeLogouts, 1, 'clearing cached state never logs out a fallback account');
   assert.equal(browserUrls.length, browserCount, 'logout and sign-in refresh never open the browser automatically');
   state.session = null; state.busy = false; state.login = null;
+  for (const operation of ['stop', 'load', 'run', 'clear', 'logout']) {
+    timers.clear();
+    nativeProfile = user.getUserProfile = accountA;
+    const request = 'retry-' + operation;
+    if (operation === 'logout') state.logout = request;
+    else state.session = { request, operation };
+    state.busy = true;
+    deliveryFailures.set(request, 1);
+    const beforeActions = nativeActions.length, beforeLogouts = nativeLogouts;
+    await tick();
+    const completed = calls.at(-1);
+    assert.equal(completed.request, request);
+    assert.equal(completed.success, true, 'native operation succeeds before result delivery fails');
+    assert(!delivered.some(call => call.request === request), 'the first result never reaches the helper');
+    assert(playBlocked(), 'failed delivery keeps Play blocked');
+    const scheduled = [...timers.entries()].at(-1);
+    assert(scheduled && scheduled[1].delay <= 25, 'failed result delivery retains immediate transition scheduling');
+    nativeProfile = accountB;
+    timers.delete(scheduled[0]); await scheduled[1].fn();
+    assert.deepEqual(delivered.at(-1), completed, 'retry delivers the original completed result');
+    await tick();
+    assert.deepEqual(calls.at(-1), completed, 'keep reporting the cached result while the helper requests it');
+    assert.equal(nativeActions.length - beforeActions, operation === 'logout' ? 0 : 1, 'each session operation executes exactly once across retries');
+    assert.equal(nativeLogouts - beforeLogouts, operation === 'logout' ? 1 : 0, 'native logout executes exactly once across retries');
+    const replacement = request + '-new';
+    if (operation === 'logout') state.logout = replacement;
+    else state.session = { request: replacement, operation };
+    deliveryFailures.set(replacement, 1);
+    await tick();
+    assert.equal(calls.at(-1).request, replacement, 'changed requests discard the previous completed result');
+    assert.equal(nativeActions.length - beforeActions, operation === 'logout' ? 0 : 2, 'a new session request executes its own operation once');
+    assert.equal(nativeLogouts - beforeLogouts, operation === 'logout' ? 2 : 0, 'a new logout request executes its own operation once');
+    const reportedCount = calls.filter(call => [request, replacement].includes(call.request)).length;
+    state.session = null; state.logout = null; state.busy = false;
+    await tick();
+    assert.equal(calls.filter(call => [request, replacement].includes(call.request)).length, reportedCount, 'withdrawn requests discard undelivered results');
+  }
   state.active = state.selected = 'accountB'; state.profile = accountB.uuid;
   nativeProfile = user.getUserProfile = accountB;
   timers.clear(); await tick();
@@ -204,5 +247,6 @@ vm.runInNewContext(source, {
   console.log('PASS switching pauses, reloads and resumes native state once per request without logout or browser login');
   console.log('PASS logout executes once and final-account sign-in clears cached identity without logging out other accounts');
   console.log('PASS account clicks immediately process native stages with at most 100 ms scheduling delay and no fast idle polling');
+  console.log('PASS lost session/logout results retry immediately with identical payloads and exactly one native execution per request');
   console.log('PASS the existing row cancels login, restores Play/switching, and fences late profile loads and browser opens across retries');
 })().catch(error => { console.error(error); process.exitCode = 1; });

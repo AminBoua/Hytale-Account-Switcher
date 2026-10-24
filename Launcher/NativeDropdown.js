@@ -10,8 +10,7 @@
   const url = new URL(document.currentScript.src);
   const capability = url.pathname.split('/')[1];
   let state, user, pending = false, signature = '', reported = '', loginSince = 0, loginOpened = '', loginCompleted = '';
-  let logoutAttempt = '';
-  let sessionAttempt = '', updating = false;
+  let logoutResult, sessionResult, updating = false;
   let listening = false;
   let commandVersion = 0;
   let fastUpdate;
@@ -94,6 +93,8 @@
       const next = await request('state');
       if (version !== commandVersion) return;
       state = next;
+      if (sessionResult?.request !== state.session?.request) sessionResult = null;
+      if (logoutResult?.request !== state.logout) logoutResult = null;
       const loginRequest = state.login;
       const current = () => version === commandVersion && state?.login === loginRequest;
       if (!listening && window.runtime?.EventsOn) {
@@ -107,9 +108,8 @@
       document.documentElement?.toggleAttribute('data-account-transition', !!state.holdLogin);
       refresh();
       if (state.session) {
-        if (sessionAttempt !== state.session.request) {
+        if (!sessionResult) {
           const operation = state.session.operation, requestId = state.session.request;
-          sessionAttempt = requestId;
           let success = false, profile = null, loggedIn = null;
           try {
             if (!['stop', 'load', 'run', 'clear'].includes(operation)) throw new Error('Invalid native operation.');
@@ -130,21 +130,23 @@
             }
             success = true;
           } catch { /* The helper restores and verifies the previous native session. */ }
-          await request('command', { action: 'session-result', request: requestId, success,
-            profile: profile?.uuid ?? null, username: profile?.username ?? null, loggedIn });
+          sessionResult = { action: 'session-result', request: requestId, success,
+            profile: profile?.uuid ?? null, username: profile?.username ?? null, loggedIn };
         }
+        await request('command', sessionResult);
         return;
       }
       if (state.logout) {
-        if (logoutAttempt !== state.logout) {
-          logoutAttempt = state.logout;
+        if (!logoutResult) {
+          const requestId = state.logout;
           let success = false;
           try {
             await window.go.account.Service.LogoutUser();
             success = (await window.go.account.Service.IsUserLoggedIn()) === false;
           } catch { /* Report failure without deleting any store files. */ }
-          await request('command', { action: 'logout-result', request: state.logout, success });
+          logoutResult = { action: 'logout-result', request: requestId, success };
         }
+        await request('command', logoutResult);
         return;
       }
       if (loginRequest && loginOpened !== loginRequest) {
@@ -186,7 +188,7 @@
     finally {
       updating = false;
       // Keep the idle poll quiet; advance native transitions without one-second gaps.
-      if (pending || state?.busy || state?.session || state?.logout) {
+      if (pending || state?.busy || state?.session || state?.logout || sessionResult || logoutResult) {
         clearTimeout(fastUpdate);
         fastUpdate = setTimeout(update, 25);
       }
