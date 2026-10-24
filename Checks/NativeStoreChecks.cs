@@ -41,6 +41,8 @@ if (args.Length == 2 && args[0] == "--verify-image")
 void Check(bool result, string message) { if (!result) throw new Exception(message); Console.WriteLine("PASS " + message); }
 if (safe || args.Contains("--account-storage")) await AccountStorageChecks.Run(Check);
 if (args.Contains("--account-storage")) return;
+if (safe || args.Contains("--logging")) await LoggingChecks.Run(Check);
+if (args.Contains("--logging")) return;
 if (safe || args.Contains("--native-adapter")) NativeAdapterChecks.Run(Check);
 if (args.Contains("--native-adapter")) return;
 if (safe || args.Contains("--native-exit")) await NativeExitChecks.Run(Check);

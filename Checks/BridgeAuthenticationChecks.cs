@@ -9,7 +9,7 @@ internal static class BridgeAuthenticationChecks
     {
         var commands = 0;
         await using var bridge = new LocalAccountBridge(_ => { Interlocked.Increment(ref commands); return Task.FromResult(true); });
-        await using var other = new LocalAccountBridge(_ => Task.FromResult(true));
+        await using var other = new LocalAccountBridge(_ => Task.FromResult(false));
         using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(10) };
         check(bridge.Capability.Length == 43 && bridge.Capability != other.Capability &&
             bridge.Capability.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_'), "bridges use distinct per-launch 256-bit capabilities");
@@ -70,5 +70,6 @@ internal static class BridgeAuthenticationChecks
         await Expect("authorized command invokes handler", HttpStatusCode.NoContent, token: bearer);
         check(commands == 1, "only the authorized valid command reached the handler");
         await Expect("capability from another launch cannot be replayed", HttpStatusCode.Unauthorized, token: bearer, endpoint: other.Endpoint);
+        await Expect("authenticated command refusal is returned to caller", HttpStatusCode.BadRequest, token: "Bearer " + other.Capability, endpoint: other.Endpoint);
     }
 }
