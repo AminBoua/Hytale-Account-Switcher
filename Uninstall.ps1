@@ -63,6 +63,14 @@ try {
     }
     }
     foreach ($record in $records) { Update-Shortcut $record.Path Remove $record }
+    foreach ($folder in $roots) {
+        Assert-RegularPath $folder
+        if (Test-Path -LiteralPath $folder) {
+            foreach ($file in Get-ChildItem -LiteralPath $folder -Filter '*.lnk' -File -Recurse) {
+                if ($file.FullName -notin $records.Path) { Update-Shortcut $file.FullName Remove $null }
+            }
+        }
+    }
     if ($UserOnly) { if (!$KeepJournal) { Remove-ShortcutStateFiles }; return }
     if ($before) { Assert-LauncherSnapshot $official $before }
     # Only exact addon-owned files; accounts, encryption keys, worlds and Hytale remain untouched.

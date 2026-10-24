@@ -105,11 +105,13 @@ try {
     OfficialLink; Update-Shortcut $path Install ($records | Select-Object -First 1)
     $record = $records | Select-Object -First 1
     [IO.File]::Delete($path)
+    Update-Shortcut $path Remove $record
+    Check (!(Test-Path -LiteralPath $path)) 'removal leaves a deleted shortcut missing'
     $script:beforeOpen = {
         param($opened,$create)
         if ($opened -eq $path -and $create) { $script:beforeOpen = $null; [IO.File]::WriteAllText($path, 'new user file') }
     }
-    Reject { Update-Shortcut $path Remove $record } 'missing shortcut restore refuses a concurrently created leaf'
+    Reject { Write-ShortcutBytes $path ([Text.Encoding]::UTF8.GetBytes('fixture')) } 'shortcut creation refuses a concurrently created leaf'
     Check ([IO.File]::ReadAllText($path) -eq 'new user file') 'concurrent user file preserved'
     [IO.File]::Delete($path)
     # Convert the held, empty parent into a junction immediately before NtCreateFile.
@@ -144,6 +146,30 @@ try {
     Update-Shortcut $path Remove $record
     $restored = $shell.CreateShortcut($path)
     Check ($restored.TargetPath -eq $official -and $restored.Description -eq 'User changed description only') 'removal preserves edited metadata while restoring a working official target'
+    OfficialLink; Update-Shortcut $path Install $record
+    $applied = [IO.File]::ReadAllBytes($path)
+    $renamed = Join-Path $folder 'Renamed.lnk'
+    [IO.File]::Move($path, $renamed)
+    $script:beforeOpen = {
+        param($opened,$create)
+        if ($opened -ne $renamed) { return }
+        $script:beforeOpen = $null
+        $link = $shell.CreateShortcut($renamed); $link.Description = 'Changed after discovery'; $link.Save()
+        $script:racingHash = (Get-FileHash -LiteralPath $renamed).Hash
+    }
+    Update-Shortcut $renamed Remove $null
+    Check ((Get-FileHash -LiteralPath $renamed).Hash -eq $script:racingHash) 'renamed shortcut changed before acquisition is preserved'
+    [IO.File]::WriteAllBytes($renamed, $applied)
+    $script:afterOpen = {
+        param($opened,$create,$lease)
+        if ($opened -ne $renamed) { return }
+        Reject { [IO.File]::WriteAllText($renamed, 'racing user edit') } 'renamed shortcut hash and restoration hold the same file'
+        Reject { [IO.Directory]::Move($folder, $folder + '-moved') } 'renamed shortcut restoration pins its directory'
+    }
+    Update-Shortcut $renamed Remove $null
+    $script:afterOpen = $null
+    Check ((Get-ShortcutHash (Read-ShortcutBytes $renamed)) -eq (Get-ShortcutHash (Read-ShortcutBytes (Join-Path $state $record.Backup)))) 'unchanged renamed shortcut restores its exact backup'
+    Check (!(Test-Path -LiteralPath $path) -and @(Get-ChildItem -LiteralPath $folder -Filter '*.lnk').Count -eq 1) 'renamed restoration creates no duplicate launcher entry'
 } finally {
     [ShortcutRaceProbe]::BeforeLeaf = $null
     if ($journalLock) { $journalLock.Dispose() }
