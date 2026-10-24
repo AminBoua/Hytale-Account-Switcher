@@ -124,6 +124,14 @@ try {
         if ($entry.File) { $entry.File.Dispose() }
     }
 }
+# Make removal available before any shortcut can be retargeted, even if the first update fails.
+Save-ShortcutJournal
+New-Item -Path $RegistryPath -Force | Out-Null
+$properties = @{
+    DisplayName = 'Hytale Accounts addon'; DisplayVersion = '0.1.2'; InstallLocation = $destination
+    UninstallString = '"' + $installed + '" --uninstall'; DisplayIcon = "$official,0"
+}
+foreach ($name in $properties.Keys) { New-ItemProperty -LiteralPath $RegistryPath -Name $name -Value $properties[$name] -PropertyType String -Force | Out-Null }
 }
 # Keep every existing launcher's name and location, including official system-wide shortcuts.
 foreach ($folder in $scanRoots) {
@@ -143,12 +151,6 @@ if ($UserOnly) {
     if (!$records.Count -and !@($machineJournal.Shortcuts | Where-Object Path).Count) { throw 'No Hytale launcher shortcut was found. Reinstall the official launcher first.' }
     return
 }
-New-Item -Path $RegistryPath -Force | Out-Null
-$properties = @{
-    DisplayName = 'Hytale Accounts addon'; DisplayVersion = '0.1.2'; InstallLocation = $destination
-    UninstallString = '"' + $installed + '" --uninstall'; DisplayIcon = "$official,0"
-}
-foreach ($name in $properties.Keys) { New-ItemProperty -LiteralPath $RegistryPath -Name $name -Value $properties[$name] -PropertyType String -Force | Out-Null }
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
 $settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName 'HytaleAccounts-Repair' -Action $action -Trigger $trigger -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null

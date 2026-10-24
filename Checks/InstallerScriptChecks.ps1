@@ -118,6 +118,38 @@ try {
     $officialUninstall = Join-Path $commonPrograms 'Hytale Launcher\Uninstall Hytale Launcher.lnk'
     $previous = $shell.CreateShortcut($officialUninstall); $previous.TargetPath = Join-Path (Split-Path $official) 'uninstall.exe'; $previous.Save()
     $uninstallHash = (Get-FileHash -LiteralPath $officialUninstall).Hash
+    # Machine roots are scanned desktop first, then Programs; deny writes/deletion on each matching link.
+    $firstShortcut = Join-Path $commonDesktop 'Hytale Launcher.lnk'
+    $secondShortcut = Join-Path $commonPrograms 'Hytale Launcher\Hytale Launcher.lnk'
+    foreach ($lockedShortcut in @($secondShortcut, $firstShortcut)) {
+        $locked = [IO.File]::Open($lockedShortcut, 'Open', 'Read', 'Read')
+        $failure = $null
+        try { & (Join-Path $package 'Install.ps1') @options } catch { $failure = $_ }
+        finally { $locked.Dispose() }
+        Check ($failure -and $failure.Exception.GetBaseException() -is [ComponentModel.Win32Exception] -and $failure.Exception.GetBaseException().NativeErrorCode -eq 32) "installation fails with a sharing violation on $lockedShortcut"
+        $installed = Join-Path $destination 'HytaleAccounts.exe'
+        $changedCount = [int]($lockedShortcut -eq $secondShortcut)
+        $firstTarget = if ($changedCount) { $installed } else { $official }
+        Check ($shell.CreateShortcut($firstShortcut).TargetPath -eq $firstTarget -and (Get-FileHash -LiteralPath $secondShortcut).Hash -eq $originalLinks[$secondShortcut]) "failure occurs after $changedCount shortcut changes and preserves the locked shortcut"
+        Check (Test-Path -LiteralPath $registry) 'partial installation retains a Windows Apps removal entry'
+        $entry = Get-ItemProperty -LiteralPath $registry
+        Check ($entry.DisplayName -eq 'Hytale Accounts addon' -and $entry.InstallLocation -eq $destination -and $entry.UninstallString -ceq ('"' + $installed + '" --uninstall')) 'partial installation registers the installed helper as the removal entry point'
+        foreach ($name in @('HytaleAccounts.exe') + $scripts) {
+            Check ((Get-FileHash -LiteralPath (Join-Path $destination $name)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $package $name)).Hash) "partial installation retains usable removal payload: $name"
+        }
+        $journal = Get-Content -LiteralPath (Join-Path $destination 'shortcuts.json') -Raw | ConvertFrom-Json
+        Check ($journal.UserSid -eq $options.UserSid -and $journal.Shortcuts.Count -eq $changedCount) 'partial installation retains a journal even before the first shortcut can change'
+        foreach ($record in $journal.Shortcuts) {
+            Check ($record.Path -eq $firstShortcut -and (Get-FileHash -LiteralPath (Join-Path $destination $record.Backup)).Hash -eq $originalLinks[$firstShortcut]) 'partial installation journals the changed shortcut and its exact original bytes'
+        }
+        # Use only the installed removal script, without executing the synthetic helper or requesting elevation.
+        & (Join-Path $destination 'Uninstall.ps1') @options
+        foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'removal after failed installation restores original shortcut bytes' }
+        Check (!(Test-Path -LiteralPath $destination) -and !(Test-Path -LiteralPath $registry) -and !$global:HytaleFixtureTasks.Count) 'removal after failed installation clears addon recovery state and Windows Apps entry'
+        Check ((Get-FileHash -LiteralPath $officialUninstall).Hash -eq $uninstallHash) 'failed installation and removal preserve the official uninstall shortcut'
+        Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) 'failed installation and removal preserve Hytale accounts and game data'
+        Assert-LauncherSnapshot $official $before
+    }
     # SetupChecks exercises the production orchestration; these phases use real scripts on disposable links.
     foreach ($failureCode in @(1223, 2)) {
         & (Join-Path $package 'Install.ps1') @options
