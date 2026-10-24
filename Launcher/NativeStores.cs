@@ -77,6 +77,41 @@ public sealed class NativeStores
     }
     // Native files remain private and undiscovered after cancellation; never traverse shared junctions.
     public void DiscardPending(NativeStore store) => pending.Remove(store.Folder);
+    private bool RedundantPending(string folder) => folder.StartsWith("pending-", StringComparison.OrdinalIgnoreCase) &&
+        !pending.Contains(folder) && !Catalog.Stores.Any(s => s.Folder.Equals(folder, StringComparison.OrdinalIgnoreCase)) &&
+        !string.Equals(Catalog.Active, folder, StringComparison.OrdinalIgnoreCase);
+    // Only called after verification and capture succeed; cancellation/failure keeps its recovery snapshot.
+    internal void RemoveRedundantPending(NativeStore staged, NativeStore committed)
+    {
+        if (!RedundantPending(staged.Folder) || !Catalog.Stores.Contains(committed) || Catalog.Active != committed.Folder) return;
+        var storage = Storage(staged);
+        var keys = Path.Combine(storage, ".keys"); RegularPath(keys);
+        if (StorageSafety.DirectoryExists(keys))
+        {
+            using var directories = new SetupPayload.PinnedDirectories(keys, requireTrusted: false);
+            foreach (var key in Directory.EnumerateFiles(keys))
+            {
+                var saved = Path.Combine(Storage(committed), ".keys", Path.GetFileName(key)); RegularPath(saved);
+                if (StorageSafety.FileExists(saved) && ReadFile(key).AsSpan().SequenceEqual(ReadFile(saved))) DeleteFile(key);
+            }
+        }
+        DeleteFile(Path.Combine(storage, "account.dat"));
+        PrunePending(staged.Folder);
+    }
+    internal void PrunePending(string folder)
+    {
+        if (!RedundantPending(folder)) return;
+        var root = Folder(folder);
+        foreach (var path in new[] { Path.Combine(root, "AppData", "Hytale", ".keys"), Path.Combine(root, "AppData", "Hytale"), Path.Combine(root, "AppData"), root })
+        {
+            RegularPath(path);
+            if (!StorageSafety.DirectoryExists(path)) continue;
+            using var parent = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(path)!, requireTrusted: false);
+            using (var directory = new SetupPayload.PinnedDirectories(path, requireTrusted: false))
+                if (Directory.EnumerateFileSystemEntries(path).Any()) continue;
+            Directory.Delete(path); // Nonrecursive: runtime images and unexpected files keep their directories alive.
+        }
+    }
     public NativeStore CommitPending(NativeStore store, Guid profile, string? username)
     {
         if (!IsPending(store) || profile == Guid.Empty) throw new IOException("Pending native login is not verified.");

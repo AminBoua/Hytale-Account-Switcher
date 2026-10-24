@@ -17,6 +17,9 @@ internal static class NativeStartupChecks
                 var stores = new NativeStores(root);
                 var official = Path.Combine(root, "account.dat");
                 string Snapshot(NativeStore store) => Path.Combine(stores.Folder(store.Folder), "AppData", "Hytale", "account.dat");
+                string Key(NativeStore store) => Path.Combine(Path.GetDirectoryName(Snapshot(store))!, ".keys", "key.bin");
+                var nativeKeys = Path.Combine(root, ".keys"); Directory.CreateDirectory(nativeKeys);
+                File.WriteAllText(Path.Combine(nativeKeys, "key.bin"), "opaque-key");
                 var profileB = Guid.NewGuid();
                 NativeStore? accountB = null;
                 if (savedB)
@@ -47,6 +50,7 @@ internal static class NativeStartupChecks
                     try { commit.Invoke(session, [profileB, false]); throw new Exception("Locked startup reconciliation committed"); }
                     catch (TargetInvocationException ex) when (ex.InnerException is IOException or UnauthorizedAccessException) { }
                     check(stores.Catalog.Selected == accountA.Folder && stores.IsPending(initial) &&
+                        File.ReadAllText(Snapshot(initial)) == "opaque-current-B" && File.ReadAllText(Key(initial)) == "opaque-key" &&
                         File.ReadAllText(Snapshot(accountA)) == "opaque-A" &&
                         (accountB is null || File.ReadAllText(Snapshot(accountB)) == "opaque-old-B"),
                         "failed startup commit keeps the previous selection and both saved snapshots");
@@ -60,6 +64,53 @@ internal static class NativeStartupChecks
                 check(File.ReadAllText(official) == "opaque-current-B" && File.ReadAllText(Snapshot(verifiedB)) == "opaque-current-B" &&
                     File.ReadAllText(Snapshot(accountA)) == "opaque-A" && reloaded.Catalog.Stores.Single(s => s.Folder == accountA.Folder) == accountA,
                     "startup reconciliation preserves A's identity and snapshot and captures B only under B");
+                check(initial.Folder == verifiedB.Folder || !Directory.Exists(stores.Folder(initial.Folder)),
+                    "successful reconciliation removes only the redundant pending snapshot and keys");
+                for (var restart = 0; restart < 3; restart++)
+                {
+                    stores = new NativeStores(root);
+                    session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+                    initial = session.InitialStore(); stores.Activate(initial);
+                    typeof(NativeSession).GetField("active", flags)!.SetValue(session, initial);
+                    var run = Path.Combine(stores.Folder(initial.Folder), "run-fixture"); Directory.CreateDirectory(run);
+                    var executable = Path.Combine(run, "hytale-launcher.exe"); File.WriteAllText(executable, "synthetic-runtime");
+                    using var image = new FileStream(executable, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    typeof(NativeSession).GetField("image", flags)!.SetValue(session, image);
+                    typeof(NativeSession).GetField("runImage", flags)!.SetValue(session, executable);
+                    commit.Invoke(session, [profileB, false]);
+                    check(!File.Exists(Snapshot(initial)) && !File.Exists(Key(initial)) &&
+                        File.ReadAllText(executable) == "synthetic-runtime" && !image.SafeFileHandle.IsClosed,
+                        "repeated startup removes redundant credentials while retaining the owned runtime");
+                    ((Task)typeof(NativeSession).GetMethod("Stop", flags)!.Invoke(session, null)!).GetAwaiter().GetResult();
+                    check(!Directory.Exists(stores.Folder(initial.Folder)) &&
+                        Directory.GetDirectories(stores.Root).Length == stores.Catalog.Stores.Count &&
+                        File.ReadAllText(Snapshot(verifiedB)) == "opaque-current-B" && File.ReadAllText(Key(verifiedB)) == "opaque-key" &&
+                        File.ReadAllText(official) == "opaque-current-B" && File.ReadAllText(Path.Combine(nativeKeys, "key.bin")) == "opaque-key",
+                        "runtime exit prunes empty staging directories without accumulating snapshots or touching native storage");
+                }
+                File.WriteAllText(official, "opaque-recovery-B");
+                session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+                var recovery = session.InitialStore(); stores.Activate(recovery);
+                typeof(NativeSession).GetField("active", flags)!.SetValue(session, recovery);
+                using (var locked = new FileStream(official, FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    try { commit.Invoke(session, [profileB, false]); throw new Exception("Locked startup capture succeeded"); }
+                    catch (TargetInvocationException ex) when (ex.InnerException is IOException or UnauthorizedAccessException) { }
+                }
+                check(File.ReadAllText(Snapshot(recovery)) == "opaque-recovery-B" && File.ReadAllText(Key(recovery)) == "opaque-key" &&
+                    File.ReadAllText(Snapshot(verifiedB)) == "opaque-current-B",
+                    "capture failure preserves the staged session and keys for recovery after reconciliation");
+                session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+                initial = session.InitialStore(); stores.Activate(initial);
+                typeof(NativeSession).GetField("active", flags)!.SetValue(session, initial);
+                var unknown = Path.Combine(stores.Folder(initial.Folder), "recovery.txt"); File.WriteAllText(unknown, "keep");
+                File.WriteAllText(Key(initial), "unique-key");
+                var extraKey = Path.Combine(Path.GetDirectoryName(Key(initial))!, "recovery.bin"); File.WriteAllText(extraKey, "extra-key");
+                commit.Invoke(session, [profileB, false]);
+                check(File.ReadAllText(unknown) == "keep" && File.ReadAllText(Snapshot(recovery)) == "opaque-recovery-B" &&
+                    File.ReadAllText(Key(recovery)) == "opaque-key" && File.ReadAllText(Key(initial)) == "unique-key" &&
+                    File.ReadAllText(extraKey) == "extra-key" && !File.Exists(Snapshot(initial)),
+                    "later success preserves unknown files, unmatched keys and earlier failed-operation recovery data");
                 File.Delete(official);
                 check(session.InitialStore() == verifiedB, "startup without an official session retains the saved-selection fallback");
             }
