@@ -90,6 +90,10 @@ try
         catch (IOException) { }
         Check(File.ReadAllBytes(cached).SequenceEqual(previous), "rejected launch image preserves cache (publisher: " + publisherFailure + ")");
     }
+    IntegrationSafety.RejectPublisher = false;
+    PatchInstaller.RejectCompatibility = false;
+    IntegrationSafety.OfficialPath = a;
+    await PreparationFailureChecks.Run(bridge, Check);
 }
 finally
 {
@@ -105,13 +109,18 @@ namespace HytaleAccounts
         public static string OfficialPath { get; set; } = "";
         public static readonly List<string> Verified = [];
         public static bool RejectPublisher;
+        internal static Action<string>? Preparing;
         public static Task VerifyPublisher(string path)
         {
             Verified.Add(path);
             if (RejectPublisher) throw new IOException("Synthetic publisher rejection");
             return Task.CompletedTask;
         }
-        public static ProcessStartInfo StartInfo(string path) => new(path);
+        public static ProcessStartInfo StartInfo(string path)
+        {
+            Preparing?.Invoke(path);
+            return new(path);
+        }
     }
     internal sealed class PatchInstaller
     {

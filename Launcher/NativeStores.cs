@@ -372,12 +372,30 @@ public sealed class NativeStores
         var bytes = PatchInstaller.PatchCurrent(originalBytes, bridge.Port, bridge.Capability);
         var run = Path.Combine(Folder(store.Folder), "run-" + Guid.NewGuid().ToString("N"));
         PrivateFiles.CreateDirectory(run);
-        using var runDirectories = new SetupPayload.PinnedDirectories(run, requireTrusted: false, forMutation: true);
-        var executable = Path.Combine(run, "hytale-launcher.exe"); AtomicWrite(executable, bytes, privateFile: true);
-        var start = IntegrationSafety.StartInfo(executable);
-        start.Environment["HYTALE_LAUNCHER_NO_SELF_UPDATE"] = "1";
-        Activate(store);
-        return (start, Hash(bytes), updateBase);
+        var executable = Path.Combine(run, "hytale-launcher.exe");
+        try
+        {
+            using var runDirectories = new SetupPayload.PinnedDirectories(run, requireTrusted: false, forMutation: true);
+            AtomicWrite(executable, bytes, privateFile: true);
+            var start = IntegrationSafety.StartInfo(executable);
+            start.Environment["HYTALE_LAUNCHER_NO_SELF_UPDATE"] = "1";
+            Activate(store);
+            return (start, Hash(bytes), updateBase);
+        }
+        catch
+        {
+            try
+            {
+                using var parent = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(run)!, requireTrusted: false);
+                DeleteFile(executable);
+                bool empty;
+                using (var directory = new SetupPayload.PinnedDirectories(run, requireTrusted: false))
+                    empty = !Directory.EnumerateFileSystemEntries(run).Any();
+                if (empty) Directory.Delete(run);
+            }
+            catch (Exception ex) { Trace.TraceWarning("Native launcher preparation cleanup failed; remaining files retained. " + ex.Message); }
+            throw;
+        }
     }
     internal async Task<bool> PreserveLauncherUpdate(string path, string previousHash, string updateBase)
     {
