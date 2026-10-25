@@ -115,6 +115,35 @@ internal static class NativeAddChecks
             check(await Command(new { action = "ready", loginRequest = second, profile = oldProfile, username = "accountB" }) &&
                 Get("pendingLogin") is null && stores.Catalog.Selected == current.Folder && stores.Catalog.Stores.Count == 2,
                 "a matching same-account completion clears pending login without duplicating the saved account");
+            var folders = Directory.GetDirectories(stores.Root).Length;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                check(await session.AddAccount(), "repeated saved-account Add begins");
+                var staged = Pending();
+                var staging = stores.Folder(staged);
+                check(Directory.Exists(staging) && !Directory.Exists(Path.Combine(staging, "AppData", "Hytale")),
+                    "Add creates an empty staging folder without a storage snapshot");
+                check(await Command(new { action = "ready", loginRequest = staged, profile = oldProfile, username = "accountB" }),
+                    "repeated saved-account login completes");
+                stores.CleanupPending();
+                check(!Directory.Exists(staging) && Directory.GetDirectories(stores.Root).Length == folders &&
+                    stores.Catalog.Stores.Count == 2 && stores.Catalog.Selected == current.Folder &&
+                    stores.Catalog.Active == current.Folder && session.IsOpen && ReferenceEquals(Get("launcher"), process),
+                    "re-adding a saved account accumulates no empty staging folders and keeps the saved account and launcher");
+            }
+            check(await session.AddAccount(), "saved-account Add with unexpected staging contents begins");
+            var retained = Pending();
+            var unexpected = Path.Combine(stores.Folder(retained), "unexpected.bin"); File.WriteAllText(unexpected, "keep");
+            var runtime = Path.Combine(stores.Folder(retained), "run-fixture", "hytale-launcher.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(runtime)!); File.WriteAllText(runtime, "synthetic runtime");
+            using (var image = new FileStream(runtime, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                check(await Command(new { action = "ready", loginRequest = retained, profile = oldProfile, username = "accountB" }),
+                    "saved-account completion accepts staging without a storage snapshot but with unexpected contents");
+                stores.CleanupPending();
+                check(File.ReadAllText(unexpected) == "keep" && File.ReadAllText(runtime) == "synthetic runtime" && !image.SafeFileHandle.IsClosed,
+                    "empty-storage cleanup retains unexpected files and the locked staging runtime");
+            }
             check(await session.AddAccount(), "a saved account can be re-added after completion");
             var retry = Pending();
             var completion = new { action = "ready", loginRequest = retry, profile = other.Profile, username = "accountA" };
