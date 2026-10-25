@@ -148,6 +148,15 @@ try {
     Check ($restored.TargetPath -eq $official -and $restored.Description -eq 'User changed description only') 'removal preserves edited metadata while restoring a working official target'
     OfficialLink; Update-Shortcut $path Install $record
     $applied = [IO.File]::ReadAllBytes($path)
+    $twin = Join-Path $folder 'Twin.lnk'
+    $link = $shell.CreateShortcut($twin); $link.TargetPath = $official; $link.Description = 'Different original metadata'; $link.Save()
+    Update-Shortcut $twin Install $null
+    $twinRecord = $records | Where-Object Path -eq $twin
+    # Force identical applied bytes regardless of the host's shell link-tracking metadata.
+    [IO.File]::WriteAllBytes($twin, $applied)
+    $twinRecord.AppliedHash = $record.AppliedHash
+    Save-ShortcutJournal
+    Check ($twinRecord.FileId -ne $record.FileId) 'identical addon shortcuts retain distinct native file identities'
     $renamed = Join-Path $folder 'Renamed.lnk'
     [IO.File]::Move($path, $renamed)
     $script:beforeOpen = {
@@ -160,6 +169,10 @@ try {
     Update-Shortcut $renamed Remove $null
     Check ((Get-FileHash -LiteralPath $renamed).Hash -eq $script:racingHash) 'renamed shortcut changed before acquisition is preserved'
     [IO.File]::WriteAllBytes($renamed, $applied)
+    $identity = $record.FileId; $record.FileId = ''
+    Update-Shortcut $renamed Remove $null
+    Check ((Get-ShortcutHash (Read-ShortcutBytes $renamed)) -eq $record.AppliedHash) 'ambiguous legacy matches remain untouched without a recorded file identity'
+    $record.FileId = $identity
     $script:afterOpen = {
         param($opened,$create,$lease)
         if ($opened -ne $renamed) { return }
@@ -169,6 +182,10 @@ try {
     Update-Shortcut $renamed Remove $null
     $script:afterOpen = $null
     Check ((Get-ShortcutHash (Read-ShortcutBytes $renamed)) -eq (Get-ShortcutHash (Read-ShortcutBytes (Join-Path $state $record.Backup)))) 'unchanged renamed shortcut restores its exact backup'
+    Check ((Get-ShortcutHash (Read-ShortcutBytes $twin)) -eq $record.AppliedHash) 'renamed restoration leaves its byte-identical sibling untouched'
+    Update-Shortcut $twin Remove $twinRecord
+    Check ((Get-ShortcutHash (Read-ShortcutBytes $twin)) -eq (Get-ShortcutHash (Read-ShortcutBytes (Join-Path $state $twinRecord.Backup)))) 'identical sibling restores its own original metadata'
+    [IO.File]::Delete($twin)
     Check (!(Test-Path -LiteralPath $path) -and @(Get-ChildItem -LiteralPath $folder -Filter '*.lnk').Count -eq 1) 'renamed restoration creates no duplicate launcher entry'
 } finally {
     [ShortcutRaceProbe]::BeforeLeaf = $null

@@ -11,6 +11,15 @@ public sealed class ShortcutFile : IDisposable
     private readonly List<SafeFileHandle> directories = new List<SafeFileHandle>();
     private FileStream stream;
     public bool Exists { get { return stream != null; } }
+    public string Identity
+    {
+        get
+        {
+            FileInformation info;
+            if (!GetFileInformationByHandle(stream.SafeFileHandle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            return info.Volume.ToString("X8") + ":" + info.IndexHigh.ToString("X8") + info.IndexLow.ToString("X8");
+        }
+    }
     public ShortcutFile(string path, bool create)
     {
         try
