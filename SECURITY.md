@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the newest experimental release receives fixes. Versions 0.1.0 and 0.1.1 are unsupported and lack later storage, installer and bridge hardening. Do not use those installers.
+Only the newest experimental release receives fixes. Versions 0.1.0 through 0.1.2 are unsupported and lack the latest account recovery and installer fixes. Do not use those installers.
 
 The current release is experimental. Synthetic tests do not establish real UAC, SYSTEM-task, unrelated-user enforcement or live Hytale compatibility. See [the release gate](SECURITY-RELEASE.md) for the outstanding validation.
 

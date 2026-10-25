@@ -35,7 +35,7 @@ C:\Program Files\Hypixel Studios\Hytale Launcher\hytale-launcher.exe
 5. Setup opens the launcher. From then on, use your existing **Hytale Launcher** shortcut or Windows search entry.
 
 > [!IMPORTANT]
-> The addon installer is unsigned, so Windows may show a reputation warning. The [v0.1.2 release notes](https://github.com/AminBoua/Hytale-Account-Switcher/releases/tag/v0.1.2) also record that actual elevated/cross-user VM validation and fresh live login, switching, logout, and gameplay checks were not performed for that release. See the [security release gate](SECURITY-RELEASE.md) for validation scope.
+> The addon installer is unsigned, so Windows may show a reputation warning. The [v0.1.3 release notes](https://github.com/AminBoua/Hytale-Account-Switcher/releases/tag/v0.1.3) also record that actual elevated/cross-user VM validation and fresh live login, switching, logout, and gameplay checks were not performed for that release. See the [security release gate](SECURITY-RELEASE.md) for validation scope.
 
 Setup preserves the installed official launcher's bytes and permissions. At runtime, the helper verifies the official publisher signature and prepares a modified local copy. Compatibility depends on the **launcher build**, not the game version beside Play. Compatible launcher updates can be adopted; changes to Hytale's internal account interface may require a new addon release. Compatibility checks reject unsupported layouts instead of forcing a patch.
 

@@ -305,7 +305,7 @@ try {
         }
         foreach ($name in $replacementNames) { Check ((Get-Acl -LiteralPath (Join-Path $destination $name)).Sddl -ceq $oldPayload[$name].Permissions) "$scenario retry preserves $name permissions" }
         Check (!@(Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*' -Force).Count) "$scenario retry leaves no upgrade backups"
-        Check ((Get-ItemProperty -LiteralPath $registry).DisplayVersion -eq '0.1.2') "$scenario retry completes Windows Apps registration"
+        Check ((Get-ItemProperty -LiteralPath $registry).DisplayVersion -eq '0.1.3') "$scenario retry completes Windows Apps registration"
     }
     $wrongUser = $options.Clone(); $wrongUser.UserSid = 'S-1-5-21-1-2-3-1001'
     foreach ($operation in @('Install.ps1','Uninstall.ps1')) {
