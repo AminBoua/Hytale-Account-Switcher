@@ -16,7 +16,7 @@ $steps = @(
     @{Name='update-ordering';Exe='dotnet';Arguments=@('run','--project','Checks/UpdateOrdering/UpdateOrdering.csproj','-c','Release','-p:NuGetAudit=false')},
     @{Name='frontend';Exe='node';Arguments=@('Checks/NativeLoginChecks.cjs')}
 )
-foreach ($entry in @(@('installer-fixtures','Checks/InstallerScriptChecks.ps1'),@('shortcut-races','Checks/ShortcutRaceChecks.ps1'),
+foreach ($entry in @(@('native-startup','Checks/NativeStartupRegressionChecks.ps1'),@('installer-fixtures','Checks/InstallerScriptChecks.ps1'),@('shortcut-races','Checks/ShortcutRaceChecks.ps1'),
     @('acl-races','Checks/AclMigrationRaceChecks.ps1'),@('storage-races','Checks/AclMigrationRaceChecks.ps1','-Storage'),
     @('vm-harness-host-only','Checks/VmValidation/Validate.ps1'),@('evidence-gate','Checks/SecurityGateChecks.ps1'),
     @('runtime-notices','Checks/RuntimeNoticeChecks.ps1'))) {
