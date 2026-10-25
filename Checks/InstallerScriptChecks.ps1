@@ -23,6 +23,17 @@ function Check($Condition, [string]$Message) {
     if (!$Condition) { throw "FAIL $Message" }
     Write-Host "PASS $Message"
 }
+function Interrupt-ShortcutWrite($Fixture) {
+    Check ($Fixture.Replacement.Length -gt $Fixture.Original.Length) 'partial shortcut overwrite has a longer replacement and an original tail'
+    # Find a torn native structure in these COM-generated links; offsets depend on the temp path.
+    for ($prefixLength = 76; $prefixLength -lt $Fixture.Original.Length; $prefixLength += 8) {
+        [IO.File]::WriteAllBytes($Fixture.Path, $Fixture.Original)
+        $stream = [IO.File]::Open($Fixture.Path, 'Open', 'Write', 'None')
+        try { $stream.Write($Fixture.Replacement, 0, $prefixLength); $stream.Flush($true) } finally { $stream.Dispose() }
+        if (!$shell.CreateShortcut($Fixture.Path).TargetPath) { break }
+    }
+    Check ((Get-Item -LiteralPath $Fixture.Path).Length -eq $Fixture.Original.Length -and !$shell.CreateShortcut($Fixture.Path).TargetPath) 'partial in-place overwrite leaves an unreadable shortcut at the original length'
+}
 function Get-InstallFixtureSnapshot {
     [pscustomobject]@{
         # Setup's diagnostic is expected on rejection; installation state must not change.
@@ -339,6 +350,51 @@ try {
         Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $previousHash) 'uninstall restores the exact previous shortcut after repeated install'
         foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'uninstall restores existing user and system shortcuts byte-for-byte' }
         Check (!(Test-Path -LiteralPath $registry)) 'Windows addon entry removed'
+    }
+    foreach ($recovery in @('Repair-Integration.ps1','Install.ps1')) {
+        & (Join-Path $package 'Install.ps1') @options
+        & (Join-Path $package 'Install.ps1') @options -UserOnly
+        $fixtures = @()
+        foreach ($user in @($true,$false)) {
+            $fixtureState = if ($user) { Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration' } else { $destination }
+            $fixtureManifest = Join-Path $fixtureState 'shortcuts.json'
+            $fixtureJournal = Get-Content -LiteralPath $fixtureManifest -Raw | ConvertFrom-Json
+            $record = $fixtureJournal.Shortcuts[0]
+            $backup = Join-Path $fixtureState $record.Backup
+            $fixture = [pscustomobject]@{ User = $user; Path = $record.Path; Manifest = $fixtureManifest; Backup = $backup;
+                Original = [IO.File]::ReadAllBytes($backup); Replacement = [IO.File]::ReadAllBytes($record.Path); BackupHash = (Get-FileHash -LiteralPath $backup).Hash; BackupWritten = (Get-Item -LiteralPath $backup).LastWriteTimeUtc }
+            $fixtures += $fixture
+            Interrupt-ShortcutWrite $fixture
+        }
+        if ($recovery -eq 'Install.ps1') {
+            & (Join-Path $package $recovery) @options
+            & (Join-Path $package $recovery) @options -UserOnly
+        } else {
+            & (Join-Path $destination $recovery)
+            & (Join-Path $destination $recovery) -UserOnly
+        }
+        foreach ($fixture in $fixtures) {
+            Check ($shell.CreateShortcut($fixture.Path).TargetPath -eq (Join-Path $destination 'HytaleAccounts.exe')) "$recovery recovers a journal-owned partially overwritten shortcut"
+            Check ((Get-FileHash -LiteralPath $fixture.Backup).Hash -eq $fixture.BackupHash) "$recovery retains the exact original backup"
+            Check ((Get-Item -LiteralPath $fixture.Backup).LastWriteTimeUtc -eq $fixture.BackupWritten) "$recovery does not rewrite its recovery backup"
+            Interrupt-ShortcutWrite $fixture
+            $held = [IO.File]::Open($fixture.Path, 'Open', 'Read', 'Read')
+            $failure = $null
+            try { & (Join-Path $package 'Uninstall.ps1') @options -UserOnly:$fixture.User } catch { $failure = $_ } finally { $held.Dispose() }
+            Check ($failure -and (Test-Path -LiteralPath $fixture.Manifest) -and (Get-FileHash -LiteralPath $fixture.Backup).Hash -eq $fixture.BackupHash) 'blocked restoration retains its journal and usable original backup'
+            # A corrupt backup must stop removal before either journal or addon files are discarded.
+            [IO.File]::WriteAllBytes($fixture.Backup, [byte[]]@(1,2,3))
+            $failure = $null
+            try { & (Join-Path $package 'Uninstall.ps1') @options -UserOnly:$fixture.User } catch { $failure = $_ }
+            Check ($failure -and $failure.Exception.Message -like '*restoration backup is unreadable*') 'uninstall rejects an unusable restoration backup'
+            Check ((Test-Path -LiteralPath $fixture.Manifest) -and (Test-Path -LiteralPath $fixture.Backup) -and (Test-Path -LiteralPath (Join-Path $destination 'HytaleAccounts.exe'))) 'failed shortcut recovery retains the journal, backup and addon for retry'
+            [IO.File]::WriteAllBytes($fixture.Backup, $fixture.Original)
+            & (Join-Path $package 'Uninstall.ps1') @options -UserOnly:$fixture.User
+            Check ((Get-FileHash -LiteralPath $fixture.Path).Hash -eq $fixture.BackupHash) 'uninstall restores a partially overwritten shortcut byte-for-byte'
+            Check (!(Test-Path -LiteralPath $fixture.Manifest) -and !(Test-Path -LiteralPath $fixture.Backup)) 'uninstall removes recovery data after successful restoration'
+        }
+        foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'partial-write recovery preserves every original shortcut' }
+        Assert-LauncherSnapshot $official $before
     }
     & (Join-Path $package 'Install.ps1') @options
     & (Join-Path $package 'Install.ps1') @options -UserOnly

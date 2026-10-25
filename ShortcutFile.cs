@@ -96,6 +96,18 @@ public sealed class ShortcutFile : IDisposable
         stream.Position = 0;
         using (var copy = new MemoryStream()) { stream.CopyTo(copy); return copy.ToArray(); }
     }
+    public static bool IsReadableShortcut(string path)
+    {
+        var link = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046")));
+        try { ((System.Runtime.InteropServices.ComTypes.IPersistFile)link).Load(path, 0); return true; }
+        catch (COMException error)
+        {
+            // WScript hides this invalid-format result behind an empty TargetPath.
+            if (error.ErrorCode != unchecked((int)0x80004005)) throw;
+            return false;
+        }
+        finally { Marshal.FinalReleaseComObject(link); }
+    }
     public void Write(byte[] bytes)
     {
         stream.Position = 0; stream.Write(bytes, 0, bytes.Length); stream.SetLength(bytes.Length); stream.Flush(true);
