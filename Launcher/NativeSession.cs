@@ -128,7 +128,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         await Publish();
         return true;
     }
-    public Task OpenInitial() => OpenCore(InitialStore(), false);
+    public Task OpenInitial() => OpenCore(InitialStore(), false, initial: true);
     internal NativeStore InitialStore()
     {
         var nativeSession = Path.Combine(stores.HytaleRoot, "account.dat");
@@ -164,7 +164,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         verifiedSession = true;
         if (pending) stores.RemoveRedundantPending(store, active);
     }
-    private async Task OpenCore(NativeStore store, bool commit)
+    private async Task OpenCore(NativeStore store, bool commit, bool initial = false)
     {
         if (IsOpen) { await SwitchCore(store, commit); return; }
         var previous = active;
@@ -188,10 +188,14 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
                 {
                     await Stop();
                     if (previous is not null)
+                    {
                         await Start(stores.Catalog.Stores.FirstOrDefault(s => s.Folder == previous.Folder) ?? stores.CreatePending(), false);
+                        return;
+                    }
                 }
             }
             catch (Exception recovery) { message += " Could not reopen previous launcher: " + recovery.Message; }
+            if (initial) throw;
         }
         finally { if (adding && active?.Folder != store.Folder) stores.DiscardPending(store); busy = false; await Publish(); }
     }
