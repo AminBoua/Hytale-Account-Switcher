@@ -251,7 +251,8 @@ public sealed class NativeStores
             var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             {
                 var source = Storage(staging); var destination = Storage(saved);
-                if (!StorageSafety.DirectoryExists(source) || !StorageSafety.FileExists(Path.Combine(destination, "account.dat"))) return;
+                if (!StorageSafety.DirectoryExists(source)) { PrunePending(staging.Folder); return; }
+                if (!StorageSafety.FileExists(Path.Combine(destination, "account.dat"))) return;
                 using var sourceDirectories = new SetupPayload.PinnedDirectories(source, requireTrusted: false);
                 using var savedDirectories = new SetupPayload.PinnedDirectories(destination, requireTrusted: false);
                 using var capturedSession = SetupPayload.OpenSource(Path.Combine(destination, "account.dat"));
