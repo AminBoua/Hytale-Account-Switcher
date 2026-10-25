@@ -50,14 +50,17 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
     $file = Open-ShortcutFile $Path
     $scratch = Join-Path $state ([Guid]::NewGuid().ToString('N') + '.lnk')
     try {
-        if (!$file.Exists) {
-            if ($Operation -ne 'Remove' -or !$Record.Backup) { return }
-            $file.Dispose()
-            $file = Open-ShortcutFile $Path -Create # CREATE_NEW refuses a leaf planted since the missing-file check.
-            $file.Write((Read-ShortcutBytes (Join-Path $state $Record.Backup)))
-            return
-        }
+        if (!$file.Exists) { return }
         $bytes = $file.Read()
+        if ($Operation -eq 'Remove' -and !$Record) {
+            # Identify renamed links only by unchanged bytes held through restoration.
+            $hash = Get-ShortcutHash $bytes
+            $matches = @($records | Where-Object { $_.AppliedHash -and $_.AppliedHash -eq $hash })
+            # Renames keep file identity even when different originals produced identical addon links.
+            if ($matches.Count -gt 1) { $matches = @($matches | Where-Object { $_.FileId -and $_.FileId -eq $file.Identity }) }
+            if ($matches.Count -ne 1) { return }
+            $Record = $matches[0]
+        }
         Write-ShortcutBytes $scratch $bytes
         $link = $shell.CreateShortcut($scratch)
         if ($Operation -eq 'Remove') {
@@ -86,7 +89,7 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
                 if ($old.Count -eq 1 -and $old[0].Backup -match '^shortcut-[a-f0-9]{32}\.lnk$') {
                     $backup = 'shortcut-' + [Guid]::NewGuid().ToString('N') + '.lnk'
                     Write-ShortcutBytes (Join-Path $state $backup) ([IO.File]::ReadAllBytes((Join-Path $destination $old[0].Backup)))
-                    $script:records += [pscustomobject]@{ Path = $Path; Backup = $backup; Arguments = ''; AppliedHash = (Get-ShortcutHash $bytes) }
+                    $script:records += [pscustomobject]@{ Path = $Path; Backup = $backup; Arguments = ''; AppliedHash = (Get-ShortcutHash $bytes); FileId = $file.Identity }
                     Save-ShortcutJournal
                 }
             }
@@ -103,6 +106,7 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
         $link.Save()
         $replacement = Read-ShortcutBytes $scratch
         $Record | Add-Member NoteProperty AppliedHash (Get-ShortcutHash $replacement) -Force
+        $Record | Add-Member NoteProperty FileId $file.Identity -Force
         Save-ShortcutJournal # Backup and intended bytes are journaled before the handle-bound write.
         $file.Write($replacement)
     } finally {

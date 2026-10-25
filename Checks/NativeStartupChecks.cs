@@ -140,6 +140,72 @@ internal static class NativeStartupChecks
             finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         }
         RepeatedReconciliation(check);
+        RepeatedSignedOutShutdown(check);
+    }
+
+    private static void RepeatedSignedOutShutdown(Action<bool, string> check)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        foreach (var contents in new[] { "missing", "empty", "snapshot", "keys", "unknown" })
+        {
+            var root = SecurityFixture.Create("native-signed-out-shutdown-");
+            try
+            {
+                var stores = new NativeStores(root);
+                var official = Path.Combine(root, "account.dat");
+                File.WriteAllText(official, "saved-session");
+                var saved = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), "saved"); stores.Capture(saved);
+                stores.MarkSignedOut(saved);
+                if (contents == "missing") File.Delete(official);
+                else File.WriteAllText(official, contents == "snapshot" ? "recovery-session" : "");
+                var keys = Path.Combine(root, ".keys"); Directory.CreateDirectory(keys);
+                var key = Path.Combine(keys, "key");
+                if (contents is "snapshot" or "keys") File.WriteAllText(key, "recovery-key");
+                var abandoned = Path.Combine(stores.Root, "pending-untracked"); Directory.CreateDirectory(abandoned);
+                for (var attempt = 0; attempt < 3; attempt++)
+                {
+                    stores = new NativeStores(root);
+                    var session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+                    var staged = session.InitialStore(); stores.Activate(staged);
+                    var folder = stores.Folder(staged.Folder);
+                    var storage = Path.Combine(folder, "AppData", "Hytale");
+                    Directory.CreateDirectory(Path.Combine(storage, ".keys"));
+                    var unknown = Path.Combine(folder, "unknown.bin");
+                    if (contents == "unknown") File.WriteAllText(unknown, "keep");
+                    var runtime = Path.Combine(folder, "run-fixture", "hytale-launcher.exe");
+                    Directory.CreateDirectory(Path.GetDirectoryName(runtime)!); File.WriteAllText(runtime, "synthetic-runtime");
+                    using var image = File.Open(runtime, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    typeof(NativeSession).GetField("active", flags)!.SetValue(session, staged);
+                    typeof(NativeSession).GetField("image", flags)!.SetValue(session, image);
+                    typeof(NativeSession).GetField("runImage", flags)!.SetValue(session, runtime);
+                    stores.CleanupPending();
+                    check(stores.IsPending(staged) && File.ReadAllText(runtime) == "synthetic-runtime" && !image.SafeFileHandle.IsClosed,
+                        "startup cleanup preserves pending state and the active runtime: " + contents);
+                    using var exited = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/d /c exit 0")
+                        { UseShellExecute = false, CreateNoWindow = true })!;
+                    exited.WaitForExit();
+                    typeof(NativeSession).GetField("launcher", flags)!.SetValue(session, exited);
+                    var closed = 0; session.Closed += () => closed++;
+                    ((Task)typeof(NativeSession).GetMethod("ObserveExit", flags)!.Invoke(session, [exited])!).GetAwaiter().GetResult();
+                    stores.CleanupPending();
+                    var retain = contents != "missing";
+                    check(closed == 1 && !stores.IsPending(staged) && !File.Exists(runtime) && image.SafeFileHandle.IsClosed &&
+                        Directory.Exists(folder) == retain && Directory.GetDirectories(stores.Root).Length == 2 + (retain ? attempt + 1 : 0) &&
+                        new NativeStores(root).Catalog.Active is null,
+                        $"repeated signed-out shutdown releases staging and accumulates no empty folders: {contents}, exit {attempt + 1}");
+                    check((contents != "snapshot" || File.ReadAllText(Path.Combine(storage, "account.dat")) == "recovery-session") &&
+                        (contents != "empty" || new FileInfo(Path.Combine(storage, "account.dat")).Length == 0) &&
+                        (contents is not ("snapshot" or "keys") || File.ReadAllText(Path.Combine(storage, ".keys", "key")) == "recovery-key") &&
+                        (contents != "unknown" || File.ReadAllText(unknown) == "keep") &&
+                        (contents == "missing" ? !File.Exists(official) : File.ReadAllText(official) == (contents == "snapshot" ? "recovery-session" : "")) &&
+                        (contents is not ("snapshot" or "keys") || File.ReadAllText(key) == "recovery-key") &&
+                        File.ReadAllText(Path.Combine(stores.Folder(saved.Folder), "AppData", "Hytale", "account.dat")) == "saved-session" &&
+                        stores.Catalog.Stores.Single() == saved with { SignedOut = true } && Directory.Exists(abandoned),
+                        "shutdown preserves recovery snapshots, keys, unknown files, committed stores and official storage: " + contents);
+                }
+            }
+            finally { Directory.Delete(root, true); }
+        }
     }
 
     private static void RepeatedReconciliation(Action<bool, string> check)
