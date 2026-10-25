@@ -57,7 +57,7 @@ try {
     $destination = $state; $official = Join-Path $root 'official.exe'; $installed = Join-Path $state 'addon.exe'
     $roots = @($folder); $repairRoots = $roots; $ownerSid = ''; $manifestPath = Join-Path $state 'shortcuts.json'; $script:records = @(); $UserOnly = $false
     $shell = New-Object -ComObject WScript.Shell
-    $path = Join-Path $folder 'Launcher.lnk'; $victim = Join-Path $outside 'Launcher.lnk'
+    $path = Join-Path $folder 'Launcher.lnk'; $fixtureShortcut = $path; $victim = Join-Path $outside 'Launcher.lnk'
     [IO.File]::WriteAllText($victim, 'sentinel: never overwritten')
     $sentinel = (Get-FileHash -LiteralPath $victim).Hash
     $journalLock = Open-ShortcutJournal $state
@@ -74,7 +74,7 @@ try {
         $script:attacked = $false
         $script:afterOpen = {
             param($opened,$create,$lease)
-            if ($opened -ne $path -or $script:attacked) { return }
+            if ($opened -ne $fixtureShortcut -or $script:attacked) { return }
             $script:attacked = $true
             Reject { [IO.Directory]::Move($folder, $folder + '-moved') } "$operation blocks directory replacement after validation"
             Reject { [ShortcutRaceProbe]::Junction($folder, $outside) } "$operation refuses in-place junction conversion with a held child"
@@ -93,7 +93,7 @@ try {
         if ($operation -eq 'Remove') { Update-Shortcut $path Install ($records | Select-Object -First 1) }
         $script:beforeOpen = {
             param($opened,$create)
-            if ($opened -ne $path) { return }
+            if ($opened -ne $fixtureShortcut) { return }
             $script:beforeOpen = $null
             [IO.Directory]::Move($folder, $folder + '-moved')
             New-Item -ItemType Junction -Path $folder -Target $outside | Out-Null
@@ -107,7 +107,7 @@ try {
     [IO.File]::Delete($path)
     $script:beforeOpen = {
         param($opened,$create)
-        if ($opened -eq $path -and $create) { $script:beforeOpen = $null; [IO.File]::WriteAllText($path, 'new user file') }
+        if ($opened -eq $fixtureShortcut -and $create) { $script:beforeOpen = $null; [IO.File]::WriteAllText($fixtureShortcut, 'new user file') }
     }
     Reject { Update-Shortcut $path Remove $record } 'missing shortcut restore refuses a concurrently created leaf'
     Check ([IO.File]::ReadAllText($path) -eq 'new user file') 'concurrent user file preserved'
@@ -116,7 +116,7 @@ try {
     $script:reparseInjected = $false
     [ShortcutRaceProbe]::BeforeLeaf = {
         param($opened)
-        if ($opened -ne $path) { return }
+        if ($opened -ne $fixtureShortcut) { return }
         [ShortcutRaceProbe]::BeforeLeaf = $null
         [ShortcutRaceProbe]::Junction($folder, $outside)
         $script:reparseInjected = $true
@@ -144,6 +144,28 @@ try {
     Update-Shortcut $path Remove $record
     $restored = $shell.CreateShortcut($path)
     Check ($restored.TargetPath -eq $official -and $restored.Description -eq 'User changed description only') 'removal preserves edited metadata while restoring a working official target'
+    [IO.File]::WriteAllBytes($path, [byte[]]@(1,2,3))
+    $brokenHash = (Get-FileHash -LiteralPath $path).Hash
+    Update-Shortcut $path Install $null
+    Check ((Get-FileHash -LiteralPath $path).Hash -eq $brokenHash) 'unowned broken shortcut is preserved'
+    foreach ($operation in @('Repair','Remove')) {
+        Reject { Update-Shortcut $path $operation $legacyRecord } "$operation refuses a broken owned shortcut without a backup"
+        Check ((Get-FileHash -LiteralPath $path).Hash -eq $brokenHash) "$operation leaves unrecoverable bytes available for recovery"
+    }
+    [IO.File]::Delete($path)
+    $empty = $shell.CreateShortcut($path); $empty.Description = 'User chose a valid targetless link'; $empty.Save()
+    Check ([ShortcutFile]::IsReadableShortcut($path) -and !$shell.CreateShortcut($path).TargetPath) 'native loader accepts a valid shortcut with an empty target'
+    $emptyHash = (Get-FileHash -LiteralPath $path).Hash
+    Update-Shortcut $path Repair $record
+    Update-Shortcut $path Remove $record
+    Check ((Get-FileHash -LiteralPath $path).Hash -eq $emptyHash) 'repair and removal preserve valid targetless user replacements'
+    $backupPath = Join-Path $state $record.Backup
+    $backupBytes = [IO.File]::ReadAllBytes($backupPath)
+    [IO.File]::WriteAllBytes($backupPath, [byte[]]@(1,2,3))
+    [IO.File]::Delete($path)
+    Reject { Update-Shortcut $path Remove $record } 'missing shortcut restoration rejects a broken backup before creating a leaf'
+    Check (!(Test-Path -LiteralPath $path)) 'invalid backup cannot be installed as a restored shortcut'
+    [IO.File]::WriteAllBytes($backupPath, $backupBytes)
 } finally {
     [ShortcutRaceProbe]::BeforeLeaf = $null
     if ($journalLock) { $journalLock.Dispose() }

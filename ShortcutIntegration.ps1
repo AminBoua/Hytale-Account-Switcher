@@ -52,22 +52,36 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
     try {
         if (!$file.Exists) {
             if ($Operation -ne 'Remove' -or !$Record.Backup) { return }
+            $originalBytes = Read-ShortcutBytes (Join-Path $state $Record.Backup)
+            Write-ShortcutBytes $scratch $originalBytes
+            if (![ShortcutFile]::IsReadableShortcut($scratch)) { throw "Shortcut restoration backup is unreadable; files preserved: $Path" }
             $file.Dispose()
             $file = Open-ShortcutFile $Path -Create # CREATE_NEW refuses a leaf planted since the missing-file check.
-            $file.Write((Read-ShortcutBytes (Join-Path $state $Record.Backup)))
+            $file.Write($originalBytes)
             return
         }
         $bytes = $file.Read()
         Write-ShortcutBytes $scratch $bytes
+        $broken = ![ShortcutFile]::IsReadableShortcut($scratch)
+        if ($broken) {
+            if (!$Record) { return }
+            if (!$Record.Backup) { throw "Broken journal-owned shortcut has no restoration backup; files preserved: $Path" }
+            $bytes = Read-ShortcutBytes (Join-Path $state $Record.Backup)
+            Write-ShortcutBytes $scratch $bytes
+            if (![ShortcutFile]::IsReadableShortcut($scratch)) { throw "Shortcut restoration backup is unreadable; files preserved: $Path" }
+            if ($Operation -eq 'Remove') { $file.Write($bytes); return }
+        }
         $link = $shell.CreateShortcut($scratch)
         if ($Operation -eq 'Remove') {
             if ($link.TargetPath -ne $installed -or $link.Arguments -ne $Record.Arguments) { return }
             $edited = $Record.AppliedHash -and $Record.AppliedHash -ne (Get-ShortcutHash $bytes)
             if ($Record.Backup) {
                 $originalBytes = Read-ShortcutBytes (Join-Path $state $Record.Backup)
+                Write-ShortcutBytes $scratch $originalBytes
+                if (![ShortcutFile]::IsReadableShortcut($scratch)) { throw "Shortcut restoration backup is unreadable; files preserved: $Path" }
                 if ($edited) {
                     # Restore our launch target while retaining user-edited metadata from the held shortcut.
-                    $original = $shell.CreateShortcut((Join-Path $state $Record.Backup))
+                    $original = $shell.CreateShortcut($scratch)
                     $link.TargetPath = $original.TargetPath; $link.Arguments = $original.Arguments
                     if ($link.WorkingDirectory -eq $destination) { $link.WorkingDirectory = $original.WorkingDirectory }
                     if ($link.IconLocation -eq "$official,0") { $link.IconLocation = $original.IconLocation }
@@ -97,7 +111,8 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
             $script:records += $Record
         }
         if (!$Record.Backup) { $Record.Backup = 'shortcut-' + [Guid]::NewGuid().ToString('N') + '.lnk' }
-        Write-ShortcutBytes (Join-Path $state $Record.Backup) $bytes
+        # A recovery must never rewrite its only good original, even with the same bytes.
+        if (!$broken) { Write-ShortcutBytes (Join-Path $state $Record.Backup) $bytes }
         $link.TargetPath = $installed; $link.Arguments = ''; $link.WorkingDirectory = $destination
         $link.IconLocation = "$official,0"; $link.Description = 'Hytale launcher with account switching'
         $link.Save()

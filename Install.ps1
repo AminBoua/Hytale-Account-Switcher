@@ -130,10 +130,11 @@ foreach ($folder in $scanRoots) {
     if (Test-Path -LiteralPath $folder) {
         foreach ($file in Get-ChildItem -LiteralPath $folder -Filter '*.lnk' -Recurse) {
             Assert-RegularPath $file.FullName
+            $record = @($records | Where-Object Path -eq $file.FullName)
+            if ($record.Count) { Update-Shortcut $file.FullName Install ($record | Select-Object -First 1); continue }
             $link = $shell.CreateShortcut($file.FullName)
             if ($link.TargetPath -in @($official, $installed) -and !$link.Arguments) {
-                $record = @($records | Where-Object Path -eq $file.FullName)
-                Update-Shortcut $file.FullName Install ($record | Select-Object -First 1)
+                Update-Shortcut $file.FullName Install $null
             }
         }
     }
