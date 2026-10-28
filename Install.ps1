@@ -65,11 +65,13 @@ if (Test-Path -LiteralPath $manifestPath) {
 $shell = New-Object -ComObject WScript.Shell
 if (!$UserOnly) {
 $payload = @()
+$retained = @()
 $backupPrefix = Join-Path $destination ('.upgrade-' + [Guid]::NewGuid().ToString('N') + '-')
 $keepBackups = $false
 try {
     # Stage every source before acquiring destinations; setup holds its sources read-only.
-    foreach ($name in @('HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json')) {
+    $payloadNames = @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json','HytaleAccounts.exe')
+    foreach ($name in $payloadNames) {
         $path = Join-Path $destination $name
         Assert-RegularPath $path
         $bytes = if ($name -eq 'launcher-baseline.json') { ,([Text.Encoding]::UTF8.GetBytes(($before | ConvertTo-Json))) }
@@ -78,35 +80,50 @@ try {
             Assert-RegularPath $source
             ,([IO.File]::ReadAllBytes($source))
         }
-        $payload += [pscustomobject]@{ Path = $path; Bytes = [byte[]]$bytes; File = $null; Original = $null; Created = $false; Changed = $false; Backup = $null; BackupPath = ($backupPrefix + $name + '.bak') }
+        $payload += [pscustomobject]@{ Path = $path; Bytes = [byte[]]$bytes; File = $null; Original = $null; Changed = $false; Backup = $null; BackupPath = ($backupPrefix + $name + '.bak'); Stage = $null; StagePath = ($backupPrefix + $name + '.new') }
     }
-    # Hold the entire existing set before creating or overwriting any payload file.
+    # Retain interrupted attempts (including legacy backups) until this retry publishes the entire set.
+    foreach ($file in Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*' -Force) {
+        if ($file.Name -cmatch '^\.upgrade-[a-f0-9]{32}-(.+)\.(bak|new)$' -and $Matches[1] -cin $payloadNames) {
+            $retained += Open-ShortcutFile $file.FullName
+        }
+    }
+    # Hold the entire existing set before staging or replacing any payload file.
     foreach ($entry in $payload) {
         $entry.File = Open-ShortcutFile $entry.Path
         if ($entry.File.Exists) { $entry.Original = $entry.File.Read() }
     }
     foreach ($entry in $payload) {
-        if (!$entry.File.Exists) {
-            $entry.File.Dispose()
-            $entry.File = Open-ShortcutFile $entry.Path -Create
-            $entry.Created = $true
-        } else {
+        if ($entry.File.Exists) {
             $entry.Backup = Open-ShortcutFile $entry.BackupPath -Create
             $entry.Backup.Write($entry.Original)
         }
+        $entry.Stage = Open-ShortcutFile $entry.StagePath -Create
+        $entry.Stage.Write($entry.Bytes)
     }
+    # Every sibling is complete and flushed before publication; the helper is the last commit point.
     foreach ($entry in $payload) {
-        $entry.Changed = $true # Include a partially written file in rollback.
-        $entry.File.Write($entry.Bytes)
+        $entry.Changed = $true # ReplaceFile failures also need rollback.
+        $entry.File.ReplaceFrom($entry.Stage)
     }
+    foreach ($file in $retained) { $file.Delete() }
 } catch {
     $failure = $_
     $rollbackErrors = @()
     for ($i = $payload.Count - 1; $i -ge 0; $i--) {
         $entry = $payload[$i]
         try {
-            if ($entry.Created) { $entry.File.Delete() }
-            elseif ($entry.Changed) { $entry.File.Write($entry.Original) }
+            if ($entry.Changed) {
+                if ($null -eq $entry.Original) { if ($entry.File.Exists) { $entry.File.Delete() } }
+                else {
+                    if (!$entry.Stage.Exists) {
+                        $entry.Stage.Dispose()
+                        $entry.Stage = Open-ShortcutFile $entry.StagePath -Create
+                    }
+                    $entry.Stage.Write($entry.Original)
+                    $entry.File.ReplaceFrom($entry.Stage)
+                }
+            }
         } catch { $rollbackErrors += $_.Exception.Message }
     }
     if ($rollbackErrors.Count) {
@@ -116,6 +133,11 @@ try {
     throw
 } finally {
     foreach ($entry in $payload) {
+        if ($entry.Stage) {
+            try { if ($entry.Stage.Exists) { $entry.Stage.Delete() } }
+            catch { Write-Warning "Could not remove upgrade staging file: $($entry.StagePath)" }
+            finally { $entry.Stage.Dispose() }
+        }
         if ($entry.Backup) {
             try { if (!$keepBackups) { $entry.Backup.Delete() } }
             catch { Write-Warning "Could not remove upgrade backup: $($entry.BackupPath)" }
@@ -123,6 +145,7 @@ try {
         }
         if ($entry.File) { $entry.File.Dispose() }
     }
+    foreach ($file in $retained) { $file.Dispose() }
 }
 # Make removal available before any shortcut can be retargeted, even if the first update fails.
 Save-ShortcutJournal

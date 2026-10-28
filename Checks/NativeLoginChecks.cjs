@@ -5,7 +5,7 @@ let tick, nativeLogouts = 0, generated = 0, requestId = 0, failLogin = false, us
 const calls = [], created = [], browserUrls = [], events = {}, nativeActions = [];
 const deliveryFailures = new Map(), delivered = [];
 const timers = new Map();
-let timerId = 0, automaticSwitch = false, disconnected = false, loadGate, urlGate, commandGate, refresh;
+let timerId = 0, automaticSwitch = false, disconnected = false, loadGate, urlGate, commandGate, stateGate, refresh;
 const accountB = { uuid: 'accountB-profile', username: 'accountB' };
 const accountA = { uuid: 'accountA-profile', username: 'accountA' };
 let nativeProfile = accountB;
@@ -127,7 +127,12 @@ vm.runInNewContext(source, {
       }
     }
     if (!options.body && disconnected) throw Error('helper disconnected');
-    return { ok: true, json: async () => structuredClone(state) };
+    return { ok: true, json: async () => {
+      const next = structuredClone(state), gate = stateGate;
+      stateGate = null;
+      await gate;
+      return next;
+    } };
   }
 }, { importModuleDynamically: async asset => { throw Error('Unavailable frontend import: ' + asset + '; mounted asset: ' + nativeScript.src); } });
 (async () => {
@@ -204,7 +209,11 @@ vm.runInNewContext(source, {
   dispatch(rows()[0], 'keydown', 'Enter'); await new Promise(setImmediate);
   assert.deepEqual(calls.at(-1), { action: 'select', store: 'accountB' }, 'Enter selects the correct saved account');
   const beforeAdd = calls.length;
-  await command('add'); await tick(); await tick();
+  let releaseState;
+  stateGate = new Promise(resolve => { releaseState = resolve; });
+  await command('add');
+  assert.equal(stateGate, null, "Add's final state response is held while other polls remain available");
+  await tick(); await tick();
   assert.deepEqual(calls[beforeAdd], { action: 'add' }, 'Add click invokes add without a store');
   assert.equal(actionRow().children[0].textContent, 'Cancel login');
   assert.equal(rows().length, state.stores.filter(store => !store.signedOut).length + 1, 'Cancel reuses the Add row without an extra control');
@@ -222,11 +231,15 @@ vm.runInNewContext(source, {
   assert.equal(nativeLogouts, 0, 'Add does not log out the existing account');
   assert.equal(state.active, 'accountB', 'existing account stays active until browser authentication succeeds');
   assert(!calls.some(call => call.loginRequest), 'do not save old profile as a fresh login before the callback');
-  nativeProfile = accountA; events.reload(); await tick();
+  nativeProfile = accountA; events.reload();
+  releaseState(); await new Promise(setImmediate); await tick();
+  assert.equal(state.login, null, "one completion event during Add's final state request finishes login");
   assert.deepEqual(calls.at(-1), { action: 'ready', profile: accountA.uuid, username: 'accountA', loginRequest: 'login-1' });
   assert.equal(state.active, 'accountA');
   assert.equal([...timers.values()].at(-1).delay, 0, 'completion refreshes the Add row without waiting for the idle poll');
   await tick(); assert.equal(actionRow().children[0].textContent, 'Add account', 'completion restores the existing Add row');
+  assert(!playBlocked(), 'one completion event restores Play after the completed login is verified');
+  assert.equal(browserUrls.length, 1, 'completion during the pending Add does not reopen the browser');
   deliveryFailures.set('login-2', 1);
   await command('add'); await tick(); events.profile_changed(); await tick();
   assert.equal(calls.at(-1).loginRequest, 'login-2', 'same-account login is confirmed by the native callback too');
@@ -249,7 +262,11 @@ vm.runInNewContext(source, {
   failLogin = false;
   await command('add'); await tick();
   assert(playBlocked(), 'Play is blocked while browser login is pending');
-  dispatch(actionRow(), 'keydown', 'Enter'); await new Promise(setImmediate); await tick();
+  commandGate = new Promise(resolve => { releaseCommand = resolve; });
+  dispatch(actionRow(), 'keydown', 'Enter'); await new Promise(setImmediate);
+  events.reload(); const cancellingPoll = tick(); await new Promise(setImmediate);
+  assert(!calls.some(call => call.loginRequest === 'login-4' && call.action === 'ready'), 'completion during pending cancellation cannot confirm the login');
+  releaseCommand(); commandGate = null; await cancellingPoll; await new Promise(setImmediate); await tick();
   assert(calls.some(call => call.action === 'cancel' && call.loginRequest === 'login-4'), 'keyboard activates Cancel on the reused row');
   assert.equal(state.login, null); assert.equal(state.active, 'accountA'); assert.equal(state.selected, 'accountA');
   assert.equal(actionRow().children[0].textContent, 'Add account'); assert(!playBlocked(), 'verified current account can Play after cancellation');
@@ -383,6 +400,7 @@ vm.runInNewContext(source, {
   console.log('PASS production Play handler blocks pending, busy, disconnected and mismatched accounts; verified matching identity reaches native Play');
   console.log('PASS dropdown renders usable saved accounts and Add, dispatches click/keyboard actions, and leaves native sign-in free of addon controls');
   console.log('PASS Add opens native Hytale login once, retains current account, confirms callbacks, and preserves login state/PKCE');
+  console.log('PASS one completion event during the pending Add state response restores Add and Play without reopening the browser');
   console.log('PASS switching pauses, reloads and resumes native state once per request without logout or browser login');
   console.log('PASS logout executes once and final-account sign-in clears cached identity without logging out other accounts');
   console.log('PASS account clicks immediately process native stages with at most 100 ms scheduling delay and no fast idle polling');

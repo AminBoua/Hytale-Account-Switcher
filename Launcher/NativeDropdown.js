@@ -30,7 +30,7 @@
   async function command(action, store) {
     if (!state || ((state.busy || state.login) && action !== 'cancel') || pending) return;
     const loginRequest = state.login;
-    pending = true; commandVersion++;
+    pending = action; commandVersion++;
     if (action === 'cancel') { loginCompleted = ''; reported = ''; }
     try { await request('command', { action, ...(store ? { store } : {}), ...(action === 'cancel' ? { loginRequest } : {}) }); }
     catch (error) { alert(error.message); }
@@ -100,7 +100,7 @@
       if (!listening && window.runtime?.EventsOn) {
         for (const event of ['reload', 'profile_changed'])
           window.runtime.EventsOn(event, () => {
-            if (!pending && state?.login && loginOpened === state.login) { loginCompleted = loginOpened; reported = ''; }
+            if (pending !== 'cancel' && state?.login && loginOpened === state.login) { loginCompleted = loginOpened; reported = ''; }
           });
         listening = true;
       }

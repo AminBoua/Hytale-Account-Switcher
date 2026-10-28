@@ -9,6 +9,7 @@ using Microsoft.Win32.SafeHandles;
 public sealed class ShortcutFile : IDisposable
 {
     private readonly List<SafeFileHandle> directories = new List<SafeFileHandle>();
+    private readonly string path;
     private FileStream stream;
     public bool Exists { get { return stream != null; } }
     public string Identity
@@ -25,6 +26,7 @@ public sealed class ShortcutFile : IDisposable
         try
         {
             path = Path.GetFullPath(path);
+            this.path = path;
             if (path.StartsWith(@"\\") || path.IndexOf(':', 2) >= 0) throw new IOException("Only local shortcut paths are supported.");
             var root = Path.GetPathRoot(path);
             var parent = Open(root, 0x81, FileShare.Read | FileShare.Write, 3, 0x02200000);
@@ -111,6 +113,34 @@ public sealed class ShortcutFile : IDisposable
     public void Write(byte[] bytes)
     {
         stream.Position = 0; stream.Write(bytes, 0, bytes.Length); stream.SetLength(bytes.Length); stream.Flush(true);
+    }
+    public void ReplaceFrom(ShortcutFile staged)
+    {
+        if (!staged.Exists || !String.Equals(Path.GetDirectoryName(path), Path.GetDirectoryName(staged.path), StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(path, staged.path, StringComparison.OrdinalIgnoreCase)) throw new IOException("Replacement must be a staged sibling.");
+        foreach (var directory in directories) RequireRegular(directory, true);
+        bool existed = Exists;
+        staged.stream.Flush(true);
+        // Caller holds the validated, trusted journal directory; release only leaf handles for ReplaceFile's ACL-preserving rename.
+        if (stream != null) { stream.Dispose(); stream = null; }
+        staged.stream.Dispose(); staged.stream = null;
+        try
+        {
+            if (existed) File.Replace(staged.path, path, null);
+            else File.Move(staged.path, path);
+        }
+        finally
+        {
+            try { Reopen(); }
+            finally { staged.Reopen(); }
+        }
+    }
+    private void Reopen()
+    {
+        var file = OpenRelative(directories[directories.Count - 1], Path.GetFileName(path), false, false);
+        if (file == null) return;
+        try { RequireRegular(file, false); stream = new FileStream(file, FileAccess.ReadWrite); }
+        catch { file.Dispose(); throw; }
     }
     public void Delete()
     {
