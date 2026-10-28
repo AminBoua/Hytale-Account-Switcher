@@ -297,7 +297,9 @@ try {
     foreach ($name in $replacementNames) {
         $path = Join-Path $destination $name
         # Normalize legacy inherited ACLs before the baseline; ReplaceFile upgrades their inheritance format.
-        Set-Acl -LiteralPath $path -AclObject (Get-Acl -LiteralPath $path)
+        $acl = Get-Acl -LiteralPath $path
+        $acl.SetSecurityDescriptorSddlForm($acl.Sddl, [Security.AccessControl.AccessControlSections]::Access)
+        [IO.File]::SetAccessControl($path, $acl)
         $oldPayload[$name] = [pscustomobject]@{ Bytes = [IO.File]::ReadAllBytes($path); Hash = (Get-FileHash -LiteralPath $path).Hash; Permissions = (Get-Acl -LiteralPath $path).Sddl }
     }
     foreach ($name in @('HytaleAccounts.exe') + $scripts) {
