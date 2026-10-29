@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net;
+using System.Net.Http;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Windows.Threading;
 using HytaleAccounts;
@@ -144,6 +147,8 @@ internal static class NativeLogoutChecks
                             await Confirmation(Path.Combine(root, "confirmation-" + scenario), dispatcher, scenario, check);
                         foreach (var failure in new[] { "stop", "clear", "run", "authenticated refresh" })
                             await ConfirmedRecoveryFence(Path.Combine(root, "confirmed-recovery-" + failure), dispatcher, failure, check);
+                        foreach (var failure in new[] { "stop", "clear", "run", "authenticated refresh", "stop deadline", "clear deadline", "run deadline", "helper deadline" })
+                            await FinalSignInRetry(Path.Combine(root, "final-signin-" + failure), dispatcher, failure, check);
                         foreach (var mismatch in new[] { false, true })
                             foreach (var scenario in new[] { "switch", "failed rollback", "failed precheck rollback", "deadline rollback", "logout" })
                                 await ResumeRecovery(Path.Combine(root, $"resume-{mismatch}-{scenario}"), dispatcher, mismatch, scenario, check);
@@ -346,7 +351,8 @@ internal static class NativeLogoutChecks
         }
         else
         {
-            await Invoke("ShowSignIn");
+            check(await Command(new { action = "retry-signin", request = Get("signInRecovery") }), label + " accepts the frontend sign-in retry");
+            await dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
             check(Get("holdLogin") is false && Get("verifiedSession") is false && resident is null &&
                 Get("active") is NativeStore pending && stores.IsPending(pending) && operations.Last() == "run" &&
                 await Command(new { action = "ready", profile = (Guid?)null }),
@@ -361,6 +367,140 @@ internal static class NativeLogoutChecks
             ReferenceEquals(Get("ready"), signal) && revoked.SequenceEqual(new[] { accountA.Profile }) &&
             File.ReadAllBytes(Snapshot(unrelated)).SequenceEqual(snapshots[unrelated.Folder]),
             label + " retains the launcher process, window and unrelated snapshot without repeating logout");
+    }
+
+    private static async Task FinalSignInRetry(string root, Dispatcher dispatcher, string failure, Action<bool, string> check)
+    {
+        var stores = new NativeStores(root);
+        var native = Path.Combine(root, "account.dat");
+        NativeStore Account(string label)
+        {
+            var store = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), label);
+            File.WriteAllText(native, label); stores.Capture(store);
+            return store;
+        }
+        var unrelated = Account("unrelated"); stores.MarkSignedOut(unrelated);
+        var account = Account("final account"); stores.Activate(account); stores.Select(account);
+        string Snapshot(NativeStore store) => Path.Combine(stores.Folder(store.Folder), "AppData", "Hytale", "account.dat");
+        var preserved = File.ReadAllBytes(Snapshot(unrelated));
+        var session = new NativeSession(stores, dispatcher);
+        using var owner = Process.GetCurrentProcess();
+        var window = owner.MainWindowHandle;
+        const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        object? Get(string name) => typeof(NativeSession).GetField(name, flags)!.GetValue(session);
+        void Set(string name, object value) => typeof(NativeSession).GetField(name, flags)!.SetValue(session, value);
+        var signal = new TaskCompletionSource<Guid?>();
+        Set("launcher", owner); Set("active", account); Set("verifiedSession", true); Set("ready", signal);
+        await using var bridge = new LocalAccountBridge(data => (Task<bool>)typeof(NativeSession).GetMethod("Command", flags)!
+            .Invoke(session, [data, signal])!);
+        Set("bridge", bridge);
+        using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(10) };
+        http.DefaultRequestHeaders.Add("Origin", LocalAccountBridge.Origin);
+        http.DefaultRequestHeaders.Add("Authorization", "Bearer " + bridge.Capability);
+        async Task<bool> Command(object data)
+        {
+            using var body = new StringContent(JsonSerializer.Serialize(data), Encoding.UTF8, "application/json");
+            using var response = await http.PostAsync(bridge.Endpoint + "command", body);
+            if (response.StatusCode == HttpStatusCode.BadRequest) return false;
+            response.EnsureSuccessStatusCode();
+            return true;
+        }
+        async Task<JsonElement> State()
+        {
+            using var json = JsonDocument.Parse(await http.GetStringAsync(bridge.Endpoint + "state"));
+            return json.RootElement.Clone();
+        }
+        async Task Until(Func<bool> condition)
+        {
+            var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void Changed(string _) { if (condition()) reached.TrySetResult(); }
+            session.Status += Changed;
+            try { if (!condition()) await reached.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+            finally { session.Status -= Changed; }
+        }
+        var operations = new List<string>();
+        var requests = new List<string>();
+        var logouts = new HashSet<string>();
+        session.Status += _ =>
+        {
+            if (Get("logoutRequest") is string logout) logouts.Add(logout);
+            if (Get("sessionRequest") is string request && !requests.Contains(request))
+            { requests.Add(request); operations.Add((string)Get("sessionOperation")!); }
+        };
+        async Task Reply(string operation, bool? success = true, bool loggedIn = false)
+        {
+            check((string?)Get("sessionOperation") == operation, "final sign-in " + failure + " requests " + operation);
+            var request = (string)Get("sessionRequest")!;
+            check(await Command(new { action = "session-result", request, success, loggedIn }), "current native result is accepted");
+            await Until(() => (string?)Get("sessionRequest") != request && (Get("sessionRequest") is not null || Get("busy") is false));
+        }
+        var label = "final sign-in " + failure;
+        check(await Command(new { action = "logout", store = account.Folder }), label + " starts through the frontend logout command");
+        await Until(() => Get("logoutRequest") is not null);
+        var logoutRequest = (string)Get("logoutRequest")!;
+        File.Delete(native);
+        check(await Command(new { action = "logout-result", request = logoutRequest, success = true }), label + " confirms native logout exactly once");
+        await Until(() => Get("sessionRequest") is not null);
+        var fault = failure.StartsWith("stop") ? "stop" : failure.StartsWith("clear") ? "clear" : "run";
+        foreach (var operation in new[] { "stop", "clear", "run" })
+        {
+            if (operation != fault) { await Reply(operation); continue; }
+            if (failure == "helper deadline")
+            {
+                var idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                void Changed(string _) { if (Get("busy") is false) idle.TrySetResult(); }
+                session.Status += Changed;
+                try { await idle.Task.WaitAsync(TimeSpan.FromSeconds(35)); }
+                finally { session.Status -= Changed; }
+            }
+            else await Reply(operation, failure.EndsWith("deadline") ? null : failure == "authenticated refresh", failure == "authenticated refresh");
+            break;
+        }
+        check(Get("holdLogin") is true && Get("verifiedSession") is false && Get("busy") is false && Get("signInRecovery") is string &&
+            stores.Catalog.Stores.All(s => s.SignedOut) && stores.Catalog.Selected is null && !await session.AddAccount(),
+            label + " advertises retryable confirmed recovery with no usable account and retains the fence");
+        var saved = stores.Catalog.Stores.ToArray();
+        var metadata = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
+        var recoveryStore = Get("active") as NativeStore;
+        var beforeReady = operations.Count;
+        for (var i = 0; i < 3; i++)
+        {
+            check(await Command(new { action = "ready", profile = (Guid?)null }) &&
+                !await Command(new { action = "ready", profile = account.Profile }), label + " refuses cached readiness as recovery proof");
+        }
+        check(operations.Count == beforeReady && Get("holdLogin") is true && Get("verifiedSession") is false &&
+            stores.Catalog.Stores.SequenceEqual(saved) && File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(metadata),
+            label + " leaves the fence and account identities unchanged during readiness reports");
+        check(!await Command(new { action = "logout", store = account.Folder }) &&
+            !await Command(new { action = "logout-result", request = logoutRequest, success = true }), label + " cannot repeat completed logout");
+        foreach (var request in requests.ToArray())
+            check(!await Command(new { action = "session-result", request, success = true, loggedIn = false }), label + " rejects late native completion");
+        var state = await State();
+        var firstRetry = state.GetProperty("signInRecovery").GetString()!;
+        check(state.GetProperty("holdLogin").GetBoolean() && !state.GetProperty("busy").GetBoolean() &&
+            state.GetProperty("profile").ValueKind == JsonValueKind.Null, label + " advertises fenced recovery over the normal helper state endpoint");
+        check(await Command(new { action = "retry-signin", request = firstRetry }) &&
+            !await Command(new { action = "retry-signin", request = firstRetry }), label + " serializes duplicate frontend retries");
+        await Until(() => Get("sessionRequest") is not null);
+        await Reply("stop", false);
+        check(Get("holdLogin") is true && Get("busy") is false &&
+            !await Command(new { action = "retry-signin", request = firstRetry }), label + " keeps ordinary retry failure fenced and consumes its request");
+        state = await State();
+        check(await Command(new { action = "retry-signin", request = state.GetProperty("signInRecovery").GetString() }), label + " retries again through the frontend exchange");
+        await Until(() => Get("sessionRequest") is not null);
+        await Reply("stop"); await Reply("clear");
+        check(await Command(new { action = "ready", profile = (Guid?)null }) && Get("holdLogin") is true && Get("busy") is true &&
+            !await session.AddAccount(), label + " waits for fresh signed-out refresh even after native clear succeeds");
+        await Reply("run");
+        state = await State();
+        check(Get("holdLogin") is false && Get("busy") is false && Get("verifiedSession") is false && Get("signInRecovery") is null &&
+            !state.GetProperty("holdLogin").GetBoolean() && state.GetProperty("signInRecovery").ValueKind == JsonValueKind.Null &&
+            Get("active") is NativeStore pending && stores.IsPending(pending) && operations.TakeLast(3).SequenceEqual(new[] { "stop", "clear", "run" }) &&
+            !await Command(new { action = "retry-signin", request = firstRetry }), label + " releases recovery only after fresh signed-out refresh");
+        check(logouts.SetEquals(new[] { logoutRequest }) && ReferenceEquals(Get("launcher"), owner) && session.IsOpen && owner.MainWindowHandle == window &&
+            ReferenceEquals(Get("ready"), signal) && stores.Catalog.Stores.SequenceEqual(saved) && !File.Exists(Snapshot(account)) &&
+            (recoveryStore is null || !stores.IsPending(recoveryStore) || ((NativeStore)Get("active")!).Folder == recoveryStore.Folder) &&
+            File.ReadAllBytes(Snapshot(unrelated)).SequenceEqual(preserved), label + " preserves process, window, snapshots and identities with exactly one logout");
     }
 
     private static async Task ResumeRecovery(string root, Dispatcher dispatcher, bool mismatch, string scenario, Action<bool, string> check)
@@ -503,6 +643,9 @@ internal static class NativeLogoutChecks
         void Set(string name, object value) => typeof(NativeSession).GetField(name, flags)!.SetValue(session, value);
         Task Invoke(string name, params object[] args) => (Task)typeof(NativeSession).GetMethod(name, flags)!.Invoke(session, args)!;
         Set("launcher", owner); Set("active", accountA); Set("verifiedSession", true);
+        var signal = new TaskCompletionSource<Guid?>(); Set("ready", signal);
+        Task<bool> Command(object data) => (Task<bool>)typeof(NativeSession).GetMethod("Command", flags)!
+            .Invoke(session, [JsonSerializer.SerializeToElement(data), signal])!;
         Guid? resident = accountA.Profile;
         var handled = new HashSet<string>();
         var revoked = new List<Guid?>();
@@ -557,7 +700,11 @@ internal static class NativeLogoutChecks
         if (metadata)
         {
             if (accountB is not null) await session.Open(accountB, true);
-            else await Invoke("ShowSignIn");
+            else
+            {
+                check(await Command(new { action = "retry-signin", request = Get("signInRecovery") }), scenario + " accepts the frontend retry after unlocking storage");
+                await dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+            }
             check(accountB is not null ? resident == accountB.Profile && stores.Catalog.Selected == accountB.Folder && Get("verifiedSession") is true :
                 resident is null && Get("active") is NativeStore pending && stores.IsPending(pending) && Get("verifiedSession") is false,
                 scenario + " safely recovers after releasing the metadata lock");

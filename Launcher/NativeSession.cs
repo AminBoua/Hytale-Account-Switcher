@@ -22,6 +22,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     private TaskCompletionSource<bool>? logoutResult;
     private string? sessionRequest, sessionOperation;
     private TaskCompletionSource<JsonElement>? sessionResult;
+    private string? signInRecovery;
     private string message = "";
     public event Action<string>? Status;
     public event Action? Closed;
@@ -32,7 +33,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         Status?.Invoke(message);
         return bridge?.Update(new { stores = stores.Catalog.Stores.Where(s => !s.SignedOut && s.Profile is not null).Select(s => new { id = s.Folder, label = s.Label }),
             selected = stores.Catalog.Selected, active = active?.Folder, profile = verifiedSession ? active?.Profile : null,
-            busy, holdLogin, logout = logoutRequest, login = pendingLogin?.Folder,
+            busy, holdLogin, logout = logoutRequest, login = pendingLogin?.Folder, signInRecovery,
             session = sessionRequest is null ? null : new { request = sessionRequest, operation = sessionOperation }, message }) ?? Task.CompletedTask;
     }
     private Task<bool> Command(JsonElement data, TaskCompletionSource<Guid?> signal) => dispatcher.InvokeAsync(async () =>
@@ -96,6 +97,21 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             if (success.ValueKind != JsonValueKind.Null) logoutResult?.TrySetResult(success.GetBoolean());
             return true;
         }
+        if (action.GetString() == "retry-signin")
+        {
+            if (busy || !IsOpen || signInRecovery is null || !data.TryGetProperty("request", out var request) || request.GetString() != signInRecovery) return false;
+            busy = true;
+            // Consume this attempt before dispatch so duplicate or delayed commands cannot repeat it.
+            signInRecovery = Guid.NewGuid().ToString("N");
+            _ = dispatcher.BeginInvoke(new Action(async () =>
+            {
+                try { await ShowSignIn(); message = "Account logged out. Sign in to continue."; }
+                catch (Exception ex) { message = ex.Message + " Native logout succeeded, but account recovery did not complete. Other accounts were preserved."; }
+                finally { busy = false; await Publish(); }
+            }), DispatcherPriority.Background);
+            await Publish();
+            return true;
+        }
         if (busy) return false;
         if (action.GetString() == "add") return await AddAccount();
         if (pendingLogin is not null) return false;
@@ -104,7 +120,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             target = stores.Catalog.Stores.FirstOrDefault(s => s.Folder == folder.GetString());
         else return false;
         if (target is null) return false;
-        if (action.GetString() == "logout" && target.Folder != active?.Folder) return false;
+        if (action.GetString() == "logout" && (target.Folder != active?.Folder || signInRecovery is not null)) return false;
         if (action.GetString() == "select" && target.Folder == active?.Folder && verifiedSession) return true;
         // Return the HTTP response before beginning the native transition.
         _ = dispatcher.BeginInvoke(new Action(async () => await (action.GetString() == "logout" ? LogoutCore(target) : OpenCore(target, true))), DispatcherPriority.Background);
@@ -164,6 +180,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             active = stores.Catalog.Stores.Single(s => s.Folder == target.Folder);
         }
         verifiedSession = true;
+        signInRecovery = null;
         if (pending) stores.RemoveRedundantPending(store, active);
     }
     private async Task OpenCore(NativeStore store, bool commit, bool initial = false)
@@ -240,18 +257,19 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     {
         await NativeAction("stop");
         verifiedSession = false;
-        var pending = stores.CreatePending();
+        var pending = active is not null && stores.IsPending(active) ? active : stores.CreatePending();
         try
         {
             stores.ActivatePaused(pending, launcher!);
+            active = pending;
             var result = await NativeAction("clear");
             if (!result.TryGetProperty("loggedIn", out var loggedIn) || loggedIn.ValueKind != JsonValueKind.False)
                 throw new IOException("Native sign-out could not be verified.");
-            active = pending;
             result = await NativeAction("run");
             if (!result.TryGetProperty("loggedIn", out loggedIn) || loggedIn.ValueKind != JsonValueKind.False)
                 throw new IOException("Native sign-in refresh could not be verified.");
             holdLogin = false;
+            signInRecovery = null;
         }
         finally { if (active?.Folder != pending.Folder) stores.DiscardPending(pending); }
     }
@@ -336,6 +354,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
                 catch (Exception ex) { recoveryErrors += "Could not restore " + candidate.Label + ": " + ex.Message + " "; }
             }
             // Native sign-in is refreshed in the existing window when no usable session remains.
+            signInRecovery = Guid.NewGuid().ToString("N");
             await ShowSignIn();
             message = recoveryErrors + "Account logged out. Sign in to continue.";
         }
