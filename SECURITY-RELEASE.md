@@ -32,6 +32,7 @@ The checked-in [GitHub Actions workflow](.github/workflows/checks.yml) runs safe
 | `storage-races` | Retained read/write/creation handles, destination insertion rejection and fixture preservation |
 | `vm-harness-host-only` | Script parsing, offline compilation/package hashes/provenance, simulated guard predicates and actual compiled refusal of a non-designated path; **no privileged guest tests** |
 | `evidence-gate` | Disposable fabricated evidence and Git fixtures test missing/failed/simulated/tampered/stale evidence rejection, actor/ACL validation and source invalidation; **not a VM pass** |
+| `evidence-runner` | Disposable runner fixtures verify successful children with unwritable logs fail the stage and gate, later stages still run, child exit codes are retained, and expected negative controls remain enforced |
 | `runtime-notices` | Synthetic pack fixtures verify component/version attribution, complete license/notice text, and rejection of missing licenses or an empty pack set |
 
 The optional ten negative controls disable membership checking, ACL propagation suppression, path pins, mutation policy, private replacement, body timeout, handler timeout, or outstanding-handler slot retention, or introduce a wrong adapter jump destination or pc metadata offset in disposable source copies. Each must exit nonzero at its expected regression; compile errors or surviving mutations fail the gate. Normal builds run the positive suites; mutation builds are an explicit audit cost.
