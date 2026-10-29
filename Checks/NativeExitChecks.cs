@@ -47,7 +47,7 @@ internal static class NativeExitChecks
                 check(File.ReadAllText(Path.Combine(root, "account.dat")) == (failure == "pending-login" ? "opaque-accountB" : "opaque-current") &&
                     File.ReadAllText(Path.Combine(root, "Accounts", "run", "hytale-launcher.exe")) == "generated runtime fixture" &&
                     File.ReadAllText(Directory.GetFiles(Path.Combine(root, "Accounts"), "account.dat", SearchOption.AllDirectories).Single()) ==
-                        (failure is "snapshot" or "pending-login" ? "opaque-saved" : "opaque-current"), "shutdown preserves pending snapshots and captures refreshed sessions otherwise: " + failure);
+                        (failure is "snapshot" or "pending-login" or "pending-logout" ? "opaque-saved" : "opaque-current"), "shutdown preserves pending snapshots and captures refreshed sessions otherwise: " + failure);
                 if (failure == "pending-login")
                 {
                     check(File.ReadAllBytes(Path.Combine(root, "Accounts", "native-stores.json")).SequenceEqual(metadata) &&

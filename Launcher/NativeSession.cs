@@ -70,6 +70,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             else if (pendingLogin is not null) return false;
             Guid? profile = data.TryGetProperty("profile", out var value) && Guid.TryParse(value.GetString(), out var id) ? id : null;
             if (profile == Guid.Empty) return false;
+            if (profile is not null && holdLogin && !busy) return false; // A cached UI profile cannot confirm an uncertain logout.
             nativeName = data.TryGetProperty("username", out var name) ? name.GetString() : null;
             if (profile is null && !holdLogin && pendingLogin is null && active is not null && !stores.IsPending(active))
             {
@@ -90,8 +91,9 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         if (action.GetString() == "logout-result")
         {
             if (logoutRequest is null || !data.TryGetProperty("request", out var request) || request.GetString() != logoutRequest ||
-                !data.TryGetProperty("success", out var success) || success.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return false;
-            logoutResult?.TrySetResult(success.GetBoolean());
+                !data.TryGetProperty("success", out var success) || success.ValueKind is not (JsonValueKind.True or JsonValueKind.False or JsonValueKind.Null)) return false;
+            // Null means logout completed, but native sign-out is still unconfirmed.
+            if (success.ValueKind != JsonValueKind.Null) logoutResult?.TrySetResult(success.GetBoolean());
             return true;
         }
         if (busy) return false;
@@ -281,6 +283,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     {
         var confirmed = false;
         var requested = false;
+        var failed = false;
         var recoveryErrors = "";
         busy = true; holdLogin = true;
         message = "Logging out " + target.Label + "…"; await Publish();
@@ -289,10 +292,12 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             RequireNoGame();
             if (!IsOpen || active?.Folder != target.Folder) throw new IOException("Only the current native account can be logged out.");
             requested = true;
+            verifiedSession = false;
             logoutResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
             logoutRequest = Guid.NewGuid().ToString("N");
             await Publish();
-            if (!await logoutResult.Task.WaitAsync(TimeSpan.FromSeconds(30)))
+            failed = !await logoutResult.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            if (failed)
                 throw new IOException("Native logout failed.");
             confirmed = true;
             logoutRequest = null;
@@ -322,17 +327,25 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         }
         catch (Exception ex)
         {
-            if (confirmed) verifiedSession = false;
+            if (requested) verifiedSession = false;
             message = recoveryErrors + ex.Message + (confirmed ? " Native logout succeeded, but account recovery did not complete. Other accounts were preserved." : " Other accounts and selection were preserved.");
+            if (requested && !confirmed && !failed) message += " Native logout could not be confirmed. Play remains blocked.";
             logoutRequest = null;
             try
             {
-                // A failed native logout keeps the current session and window available.
-                if (requested && !confirmed && IsOpen) await NativeAction("run");
+                // Only a reported logout failure may recover the old native session.
+                if (failed && IsOpen)
+                {
+                    var result = await NativeAction("run");
+                    if (!result.TryGetProperty("loggedIn", out var loggedIn) || loggedIn.ValueKind != JsonValueKind.True ||
+                        !result.TryGetProperty("profile", out var profile) || !Guid.TryParse(profile.GetString(), out var uuid) || uuid != target.Profile)
+                        throw new IOException("Previous native account could not be verified.");
+                    verifiedSession = true;
+                }
             }
             catch (Exception recovery) { verifiedSession = false; message += " Native recovery failed: " + recovery.Message; }
         }
-        finally { logoutRequest = null; logoutResult = null; holdLogin = false; busy = false; await Publish(); }
+        finally { logoutRequest = null; logoutResult = null; holdLogin = IsOpen && requested && !confirmed && !verifiedSession; busy = false; await Publish(); }
     }
     private static void RequireNoGame()
     {
