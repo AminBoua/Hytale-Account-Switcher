@@ -514,10 +514,14 @@ vm.runInNewContext(source, {
     assert.equal(calls.at(-1).success, true, 'fresh load verifies recovery after the old load actually settles');
     assert.equal(user.getUserProfile, accountB, 'a late old load cannot overwrite a newer frontend result');
     assert.equal(reloads, beforeReloads + 1, 'only the current verified run emits reload');
-    state.session = null; state.busy = false; await tick();
+    state.session = null; state.busy = false; state.holdLogin = true; state.profile = null;
+    await tick();
+    assert(playBlocked(), 'successful frontend refresh cannot bypass the helper failed-recovery readiness fence');
+    state.holdLogin = false; state.profile = accountB.uuid; await tick();
     assert(!playBlocked(), 'verified recovery restores Play in the existing frontend');
   }
   console.log('PASS controlled session/login load deadlines process later recovery, serialize Pinia loads, and fence withdrawn late completions, readiness and Play');
+  console.log('PASS successful frontend refresh after a deadline still respects the helper failed-recovery readiness fence');
   {
     timers.clear();
     const gate = deferred(); nativeGate = gate.promise;

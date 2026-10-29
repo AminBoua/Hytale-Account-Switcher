@@ -143,7 +143,7 @@ internal static class NativeLogoutChecks
                         foreach (var scenario in new[] { "transient", "persistent", "failed" })
                             await Confirmation(Path.Combine(root, "confirmation-" + scenario), dispatcher, scenario, check);
                         foreach (var mismatch in new[] { false, true })
-                            foreach (var scenario in new[] { "switch", "failed rollback", "failed precheck rollback", "logout" })
+                            foreach (var scenario in new[] { "switch", "failed rollback", "failed precheck rollback", "deadline rollback", "logout" })
                                 await ResumeRecovery(Path.Combine(root, $"resume-{mismatch}-{scenario}"), dispatcher, mismatch, scenario, check);
                     }
                     complete.TrySetResult();
@@ -274,7 +274,8 @@ internal static class NativeLogoutChecks
         var saved = stores.Catalog.Stores.ToArray();
         var snapshots = saved.ToDictionary(s => s.Folder, s => File.ReadAllBytes(Snapshot(s)));
         var metadata = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
-        var failedRollback = scenario is "failed rollback" or "failed precheck rollback";
+        var failedRollback = scenario is "failed rollback" or "failed precheck rollback" or "deadline rollback";
+        var timedOutRequests = new List<string>();
         Guid? resident = accountA.Profile;
         NativeStore? loaded = null;
         var handled = new HashSet<string>();
@@ -314,8 +315,10 @@ internal static class NativeLogoutChecks
                 }
             }
             if (operation == "clear") { signIn = true; resident = null; }
+            var timedOut = scenario == "deadline rollback" && rejectResume && operation == "run";
+            if (timedOut) timedOutRequests.Add(request);
             ((TaskCompletionSource<JsonElement>)Get("sessionResult")!).TrySetResult(JsonSerializer.SerializeToElement(new
-                { success = true, profile = resident?.ToString(), loggedIn = resident is not null, username = loaded?.Label }));
+                { success = timedOut ? (bool?)null : true, profile = resident?.ToString(), loggedIn = resident is not null, username = loaded?.Label }));
         };
         var label = scenario + (mismatch ? " with mismatched resume" : " with signed-out resume");
         if (scenario == "logout") await Invoke("LogoutCore", accountA);
@@ -333,6 +336,9 @@ internal static class NativeLogoutChecks
                 File.ReadAllText(Snapshot(accountA)) == "accountA" && File.ReadAllText(Snapshot(accountC)) == "accountC" &&
                 ((string)Get("message")!).Contains("Native recovery failed:"),
                 label + " keeps Play blocked and snapshots unchanged when rollback also fails verification");
+            foreach (var request in timedOutRequests)
+                check(!await Command(new { action = "session-result", request, success = true, loggedIn = true, profile = accountA.Profile }),
+                    label + " rejects late successful completion of a withdrawn frontend deadline");
             check(await Command(new { action = "ready", profile = (Guid?)null }) &&
                 !await Command(new { action = "ready", profile = accountA.Profile, username = "cached-accountA" }) &&
                 Get("verifiedSession") is false && Get("holdLogin") is true && Get("busy") is false &&
