@@ -216,7 +216,8 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             catch (Exception recovery) { message += " Could not reopen previous launcher: " + recovery.Message; }
             if (initial) throw;
         }
-        finally { if (adding && active?.Folder != store.Folder) stores.DiscardPending(store); busy = false; await Publish(); }
+        // Unverified staging may hold the only recovery copy of the original native session.
+        finally { if (adding && active?.Folder != store.Folder) stores.ReleasePending(store); busy = false; await Publish(); }
     }
     private async Task<JsonElement> NativeAction(string operation)
     {

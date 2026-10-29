@@ -27,7 +27,7 @@ public static class NativeStartupRecoveryChecks
             Get(session, "signInRecovery") is "previous-sign-in-recovery",
             "startup retains the existing fence before native verification: " + outcome);
         if (outcome == "launch-failure") throw new IOException("Synthetic launch failure.");
-        return process = outcome == "exited-process" ? Process.Start(new ProcessStartInfo("cmd.exe", "/d /c set /p startup_fixture_wait=")
+        return process = outcome is "exited-process" or "initial-snapshot-failure" ? Process.Start(new ProcessStartInfo("cmd.exe", "/d /c set /p startup_fixture_wait=")
             { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true })! : Process.GetCurrentProcess();
     }
 
@@ -182,5 +182,66 @@ public static class NativeStartupRecoveryChecks
             }
         }
         Console.WriteLine("PASS startup recovery fences: authenticated and signed-out completion, storage failures, old signals and stale completions");
+        await FailedInitialSnapshot();
+    }
+
+    private static async Task FailedInitialSnapshot()
+    {
+        outcome = "initial-snapshot-failure"; process = null; BeforeComplete = null;
+        var root = SecurityFixture.Create("native-initial-snapshot-failure-");
+        NativeSession? session = null;
+        try
+        {
+            var stores = new NativeStores(root);
+            var official = Path.Combine(root, "account.dat");
+            var keys = Path.Combine(root, ".keys"); Directory.CreateDirectory(keys);
+            var key = Path.Combine(keys, "key");
+            string Storage(NativeStore store) => Path.Combine(stores.Folder(store.Folder), "AppData", "Hytale");
+            File.WriteAllText(official, "opaque-saved-session"); File.WriteAllText(key, "opaque-saved-key");
+            var saved = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), "saved"); stores.Capture(saved);
+            var accounts = stores.Catalog.Stores.ToArray();
+            var selected = stores.Catalog.Selected;
+            File.WriteAllText(official, "opaque-original-session"); File.WriteAllText(key, "opaque-original-key");
+            session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
+            Set(session, "holdLogin", true); Set(session, "signInRecovery", "previous-sign-in-recovery");
+
+            var startup = session.OpenInitial();
+            var staged = (NativeStore)Get(session, "active")!;
+            var snapshot = Path.Combine(Storage(staged), "account.dat");
+            var stagedKey = Path.Combine(Storage(staged), ".keys", "key");
+            Check(!startup.IsCompleted && stores.IsPending(staged) &&
+                File.ReadAllText(snapshot) == "opaque-original-session" && File.ReadAllText(stagedKey) == "opaque-original-key",
+                "OpenInitial captures the original official session and keys before native startup verification");
+
+            File.WriteAllText(official, "opaque-native-replacement"); File.WriteAllText(key, "opaque-native-replacement-key");
+            process!.StandardInput.Close();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Exception? error = null;
+            try { await startup.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (IOException ex) { error = ex; }
+            Check(error?.Message == "Native launcher exited before profile verification." &&
+                File.ReadAllText(official) == "opaque-native-replacement" && File.ReadAllText(key) == "opaque-native-replacement-key",
+                "OpenInitial propagates production verification failure after native startup changes official storage");
+            Check(!session.IsOpen && Get(session, "active") is null && Get(session, "bridge") is null && Get(session, "busy") is false,
+                "failed OpenCore runs production Stop and clears its active process, bridge and busy state");
+            stores.CleanupPending();
+            Check(File.Exists(snapshot) && File.Exists(stagedKey) &&
+                File.ReadAllText(snapshot) == "opaque-original-session" && File.ReadAllText(stagedKey) == "opaque-original-key",
+                "failed OpenInitial preserves the original staged session and keys after production cleanup");
+            var reopened = new NativeStores(root);
+            Check(!stores.IsPending(staged) && stores.Catalog.Active is null && reopened.Catalog.Active is null &&
+                stores.Catalog.Stores.SequenceEqual(accounts) && reopened.Catalog.Stores.SequenceEqual(accounts) &&
+                stores.Catalog.Selected == selected && reopened.Catalog.Selected == selected &&
+                File.ReadAllText(Path.Combine(Storage(saved), "account.dat")) == "opaque-saved-session" &&
+                File.ReadAllText(Path.Combine(Storage(saved), ".keys", "key")) == "opaque-saved-key",
+                "failed OpenInitial releases unverified staging without registering it or changing saved accounts and selection");
+        }
+        finally
+        {
+            if (session is not null && Get(session, "bridge") is LocalAccountBridge bridge) await bridge.DisposeAsync();
+            if (session is not null && Get(session, "launcher") is Process running && !running.HasExited) { running.Kill(); running.WaitForExit(); }
+            process?.Dispose(); process = null;
+            Directory.Delete(root, true);
+        }
     }
 }
