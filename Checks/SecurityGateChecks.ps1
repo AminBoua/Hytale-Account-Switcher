@@ -14,12 +14,15 @@ try {
     $repo = Join-Path $root 'source-fixture'
     $null = New-Item -ItemType Directory -Path (Join-Path $repo 'Launcher') -Force
     & git init --quiet $repo
+    & git -C $repo config core.quotePath true
+    if ($LASTEXITCODE) { throw 'Cannot configure temporary source fingerprint fixture.' }
     & git -C $repo -c core.hooksPath=disabled-fixture-hooks -c user.name=Fixture -c user.email=fixture.invalid -c commit.gpgsign=false commit --quiet --allow-empty -m fixture
     if ($LASTEXITCODE) { throw 'Cannot create temporary source fingerprint fixture.' }
     $view = Join-Path $repo 'Launcher/App.xaml'
     'synthetic view' | Set-Content -LiteralPath $view
     $original = Get-SecuritySource $repo
     Check ($original.Dirty -and $original.Files.Count -eq 1) 'uncommitted resources included in source fingerprint'
+    Check ($original.Fingerprint -eq '1C0EA0C6AFA0763B330AAC65148E075B39147F2DC32F7618325288018220E857') 'ASCII-only source fingerprint remains unchanged'
     'documentation' | Set-Content -LiteralPath (Join-Path $repo 'Launcher/README.md')
     Check ((Get-SecuritySource $repo).Fingerprint -eq $original.Fingerprint) 'documentation-only edits preserve source fingerprint'
     'changed view' | Set-Content -LiteralPath $view
@@ -28,6 +31,30 @@ try {
     Remove-Item -LiteralPath $view
     $deleted = Get-SecuritySource $repo
     Check ($deleted.Files[0].Hash -eq 'DELETED' -and $deleted.Fingerprint -ne $original.Fingerprint) 'tracked deletions invalidate source fingerprint'
+    # Character codes keep these fixtures portable to Windows PowerShell 5.1 without a script BOM.
+    foreach ($relative in @("Launcher/$([char]0x00e9).cs", "Checks/$([char]0x6e2c)/fixture.cs")) {
+        $before = Get-SecuritySource $repo
+        $path = Join-Path $repo $relative
+        $null = New-Item -ItemType Directory -Path (Split-Path $path) -Force
+        'Unicode source' | Set-Content -LiteralPath $path
+        $added = Get-SecuritySource $repo
+        Check ($added.Fingerprint -ne $before.Fingerprint) "untracked Unicode addition invalidates source fingerprint: $relative"
+        Check ($added.Files.Path -contains $relative) "untracked Unicode path included verbatim: $relative"
+        'edited untracked source' | Set-Content -LiteralPath $path
+        $edited = Get-SecuritySource $repo
+        Check ($edited.Fingerprint -ne $added.Fingerprint) "untracked Unicode edit invalidates source fingerprint: $relative"
+        & git -C $repo add -- $relative
+        if ($LASTEXITCODE) { throw 'Cannot track Unicode source fingerprint fixture.' }
+        $tracked = Get-SecuritySource $repo
+        Check ($tracked.Files.Path -contains $relative -and $tracked.Fingerprint -eq $edited.Fingerprint -and $tracked.Fingerprint -ne $before.Fingerprint) "tracked Unicode addition included with same fingerprint: $relative"
+        'edited tracked source' | Set-Content -LiteralPath $path
+        $changed = Get-SecuritySource $repo
+        Check ($changed.Fingerprint -ne $tracked.Fingerprint) "tracked Unicode edit invalidates source fingerprint: $relative"
+        Remove-Item -LiteralPath $path
+        $removed = Get-SecuritySource $repo
+        $entry = @($removed.Files | Where-Object Path -eq $relative)
+        Check ($entry.Count -eq 1 -and $entry[0].Hash -eq 'DELETED' -and $removed.Fingerprint -ne $changed.Fingerprint) "tracked Unicode deletion retains DELETED marker and invalidates source fingerprint: $relative"
+    }
     Check ((Test-VmEvidence '' $source $environment).Status -eq 'unverified') 'missing VM evidence is unverified'
     Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') 'empty VM evidence is unverified'
     # Fabricated schema fixtures ONLY, never exported as a real VM validation report.

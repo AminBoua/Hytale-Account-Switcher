@@ -8,8 +8,18 @@ function Get-SecurityEnvironment {
 function Get-SecuritySource([string]$Repository) {
     $revision = (& git -C $Repository rev-parse HEAD | Out-String).Trim()
     if ($LASTEXITCODE) { throw 'Cannot identify tested Git revision.' }
-    $paths = @(& git -C $Repository ls-files --cached --others --exclude-standard)
-    if ($LASTEXITCODE) { throw 'Cannot enumerate security-sensitive source.' }
+    $start = [Diagnostics.ProcessStartInfo]::new('git', 'ls-files -z --cached --others --exclude-standard')
+    $start.WorkingDirectory = (Resolve-Path -LiteralPath $Repository).ProviderPath
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $paths = $process.StandardOutput.ReadToEnd().Split([char[]]@([char]0), [StringSplitOptions]::RemoveEmptyEntries)
+        $process.WaitForExit()
+        if ($process.ExitCode) { throw 'Cannot enumerate security-sensitive source.' }
+    } finally { $process.Dispose() }
     $files = @($paths | Sort-Object -Unique | Where-Object {
         ($_ -match '^(Launcher|Checks)/' -and $_ -notmatch '\.md$') -or
         ($_ -notmatch '/' -and $_ -match '\.(ps1|cs|props|targets|sln|slnx)$') -or
