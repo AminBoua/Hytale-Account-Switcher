@@ -9,13 +9,15 @@ let timerId = 0, automaticSwitch = false, disconnected = false, loadGate, urlGat
 const accountB = { uuid: 'accountB-profile', username: 'accountB' };
 const accountA = { uuid: 'accountA-profile', username: 'accountA' };
 let nativeProfile = accountB;
+let logoutFailure = false, verificationFailures = 0, verifications = 0;
 const user = { getUserProfile: accountB, async load() { userLoads++; const profile = nativeProfile; await loadGate; this.getUserProfile = profile; } };
 const state = { stores: [{ id: 'accountB', label: 'accountB' }, { id: 'accountA', label: 'accountA' },
   { id: 'signed-out', label: 'Signed out', signedOut: true }], active: 'accountB', selected: 'accountB', profile: accountB.uuid, busy: false, holdLogin: false, login: null };
 const window = {
   go: { account: { Service: {
     GenerateOauthURL: async () => { generated++; await urlGate; if (failLogin) throw Error('native login failed'); return 'https://oauth.accounts.hytale.com/oauth2/auth?state=native-state&code_challenge=native-pkce'; },
-    LogoutUser: async () => { nativeLogouts++; nativeProfile = null; }, IsUserLoggedIn: async () => !!nativeProfile,
+    LogoutUser: async () => { nativeLogouts++; if (logoutFailure) throw Error('native logout failed'); nativeProfile = null; },
+    IsUserLoggedIn: async () => { verifications++; if (verificationFailures > 0) { verificationFailures--; throw Error('verification unavailable'); } return !!nativeProfile; },
     HasValidSession: async () => true,
     CheckNetworkMode: async (automatic, source) => {
       nativeActions.push(source);
@@ -375,6 +377,39 @@ vm.runInNewContext(source, {
     await tick();
     assert.equal(calls.filter(call => [request, replacement].includes(call.request)).length, reportedCount, 'withdrawn requests discard undelivered results');
   }
+  for (const scenario of ['transient', 'persistent', 'failed']) {
+    timers.clear();
+    nativeProfile = user.getUserProfile = accountA;
+    state.active = state.selected = 'accountA'; state.profile = accountA.uuid;
+    state.logout = 'confirmation-' + scenario; state.busy = true;
+    logoutFailure = scenario === 'failed';
+    verificationFailures = scenario === 'transient' ? 1 : scenario === 'persistent' ? 4 : 0;
+    const beforeLogouts = nativeLogouts, beforeVerifications = verifications;
+    if (scenario === 'transient') deliveryFailures.set(state.logout, 1);
+    await tick();
+    assert.equal(nativeLogouts - beforeLogouts, 1);
+    assert.equal(calls.at(-1).request, state.logout);
+    assert.equal(calls.at(-1).success, scenario === 'failed' ? false : null,
+      'verification failure is distinct from a failed LogoutUser');
+    assert(playBlocked(), 'unconfirmed logout keeps Play blocked despite the cached UI profile');
+    for (let retry = 0; retry < 3; retry++) {
+      const scheduled = [...timers.entries()].at(-1);
+      assert(scheduled && scheduled[1].delay <= 25, 'logout confirmation retries without a one-second wait');
+      timers.delete(scheduled[0]); await scheduled[1].fn();
+    }
+    assert.equal(nativeLogouts - beforeLogouts, 1, 'verification and result retries never repeat LogoutUser');
+    assert.equal(calls.at(-1).success, scenario === 'transient' ? true : scenario === 'failed' ? false : null);
+    assert.equal(verifications - beforeVerifications, scenario === 'transient' ? 2 : scenario === 'persistent' ? 4 : 0,
+      'only uncertain confirmation retries native verification');
+    assert.equal(nativeProfile, scenario === 'failed' ? accountA : null);
+    state.logout = null; state.busy = false;
+    state.holdLogin = scenario === 'persistent';
+    if (state.holdLogin) state.profile = null;
+    await tick();
+    if (scenario === 'persistent') assert(playBlocked(), 'timed-out confirmation remains blocked after the helper withdraws the request');
+    verificationFailures = 0; logoutFailure = false; state.holdLogin = false;
+  }
+  assert.equal(browserUrls.length, browserCount, 'logout confirmation never opens an authentication browser');
   state.active = state.selected = 'accountB'; state.profile = accountB.uuid;
   nativeProfile = user.getUserProfile = accountB;
   timers.clear(); await tick();
@@ -405,5 +440,6 @@ vm.runInNewContext(source, {
   console.log('PASS logout executes once and final-account sign-in clears cached identity without logging out other accounts');
   console.log('PASS account clicks immediately process native stages with at most 100 ms scheduling delay and no fast idle polling');
   console.log('PASS lost session/logout results retry immediately with identical payloads and exactly one native execution per request');
+  console.log('PASS transient and persistent logout verification errors retry confirmation only, preserve Play blocking, and remain distinct from genuine logout failure');
   console.log('PASS the existing row cancels login, restores Play/switching, and fences late profile loads and browser opens across retries');
 })().catch(error => { console.error(error); process.exitCode = 1; });

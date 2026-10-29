@@ -139,13 +139,15 @@
       }
       if (state.logout) {
         if (!logoutResult) {
-          const requestId = state.logout;
-          let success = false;
+          logoutResult = { action: 'logout-result', request: state.logout, success: null };
           try {
             await window.go.account.Service.LogoutUser();
-            success = (await window.go.account.Service.IsUserLoggedIn()) === false;
-          } catch { /* Report failure without deleting any store files. */ }
-          logoutResult = { action: 'logout-result', request: requestId, success };
+          } catch { logoutResult.success = false; }
+        }
+        if (logoutResult.success === null) {
+          try {
+            if (await window.go.account.Service.IsUserLoggedIn() === false) logoutResult.success = true;
+          } catch { /* Retry confirmation, never an already completed logout. */ }
         }
         await request('command', logoutResult);
         return;

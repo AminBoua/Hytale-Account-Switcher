@@ -138,6 +138,9 @@ internal static class NativeLogoutChecks
                     foreach (var fallback in new[] { true, false })
                         foreach (var metadata in new[] { false, true })
                             await StorageRecovery(Path.Combine(root, $"storage-{fallback}-{metadata}"), dispatcher, fallback, metadata, check);
+                    if (!lockSnapshot)
+                        foreach (var scenario in new[] { "transient", "persistent", "failed" })
+                            await Confirmation(Path.Combine(root, "confirmation-" + scenario), dispatcher, scenario, check);
                     complete.TrySetResult();
                 }
                 catch (Exception ex) { complete.TrySetException(ex); }
@@ -151,6 +154,90 @@ internal static class NativeLogoutChecks
         });
         thread.SetApartmentState(ApartmentState.STA); thread.Start();
         return complete.Task;
+    }
+
+    private static async Task Confirmation(string root, Dispatcher dispatcher, string scenario, Action<bool, string> check)
+    {
+        var stores = new NativeStores(root);
+        var native = Path.Combine(root, "account.dat");
+        NativeStore Account(string label)
+        {
+            var store = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), label);
+            File.WriteAllText(native, label); stores.Capture(store);
+            return store;
+        }
+        var fallback = Account("fallback");
+        var unrelated = Account("unrelated");
+        var current = Account("current");
+        stores.Activate(current); stores.Select(current);
+        string Snapshot(NativeStore store) => Path.Combine(stores.Folder(store.Folder), "AppData", "Hytale", "account.dat");
+        var snapshots = stores.Catalog.Stores.ToDictionary(s => s.Folder, s => File.ReadAllBytes(Snapshot(s)));
+        var catalog = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
+        using var owner = Process.GetCurrentProcess();
+        var session = new NativeSession(stores, dispatcher);
+        const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        object? Get(string name) => typeof(NativeSession).GetField(name, flags)!.GetValue(session);
+        void Set(string name, object value) => typeof(NativeSession).GetField(name, flags)!.SetValue(session, value);
+        Task<bool> Command(JsonElement data) => (Task<bool>)typeof(NativeSession).GetMethod("Command", flags)!.Invoke(session, new object[] { data, Get("ready")! })!;
+        Task<bool> Reply(string request, object? success) => Command(JsonSerializer.SerializeToElement(new { action = "logout-result", request, success }));
+        Set("launcher", owner); Set("active", current); Set("verifiedSession", true);
+        Set("ready", new TaskCompletionSource<Guid?>());
+        Guid? resident = current.Profile;
+        var requests = new HashSet<string>();
+        var operations = new List<string>();
+        var status = "";
+        session.Status += text =>
+        {
+            status = text;
+            if (Get("logoutRequest") is string logout && requests.Add(logout) && scenario != "failed")
+            {
+                resident = null; File.Delete(native);
+            }
+            if (Get("sessionRequest") is not string request || !requests.Add(request)) return;
+            var operation = (string)Get("sessionOperation")!; operations.Add(operation);
+            if (operation == "load") resident = stores.Catalog.Stores.Single(s => s.Label == File.ReadAllText(native)).Profile;
+            ((TaskCompletionSource<JsonElement>)Get("sessionResult")!).TrySetResult(JsonSerializer.SerializeToElement(new
+                { success = true, profile = resident?.ToString(), loggedIn = resident is not null }));
+        };
+        var transition = (Task)typeof(NativeSession).GetMethod("LogoutCore", flags)!.Invoke(session, new object[] { current })!;
+        var request = (string)Get("logoutRequest")!;
+        check(Get("verifiedSession") is false && Get("busy") is true && Get("holdLogin") is true,
+            scenario + " blocks Play as soon as logout is requested");
+        check(!await Reply(request + "-stale", true) && !await Reply(request, "unknown") && !transition.IsCompleted,
+            scenario + " rejects stale and malformed acknowledgements without settling logout");
+        if (scenario != "failed")
+            for (var retry = 0; retry < 3; retry++)
+                check(await Reply(request, null) && !transition.IsCompleted && operations.Count == 0 && Get("verifiedSession") is false,
+                    scenario + " keeps uncertain verification pending without restoring or resuming an account");
+        if (scenario != "persistent") check(await Reply(request, scenario == "transient"), scenario + " accepts the final logout acknowledgement");
+        // Persistent confirmation exercises the production 30-second acknowledgement timeout.
+        await transition.WaitAsync(TimeSpan.FromSeconds(35));
+        check(requests.Count == operations.Count + 1 && session.IsOpen && ReferenceEquals(Get("launcher"), owner),
+            scenario + " issues one logout request and retains the native process and window");
+        if (scenario == "transient")
+            check(resident == fallback.Profile && stores.Catalog.Selected == fallback.Folder && Get("verifiedSession") is true &&
+                stores.Catalog.Stores.Single(s => s.Folder == current.Folder).SignedOut && !File.Exists(Snapshot(current)),
+                "transient verification failure still restores another usable account after confirmed sign-out");
+        else
+        {
+            check(stores.Catalog.Selected == current.Folder && File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(catalog) &&
+                File.ReadAllBytes(Snapshot(current)).SequenceEqual(snapshots[current.Folder]),
+                scenario + " preserves the old selection and snapshot without marking it signed out");
+            if (scenario == "persistent")
+            {
+                check(resident is null && Get("verifiedSession") is false && Get("holdLogin") is true && Get("busy") is false &&
+                    operations.Count == 0 && status.Contains("Native logout could not be confirmed. Play remains blocked."),
+                    "persistent verification timeout never claims the revoked old account remains usable");
+                check(!await Reply(request, true) && !await Command(JsonSerializer.SerializeToElement(new
+                    { action = "ready", profile = current.Profile.ToString() })) && Get("verifiedSession") is false,
+                    "late acknowledgements and cached UI readiness cannot unblock an uncertain logout");
+            }
+            else
+                check(resident == current.Profile && Get("verifiedSession") is true && Get("holdLogin") is false && operations.SequenceEqual(new[] { "run" }),
+                    "genuine logout failure resumes and verifies the old account without trying saved accounts");
+        }
+        check(new[] { fallback, unrelated }.All(s => File.ReadAllBytes(Snapshot(s)).SequenceEqual(snapshots[s.Folder])),
+            scenario + " leaves unrelated saved snapshots intact");
     }
 
     private static async Task StorageRecovery(string root, Dispatcher dispatcher, bool fallback, bool metadata, Action<bool, string> check)
