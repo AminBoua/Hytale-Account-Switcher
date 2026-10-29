@@ -106,7 +106,7 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
         if ($link.TargetPath -ne $official -or $link.Arguments) {
             # Adopt a legacy machine journal into the user's unelevated journal without losing its original backup.
             if ($Operation -eq 'Install' -and !$Record -and $link.TargetPath -eq $installed -and !$link.Arguments -and $UserOnly -and (Test-Path -LiteralPath (Join-Path $destination 'shortcuts.json'))) {
-                $legacy = Get-Content -LiteralPath (Join-Path $destination 'shortcuts.json') -Raw | ConvertFrom-Json
+                $legacy = Get-Content -LiteralPath (Join-Path $destination 'shortcuts.json') -Raw -Encoding UTF8 | ConvertFrom-Json
                 $old = @($legacy.Shortcuts | Where-Object Path -eq $Path)
                 if ($old.Count -eq 1 -and $old[0].Backup -match '^shortcut-[a-f0-9]{32}\.lnk$') {
                     $backup = 'shortcut-' + [Guid]::NewGuid().ToString('N') + '.lnk'

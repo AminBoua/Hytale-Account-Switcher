@@ -28,7 +28,7 @@ foreach ($path in @($helper, $destination) + $roots) { Assert-RegularPath $path 
 $machineManifest = Join-Path $destination 'shortcuts.json'
 if (Test-Path -LiteralPath $machineManifest) {
     Assert-RegularPath $machineManifest
-    $machineJournal = Get-Content -LiteralPath $machineManifest -Raw | ConvertFrom-Json
+    $machineJournal = Get-Content -LiteralPath $machineManifest -Raw -Encoding UTF8 | ConvertFrom-Json
     $callerSid = if ($UserOnly) { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } else { $UserSid }
     if ($machineJournal.UserSid -and $machineJournal.UserSid -ne $callerSid) { throw 'Remove the addon from the Windows account that installed it before installing for another user.' }
     if ($UserOnly) { $ownerSid = $callerSid }
@@ -57,7 +57,7 @@ $manifestPath = Join-Path $state 'shortcuts.json'
 Assert-RegularPath $manifestPath
 $script:records = @()
 if (Test-Path -LiteralPath $manifestPath) {
-    $journal = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $journal = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $script:records = @($journal.Shortcuts)
     foreach ($record in $records) { Assert-ShortcutRecord $record $journal.Roots }
     $roots = @(@($journal.Roots) + $scanRoots | Select-Object -Unique)

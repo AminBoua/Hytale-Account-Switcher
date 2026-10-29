@@ -10,7 +10,7 @@ $manifestPath = Join-Path $state 'shortcuts.json'
 if (!(Test-Path -LiteralPath $manifestPath) -or !(Test-Path -LiteralPath $installed) -or !(Test-Path -LiteralPath $official)) { return }
 $journalLock = Open-ShortcutJournal $state
 try {
-    $journal = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $journal = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $script:records = @($journal.Shortcuts)
     $roots = @($journal.Roots)
     $repairRoots = if ($journal.RepairRoots) { @($journal.RepairRoots) } else { $roots }

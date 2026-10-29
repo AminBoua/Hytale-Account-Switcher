@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $id = [Guid]::NewGuid().ToString('N')
-$root = Join-Path ([IO.Path]::GetTempPath()) ('addon-lifecycle-' + $id)
+# Character codes keep Unicode fixture data correct when Windows PowerShell 5.1 parses this script.
+$root = Join-Path ([IO.Path]::GetTempPath()) ('addon-lifecycle-' + $id + '-Jos' + [char]0xE9)
 $registry = 'HKCU:\Software\HytaleAccounts-Check-' + $id
 $repository = Split-Path $PSScriptRoot
 $oldLocal = $env:LOCALAPPDATA
@@ -178,7 +179,7 @@ try {
     foreach ($file in $protected) { New-Item -ItemType Directory -Path (Split-Path $file) -Force | Out-Null; Set-Content -LiteralPath $file -Value 'opaque preserved bytes' }
     $hashes = @{}; foreach ($file in $protected) { $hashes[$file] = (Get-FileHash -LiteralPath $file).Hash }
     $shell = New-Object -ComObject WScript.Shell
-    $shortcutPath = Join-Path $programs 'Hytale Launcher.lnk'
+    $shortcutPath = Join-Path $programs ('Hytale Launch' + [char]0xE9 + 'r.lnk')
     $previous = $shell.CreateShortcut($shortcutPath); $previous.TargetPath = $official
     $previous.Hotkey = 'CTRL+ALT+H'; $previous.WindowStyle = 7; $previous.Description = 'Original Hytale shortcut'; $previous.Save()
     $previousHash = (Get-FileHash -LiteralPath $shortcutPath).Hash
@@ -192,6 +193,25 @@ try {
     $officialUninstall = Join-Path $commonPrograms 'Hytale Launcher\Uninstall Hytale Launcher.lnk'
     $previous = $shell.CreateShortcut($officialUninstall); $previous.TargetPath = Join-Path (Split-Path $official) 'uninstall.exe'; $previous.Save()
     $uninstallHash = (Get-FileHash -LiteralPath $officialUninstall).Hash
+    & (Join-Path $package 'Install.ps1') @options
+    & (Join-Path $package 'Install.ps1') @options -UserOnly
+    $userState = Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration'
+    $userManifest = Join-Path $userState 'shortcuts.json'
+    $userJournal = Get-Content -LiteralPath $userManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    $userBackup = Join-Path $userState $userJournal.Shortcuts[0].Backup
+    $journalBytes = [IO.File]::ReadAllBytes($userManifest)
+    Check ($userJournal.Shortcuts[0].Path -ceq $shortcutPath -and [BitConverter]::ToString($journalBytes, 0, 3) -ne 'EF-BB-BF') 'BOM-less UTF-8 journal records the Unicode parent and shortcut name'
+    & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
+    $target = $shell.CreateShortcut($shortcutPath).TargetPath
+    Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $previousHash) "Unicode per-user uninstall restores original shortcut bytes (target: $target; journal present: $(Test-Path -LiteralPath $userManifest); backup present: $(Test-Path -LiteralPath $userBackup))"
+    Check (!(Test-Path -LiteralPath $userManifest) -and !(Test-Path -LiteralPath $userBackup)) 'successful Unicode restoration removes recovery data'
+    & (Join-Path $package 'Install.ps1') @options -UserOnly
+    & (Join-Path $package 'Install.ps1') @options -UserOnly
+    $userJournal = Get-Content -LiteralPath $userManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    Check ($userJournal.Shortcuts.Count -eq 1 -and $userJournal.Shortcuts[0].Path -ceq $shortcutPath -and (Get-FileHash -LiteralPath (Join-Path $userState $userJournal.Shortcuts[0].Backup)).Hash -eq $previousHash) 'installation reloads the Unicode journal without duplicating records or replacing original backup bytes'
+    & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
+    & (Join-Path $package 'Uninstall.ps1') @options
+    foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'Unicode journal reload and uninstall restore original user and system shortcut bytes' }
     # Machine roots are scanned desktop first, then Programs; deny writes/deletion on each matching link.
     $firstShortcut = Join-Path $commonDesktop 'Hytale Launcher.lnk'
     $secondShortcut = Join-Path $commonPrograms 'Hytale Launcher\Hytale Launcher.lnk'
@@ -211,7 +231,7 @@ try {
         foreach ($name in @('HytaleAccounts.exe') + $scripts) {
             Check ((Get-FileHash -LiteralPath (Join-Path $destination $name)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $package $name)).Hash) "partial installation retains usable removal payload: $name"
         }
-        $journal = Get-Content -LiteralPath (Join-Path $destination 'shortcuts.json') -Raw | ConvertFrom-Json
+        $journal = Get-Content -LiteralPath (Join-Path $destination 'shortcuts.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         Check ($journal.UserSid -eq $options.UserSid -and $journal.Shortcuts.Count -eq $changedCount) 'partial installation retains a journal even before the first shortcut can change'
         foreach ($record in $journal.Shortcuts) {
             Check ($record.Path -eq $firstShortcut -and (Get-FileHash -LiteralPath (Join-Path $destination $record.Backup)).Hash -eq $originalLinks[$firstShortcut]) 'partial installation journals the changed shortcut and its exact original bytes'
@@ -230,7 +250,7 @@ try {
         & (Join-Path $package 'Install.ps1') @options -UserOnly
         $userState = Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration'
         $userManifest = Join-Path $userState 'shortcuts.json'
-        $userJournal = Get-Content -LiteralPath $userManifest -Raw | ConvertFrom-Json
+        $userJournal = Get-Content -LiteralPath $userManifest -Raw -Encoding UTF8 | ConvertFrom-Json
         $recoveryHashes = @{}
         foreach ($name in @('shortcuts.json') + @($userJournal.Shortcuts | ForEach-Object Backup)) {
             $path = Join-Path $userState $name
@@ -254,7 +274,7 @@ try {
         Check ((@($global:HytaleFixtureTasks.Values | Sort-Object TaskName) | ConvertTo-Json -Depth 6 -Compress) -ceq $tasks) 'failed elevation retains both repair tasks'
         $link = $shell.CreateShortcut($shortcutPath)
         Check ($link.TargetPath -eq (Join-Path $destination 'HytaleAccounts.exe') -and !$link.Arguments -and $link.Hotkey -eq $previousHotkey -and $link.WindowStyle -eq 7) 'failed elevation restores addon launch through the same shortcut with its metadata'
-        $journal = Get-Content -LiteralPath $userManifest -Raw | ConvertFrom-Json
+        $journal = Get-Content -LiteralPath $userManifest -Raw -Encoding UTF8 | ConvertFrom-Json
         Check ($journal.Shortcuts.Count -eq 1 -and (Get-FileHash -LiteralPath (Join-Path $userState $journal.Shortcuts[0].Backup)).Hash -eq $previousHash) 'rollback retains a usable original restoration record'
         & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly -KeepJournal
         & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly
@@ -444,7 +464,7 @@ try {
         & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
         Set-Content -LiteralPath (Join-Path $destination 'shortcuts.new') -Value 'unfinished journal fixture'
         $manifest = Join-Path $destination 'shortcuts.json'
-        $journal = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+        $journal = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
         $recovery = @{}
         foreach ($name in @('shortcuts.json','shortcuts.new','HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json') + @($journal.Shortcuts | ForEach-Object Backup)) {
             $path = Join-Path $destination $name
@@ -482,7 +502,7 @@ try {
         foreach ($user in @($true,$false)) {
             $fixtureState = if ($user) { Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration' } else { $destination }
             $fixtureManifest = Join-Path $fixtureState 'shortcuts.json'
-            $fixtureJournal = Get-Content -LiteralPath $fixtureManifest -Raw | ConvertFrom-Json
+            $fixtureJournal = Get-Content -LiteralPath $fixtureManifest -Raw -Encoding UTF8 | ConvertFrom-Json
             $record = $fixtureJournal.Shortcuts[0]
             $backup = Join-Path $fixtureState $record.Backup
             $fixture = [pscustomobject]@{ User = $user; Path = $record.Path; Manifest = $fixtureManifest; Backup = $backup;
@@ -525,17 +545,17 @@ try {
     # Simulate the old machine journal's per-user records, then migrate them with real installer code.
     $userState = Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration'
     $userManifest = Join-Path $userState 'shortcuts.json'
-    $userJournal = Get-Content -LiteralPath $userManifest -Raw | ConvertFrom-Json
+    $userJournal = Get-Content -LiteralPath $userManifest -Raw -Encoding UTF8 | ConvertFrom-Json
     $machineManifest = Join-Path $destination 'shortcuts.json'
-    $machineJournal = Get-Content -LiteralPath $machineManifest -Raw | ConvertFrom-Json
+    $machineJournal = Get-Content -LiteralPath $machineManifest -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($record in $userJournal.Shortcuts) { Copy-Item -LiteralPath (Join-Path $userState $record.Backup) -Destination (Join-Path $destination $record.Backup) }
     $machineJournal.Roots = @($machineJournal.Roots) + @($userJournal.Roots)
     $machineJournal.Shortcuts = @($machineJournal.Shortcuts) + @($userJournal.Shortcuts)
-    $machineJournal | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $machineManifest
+    [IO.File]::WriteAllText($machineManifest, ($machineJournal | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
     Remove-Fixture $userState
     & (Join-Path $package 'Install.ps1') @options
     & (Join-Path $package 'Install.ps1') @options -UserOnly
-    $migrated = Get-Content -LiteralPath $userManifest -Raw | ConvertFrom-Json
+    $migrated = Get-Content -LiteralPath $userManifest -Raw -Encoding UTF8 | ConvertFrom-Json
     Check ($migrated.Shortcuts.Count -eq 1 -and (Get-FileHash -LiteralPath (Join-Path $userState $migrated.Shortcuts[0].Backup)).Hash -eq $previousHash) 'legacy user backup migrates without replacing it with the addon shortcut'
     Set-Content -LiteralPath $official -Value 'new official update fixture'
     $updated = Get-LauncherSnapshot $official
@@ -598,7 +618,7 @@ try {
         $case = $restorationCases | Where-Object { $_.Scenario -eq 'renamed-description' -and (Split-Path $_.Path) -eq $folder }
         $fixtureState = if ($folder -eq $programs) { $userState } else { $destination }
         $manifest = Join-Path $fixtureState 'shortcuts.json'
-        $journal = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+        $journal = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
         $record = $journal.Shortcuts | Where-Object Path -eq $case.Path
         $backup = Join-Path $fixtureState $record.Backup
         $manifestHash = (Get-FileHash -LiteralPath $manifest).Hash; $backupHash = (Get-FileHash -LiteralPath $backup).Hash
@@ -644,14 +664,14 @@ try {
     & (Join-Path $package 'Install.ps1') @options
     & (Join-Path $package 'Install.ps1') @options -UserOnly
     $manifest = Join-Path $destination 'shortcuts.json'
-    $journal = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
-    $valid = Get-Content -LiteralPath $manifest -Raw
+    $journal = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    $valid = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8
     $journal.Shortcuts[0].Backup = '..\outside.lnk'
-    ConvertTo-Json -InputObject $journal -Depth 4 | Set-Content -LiteralPath $manifest
+    ConvertTo-Json -InputObject $journal -Depth 4 | Set-Content -LiteralPath $manifest -Encoding UTF8
     $rejected = $false
     try { & (Join-Path $package 'Uninstall.ps1') @options } catch { $rejected = $true }
     Check ($rejected -and (Test-Path -LiteralPath (Join-Path $destination 'HytaleAccounts.exe'))) 'invalid restoration journal rejected before removal'
-    Set-Content -LiteralPath $manifest -Value $valid
+    Set-Content -LiteralPath $manifest -Encoding UTF8 -Value $valid
     & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
     & (Join-Path $package 'Uninstall.ps1') @options
     New-Item -Path $registry -Force | Out-Null
