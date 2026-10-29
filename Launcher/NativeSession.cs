@@ -120,7 +120,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             target = stores.Catalog.Stores.FirstOrDefault(s => s.Folder == folder.GetString());
         else return false;
         if (target is null) return false;
-        if (action.GetString() == "logout" && (target.Folder != active?.Folder || signInRecovery is not null)) return false;
+        if (action.GetString() == "logout" && (!verifiedSession || target.Folder != active?.Folder || signInRecovery is not null)) return false;
         if (action.GetString() == "select" && target.Folder == active?.Folder && verifiedSession) return true;
         // Return the HTTP response before beginning the native transition.
         _ = dispatcher.BeginInvoke(new Action(async () => await (action.GetString() == "logout" ? LogoutCore(target) : OpenCore(target, true))), DispatcherPriority.Background);
@@ -323,7 +323,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         try
         {
             RequireNoGame();
-            if (!IsOpen || active?.Folder != target.Folder) throw new IOException("Only the current native account can be logged out.");
+            if (!IsOpen || !verifiedSession || active?.Folder != target.Folder) throw new IOException("Only the verified current native account can be logged out.");
             requested = true;
             verifiedSession = false;
             logoutResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
