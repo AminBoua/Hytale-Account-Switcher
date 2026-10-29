@@ -10,11 +10,12 @@ try {
     foreach ($name in @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','Repair-Integration.ps1','ShortcutIntegration.ps1','ShortcutFile.cs')) {
         Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $fixture
     }
-    foreach ($name in @('NativeStartupFailureChecks.cs','SecurityFixture.cs')) {
+    foreach ($name in @('NativeStartupFailureChecks.cs','NativeStartupRecoveryChecks.cs','SecurityFixture.cs')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $launcher
     }
     $path = Join-Path $launcher 'NativeSession.cs'
     $source = Get-Content -LiteralPath $path -Raw
+    $originalSource = $source
     # Keep OpenInitial/OpenCore/recovery unchanged; replace only the native process boundaries in this disposable copy.
     $start = '(?s)    private async Task<bool> Start\(NativeStore store, bool commit\).*?(?=    private async Task ObserveExit)'
     $stop = '(?s)    private async Task Stop\(\).*?(?=\r?\n\})'
@@ -55,6 +56,21 @@ try {
     dotnet (Join-Path $checks 'bin/Release/net10.0-windows/Checks.dll')
     if ($LASTEXITCODE -ne 0) { throw 'Startup propagation checks failed.' }
     if ($SwallowInitialFailure) { throw 'Mutation survived: swallowed initial failure' }
+    # Exercise production Start, including verification, storage and fence release; replace only launching/exit observation.
+    $launch = '(?s)        var prepared = await stores\.PrepareIntegrated\(store, bridge\);.*?(?=        var process = launcher;)'
+    $completion = '        var profile = await verified;'
+    $observe = '        _ = ObserveExit(process);'
+    foreach ($anchor in @($launch, [regex]::Escape($completion), [regex]::Escape($observe))) {
+        if ([regex]::Matches($originalSource, $anchor).Count -ne 1) { throw 'Startup recovery fixture boundary changed.' }
+    }
+    $source = [regex]::Replace($originalSource, $launch, "        launcher = NativeStartupRecoveryChecks.Launch(this);`n")
+    $source = $source.Replace($completion, $completion + "`n        NativeStartupRecoveryChecks.BeforeComplete?.Invoke(this);").Replace($observe, '')
+    [IO.File]::WriteAllText($path, $source)
+    'await NativeStartupRecoveryChecks.Run();' | Set-Content -LiteralPath (Join-Path $checks 'Program.cs')
+    dotnet build (Join-Path $checks 'Checks.csproj') -c Release --nologo -p:NuGetAudit=false "-p:RestorePackagesPath=$fixture/packages"
+    if ($LASTEXITCODE -ne 0) { throw 'Startup recovery fixture build failed.' }
+    dotnet (Join-Path $checks 'bin/Release/net10.0-windows/Checks.dll')
+    if ($LASTEXITCODE -ne 0) { throw 'Startup recovery fence checks failed.' }
 } finally {
     $resolved = [IO.Path]::GetFullPath($fixture)
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
