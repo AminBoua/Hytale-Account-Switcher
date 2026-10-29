@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $id = [Guid]::NewGuid().ToString('N')
 # Character codes keep Unicode fixture data correct when Windows PowerShell 5.1 parses this script.
-$root = Join-Path ([IO.Path]::GetTempPath()) ('addon-lifecycle-' + $id + '-Jos' + [char]0xE9)
+$root = Join-Path ([IO.Path]::GetTempPath()) ('addon-' + $id + '-Jos' + [char]0xE9)
 $registry = 'HKCU:\Software\HytaleAccounts-Check-' + $id
 $repository = Split-Path $PSScriptRoot
 $oldLocal = $env:LOCALAPPDATA
@@ -458,6 +458,93 @@ try {
         try { & (Join-Path $package $operation) @wrongUser } catch { $rejected = $true }
         Check ($rejected -and (Get-FileHash -LiteralPath $shortcutPath).Hash -eq $ownedHash) 'another Windows account cannot orphan the owner shortcut journal'
     }
+    # Remove directly after a killed upgrade, without letting installation clean up the transaction.
+    foreach ($point in @('stage','Repair-Integration.ps1','HytaleAccounts.exe')) {
+        & (Join-Path $package 'Install.ps1') @options
+        & (Join-Path $package 'Install.ps1') @options -UserOnly
+        foreach ($name in $replacementNames) { [IO.File]::WriteAllBytes((Join-Path $destination $name), $oldPayload[$name].Bytes) }
+        Interrupt-AddonUpgrade $point
+        $retained = @(Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*' -Force)
+        Check (@($retained | Where-Object Extension -eq '.bak').Count -gt 0) "$point direct uninstall starts with retained backups"
+        if ($point -ne 'HytaleAccounts.exe') { Check (@($retained | Where-Object Extension -eq '.new').Count -gt 0) "$point direct uninstall starts with retained staging files" }
+        & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly
+        & (Join-Path $destination 'Uninstall.ps1') @options
+        Check (!@($retained | Where-Object { Test-Path -LiteralPath $_.FullName }).Count -and !(Test-Path -LiteralPath $destination)) "$point direct uninstall removes retained transactions and the empty addon directory"
+        Check (!(Test-Path -LiteralPath $registry) -and !$global:HytaleFixtureTasks.Count) "$point direct uninstall clears the Windows Apps entry and mocked tasks"
+        foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) "$point direct uninstall restores original shortcuts" }
+        Assert-LauncherSnapshot $official $before
+        Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) "$point direct uninstall preserves Hytale data"
+    }
+    & (Join-Path $package 'Install.ps1') @options
+    & (Join-Path $package 'Install.ps1') @options -UserOnly
+    & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly
+    $transactionPrefix = '.upgrade-' + [Guid]::NewGuid().ToString('N') + '-'
+    $retainedNames = @()
+    foreach ($name in $replacementNames) {
+        foreach ($extension in @('bak','new')) {
+            $retainedName = $transactionPrefix + $name + '.' + $extension
+            [IO.File]::WriteAllBytes((Join-Path $destination $retainedName), $oldPayload[$name].Bytes)
+            $retainedNames += $retainedName
+        }
+    }
+    $lookalikePrefix = '.upgrade-' + [Guid]::NewGuid().ToString('N') + '-'
+    $lookalikes = @(
+        'unrelated.txt',
+        ($lookalikePrefix + 'unknown.exe.bak'),
+        ($lookalikePrefix + 'hytaleaccounts.exe.new'),
+        ($lookalikePrefix + 'HytaleAccounts.exe.BAK'),
+        ($lookalikePrefix + 'Repair-Integration.ps1.bak.extra'),
+        ($lookalikePrefix + 'InstallerSafety.ps1'),
+        ($lookalikePrefix + $retainedNames[0] + '.bak'),
+        ('.UPGRADE-' + [Guid]::NewGuid().ToString('N') + '-Install.ps1.new'),
+        ('.upgrade-' + ('a' * 31) + '-Install.ps1.new'),
+        ('.upgrade-' + ('a' * 33) + '-Install.ps1.new'),
+        ('.upgrade-' + ('A' * 32) + '-HytaleAccounts.exe.bak'),
+        ('.upgrade-' + [Guid]::NewGuid().ToString('D') + '-HytaleAccounts.exe.bak')
+    )
+    foreach ($name in $lookalikes) { Set-Content -LiteralPath (Join-Path $destination $name) -Value 'unrelated bytes to preserve' }
+    $recovery = @{}
+    foreach ($file in Get-ChildItem -LiteralPath $destination -File -Force) { $recovery[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName).Hash }
+    $uninstallString = (Get-ItemProperty -LiteralPath $registry).UninstallString
+    foreach ($linkType in @('HardLink','Junction')) {
+        $linkedArtifact = Join-Path $destination ('.upgrade-' + [Guid]::NewGuid().ToString('N') + '-Install.ps1.bak')
+        $target = if ($linkType -eq 'HardLink') { $protected[0] } else { Split-Path $protected[0] }
+        New-Item -ItemType $linkType -Path $linkedArtifact -Target $target | Out-Null
+        $failure = $null
+        try { & (Join-Path $destination 'Uninstall.ps1') @options } catch { $failure = $_ }
+        finally {
+            if ($linkType -eq 'Junction') { [IO.Directory]::Delete($linkedArtifact) }
+            else { [IO.File]::Delete($linkedArtifact) }
+        }
+        Check ($failure -and $failure.ToString().Contains('link')) "uninstall rejects a retained $linkType"
+        foreach ($path in $recovery.Keys) { Check ((Test-Path -LiteralPath $path) -and (Get-FileHash -LiteralPath $path).Hash -eq $recovery[$path]) "$linkType refusal preserves payload, transaction and recovery bytes" }
+        Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -ceq $uninstallString) "$linkType refusal retains the Windows Apps retry entry"
+        Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) "$linkType refusal preserves outside victim files"
+    }
+    foreach ($extension in @('bak','new')) {
+        $lockedName = $transactionPrefix + 'HytaleAccounts.exe.' + $extension
+        $locked = [IO.File]::Open((Join-Path $destination $lockedName), 'Open', 'Read', 'Read')
+        $failure = $null
+        try { & (Join-Path $destination 'Uninstall.ps1') @options } catch { $failure = $_ }
+        finally { $locked.Dispose() }
+        Check ($failure -and $failure.Exception.GetBaseException() -is [ComponentModel.Win32Exception] -and $failure.Exception.GetBaseException().NativeErrorCode -eq 32) "locked retained $extension rejects uninstall with a sharing violation"
+        foreach ($path in $recovery.Keys) { Check ((Test-Path -LiteralPath $path) -and (Get-FileHash -LiteralPath $path).Hash -eq $recovery[$path]) "locked $extension preserves all payload, transaction and recovery bytes" }
+        Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -ceq $uninstallString) "locked $extension retains the installed helper's Windows Apps retry entry"
+    }
+    & (Join-Path $destination 'Uninstall.ps1') @options
+    Check (!@($retainedNames | Where-Object { Test-Path -LiteralPath (Join-Path $destination $_) }).Count) 'retry removes valid bak and new files for every known addon payload'
+    Check (!(Test-Path -LiteralPath $registry) -and !$global:HytaleFixtureTasks.Count) 'retained file retry clears the Windows Apps entry and mocked tasks'
+    $remaining = @(Get-ChildItem -LiteralPath $destination -Force)
+    Check ($remaining.Count -eq $lookalikes.Count) 'uninstall leaves only unrelated lookalikes in the addon directory'
+    foreach ($name in $lookalikes) {
+        $path = Join-Path $destination $name
+        Check ((Test-Path -LiteralPath $path) -and (Get-FileHash -LiteralPath $path).Hash -eq $recovery[$path]) "uninstall preserves unrelated file $name"
+    }
+    foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'retained file retry restores original shortcuts' }
+    Assert-LauncherSnapshot $official $before
+    Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) 'retained file retry preserves Hytale data'
+    foreach ($name in $lookalikes) { [IO.File]::Delete((Join-Path $destination $name)) }
+    [IO.Directory]::Delete($destination)
     foreach ($lockedName in @('HytaleAccounts.exe','Repair-Integration.ps1','launcher-baseline.json','shortcuts.new','shortcuts.json')) {
         & (Join-Path $package 'Install.ps1') @options
         & (Join-Path $package 'Install.ps1') @options -UserOnly
