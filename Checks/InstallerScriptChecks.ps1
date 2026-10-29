@@ -82,6 +82,62 @@ function Remove-Fixture([string]$Path) {
     } elseif ($item.Attributes -band [IO.FileAttributes]::Directory) { [IO.Directory]::Delete($full) }
     else { Remove-Item -LiteralPath $full -Force }
 }
+function Interrupt-AddonUpgrade([string]$Point) {
+    $configPath = Join-Path $root 'crash-config.xml'
+    $signal = Join-Path $root 'crash-ready'
+    $driver = Join-Path $root 'crash-child.ps1'
+    @{ Local = $env:LOCALAPPDATA; Programs = $env:ProgramFiles; Package = $package; Options = $options; Point = $Point; Signal = $signal
+        Tasks = @($global:HytaleFixtureTasks.Values | ForEach-Object { [pscustomobject]@{ TaskName = $_.TaskName; Actions = @($_.Actions | Select-Object Execute,Arguments); State = $_.State } }) } | Export-Clixml -LiteralPath $configPath
+    $childSource = @'
+param($ConfigPath)
+$ErrorActionPreference = 'Stop'
+$config = Import-Clixml -LiteralPath $ConfigPath
+$env:LOCALAPPDATA = $config.Local
+$env:ProgramFiles = $config.Programs
+Import-Module ScheduledTasks
+$global:HytaleFixtureTasks = @{}
+foreach ($task in $config.Tasks) { $global:HytaleFixtureTasks[$task.TaskName] = $task }
+'@
+    foreach ($name in @('Check','Register-ScheduledTask','Get-ScheduledTask','Disable-ScheduledTask','Stop-ScheduledTask','Unregister-ScheduledTask','Get-CimInstance')) {
+        $childSource += "`r`nfunction $name {" + (Get-Item -LiteralPath "function:$name").Definition + "`r`n}`r`n"
+    }
+    $childSource += @'
+$source = Get-Content -LiteralPath (Join-Path $config.Package 'ShortcutFile.cs') -Raw
+$write = 'stream.Position = 0; stream.Write(bytes, 0, bytes.Length);'
+Check ($source.Contains($write)) 'crash staging boundary found'
+$source = $source.Replace($write, ('stream.Position = 0; if (InstallerCrashProbe.Point == "stage" && System.IO.Path.GetFileName(path).EndsWith("-Repair-Integration.ps1.new")) { stream.Write(bytes, 0, bytes.Length / 2); stream.Flush(true); InstallerCrashProbe.Pause(); } ' + $write))
+$publish = 'else File.Move(staged.path, path);'
+Check ($source.Contains($publish)) 'crash publication boundary found'
+$source = $source.Replace($publish, ($publish + ' if (InstallerCrashProbe.Point == System.IO.Path.GetFileName(path)) InstallerCrashProbe.Pause();'))
+$source += 'public static class InstallerCrashProbe {
+    public static string Point, Signal;
+    public static void Pause() {
+        using (var file = new System.IO.FileStream(Signal, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write)) { file.WriteByte(1); file.Flush(true); }
+        System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);
+    }
+}'
+Add-Type -TypeDefinition $source
+[InstallerCrashProbe]::Point = $config.Point
+[InstallerCrashProbe]::Signal = $config.Signal
+$options = $config.Options
+& (Join-Path $config.Package 'Install.ps1') @options
+throw 'Crash checkpoint was not reached.'
+'@
+    Set-Content -LiteralPath $driver -Value $childSource
+    foreach ($path in @($signal,(Join-Path $package 'install-error.txt'))) { if (Test-Path -LiteralPath $path) { [IO.File]::Delete($path) } }
+    $child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"' + $driver + '"'),('"' + $configPath + '"')) -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $root 'crash-output.txt') -RedirectStandardError (Join-Path $root 'crash-error.txt')
+    try {
+        $deadline = [Diagnostics.Stopwatch]::StartNew()
+        while (!(Test-Path -LiteralPath $signal) -and !$child.HasExited -and $deadline.Elapsed.TotalSeconds -lt 30) { Start-Sleep -Milliseconds 50 }
+        if (!(Test-Path -LiteralPath $signal)) { throw "Crash child did not reach $Point : $(Get-Content -LiteralPath (Join-Path $root 'crash-error.txt') -Raw)" }
+        $child.Kill()
+        Check ($child.WaitForExit(5000)) "$Point subprocess forcibly terminated"
+        Check (!(Test-Path -LiteralPath (Join-Path $package 'install-error.txt'))) "$Point bypasses installer catch and finally rollback"
+    } finally {
+        if (!$child.HasExited) { $child.Kill(); $child.WaitForExit() }
+        $child.Dispose()
+    }
+}
 try {
     $package = Join-Path $root 'package'
     $programs = Join-Path $root 'shortcuts'
@@ -93,6 +149,10 @@ try {
     $env:ProgramFiles = Join-Path $root 'program-files'
     $official = Join-Path $env:ProgramFiles 'Hypixel Studios\Hytale Launcher\hytale-launcher.exe'
     foreach ($folder in @($package, $programs, (Split-Path $official))) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+    # Give existing and newly created fixture files the same automatic ACL inheritance format.
+    $acl = Get-Acl -LiteralPath (Split-Path $official)
+    $acl.SetAccessRuleProtection($true, $true)
+    [IO.Directory]::SetAccessControl((Split-Path $official), $acl)
     $scripts = @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1')
     foreach ($name in $scripts) {
         Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $package
@@ -100,12 +160,15 @@ try {
         Add-Content -LiteralPath (Join-Path $package $name) -Value "`r`n$comment OLD addon payload: $name"
     }
     Set-Content -LiteralPath (Join-Path $package 'HytaleAccounts.exe') -Value 'OLD non-executed helper fixture'
-    # Only the fixture's loaded class has a write fault hook; shipped payloads have none.
+    # Only the fixture's loaded class has fault hooks; shipped payloads have none.
     $source = Get-Content -LiteralPath (Join-Path $package 'ShortcutFile.cs') -Raw
     $write = 'stream.Position = 0; stream.Write(bytes, 0, bytes.Length);'
     Check ($source.Contains($write)) 'installer write-fault boundary found'
     $source = $source.Replace($write, ($write + ' if (InstallerWriteProbe.AfterWrite != null) InstallerWriteProbe.AfterWrite(bytes);'))
-    $source += 'public static class InstallerWriteProbe { public static System.Action<byte[]> AfterWrite; }'
+    $publish = 'else File.Move(staged.path, path);'
+    Check ($source.Contains($publish)) 'installer publication-fault boundary found'
+    $source = $source.Replace($publish, ($publish + ' if (InstallerWriteProbe.AfterPublish != null) InstallerWriteProbe.AfterPublish(path);'))
+    $source += 'public static class InstallerWriteProbe { public static System.Action<byte[]> AfterWrite; public static System.Action<string> AfterPublish; }'
     Add-Type -TypeDefinition $source
     Set-Content -LiteralPath $official -Value 'official launcher fixture'
     . (Join-Path $package 'InstallerSafety.ps1')
@@ -242,31 +305,94 @@ try {
     foreach ($name in @('HytaleAccounts.exe') + $scripts) {
         Check ($oldPayload[$name].Hash -ne (Get-FileHash -LiteralPath (Join-Path $package $name)).Hash) "upgrade fixture has distinct old/new $name bytes"
     }
+    # This subprocess is killed externally, so no PowerShell exception rollback can run.
+    foreach ($point in @('stage','Repair-Integration.ps1','HytaleAccounts.exe')) {
+        foreach ($name in $replacementNames) { [IO.File]::WriteAllBytes((Join-Path $destination $name), $oldPayload[$name].Bytes) }
+        $recovery = @{}
+        foreach ($state in @($destination,(Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration'))) {
+            foreach ($file in Get-ChildItem -LiteralPath $state -File | Where-Object Name -match '^shortcuts\.json$|^shortcut-.*\.lnk$') { $recovery[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName).Hash }
+        }
+        $entry = Get-ItemProperty -LiteralPath $registry | ConvertTo-Json -Compress
+        $tasks = @($global:HytaleFixtureTasks.Values | Sort-Object TaskName) | ConvertTo-Json -Depth 6 -Compress
+        Interrupt-AddonUpgrade $point
+        foreach ($name in $replacementNames) {
+            $path = Join-Path $destination $name
+            $newHash = if ($name -eq 'launcher-baseline.json') { $oldPayload[$name].Hash } else { (Get-FileHash -LiteralPath (Join-Path $package $name)).Hash }
+            $hash = (Get-FileHash -LiteralPath $path).Hash
+            Check ($hash -in @($oldPayload[$name].Hash,$newHash)) "$point leaves complete old or new $name bytes"
+            $published = $point -eq 'HytaleAccounts.exe' -or ($point -eq 'Repair-Integration.ps1' -and $name -notin @('HytaleAccounts.exe','launcher-baseline.json'))
+            $expected = if ($published) { $newHash } else { $oldPayload[$name].Hash }
+            Check ($hash -eq $expected) "$point publishes $name in order with helper last"
+            Check ((Get-Acl -LiteralPath $path).Sddl -ceq $oldPayload[$name].Permissions) "$point preserves $name permissions"
+        }
+        $backups = @(Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*.bak' -Force)
+        Check ($backups.Count -eq $(if ($point -eq 'stage') { 6 } else { $replacementNames.Count })) "$point retains flushed previous payload backups"
+        foreach ($backup in $backups) {
+            $name = $backup.Name.Substring(42); $name = $name.Substring(0, $name.Length - 4)
+            Check ((Get-FileHash -LiteralPath $backup.FullName).Hash -eq $oldPayload[$name].Hash) "$point retains exact $name recovery bytes"
+        }
+        foreach ($path in $recovery.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $recovery[$path]) "$point retains original shortcut restoration information" }
+        Check ((Get-ItemProperty -LiteralPath $registry | ConvertTo-Json -Compress) -ceq $entry -and (@($global:HytaleFixtureTasks.Values | Sort-Object TaskName) | ConvertTo-Json -Depth 6 -Compress) -ceq $tasks) "$point preserves Windows Apps removal and task ownership"
+        if ($point -eq 'Repair-Integration.ps1') {
+            Check-InstallPreflight 'Interrupted installation'
+            $snapshot = Get-InstallFixtureSnapshot
+            $locked = [IO.File]::Open($backups[0].FullName, 'Open', 'Read', 'Read')
+            $failure = $null
+            try { & (Join-Path $package 'Install.ps1') @options } catch { $failure = $_ }
+            finally { $locked.Dispose() }
+            Check ($failure -and (Get-InstallFixtureSnapshot).Files -ceq $snapshot.Files) 'retry preserves interrupted state when a retained backup is locked'
+            $linkedBackup = Join-Path $destination ('.upgrade-' + [Guid]::NewGuid().ToString('N') + '-Install.ps1.bak')
+            New-Item -ItemType HardLink -Path $linkedBackup -Target $protected[0] | Out-Null
+            $failure = $null
+            try { & (Join-Path $package 'Install.ps1') @options } catch { $failure = $_ }
+            finally { [IO.File]::Delete($linkedBackup) }
+            Check ($failure -and $failure.ToString().Contains('link or unexpected file type')) 'retry rejects a linked retained backup'
+            Check ((Get-FileHash -LiteralPath $protected[0]).Hash -eq $hashes[$protected[0]]) 'linked recovery artifact leaves outside bytes intact'
+        }
+        & (Join-Path $package 'Install.ps1') @options
+        foreach ($name in @('HytaleAccounts.exe') + $scripts) { Check ((Get-FileHash -LiteralPath (Join-Path $destination $name)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $package $name)).Hash) "$point retry publishes complete $name" }
+        Check (!@(Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*' -Force).Count) "$point successful retry clears interrupted upgrade files"
+        foreach ($path in $recovery.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $recovery[$path]) "$point retry keeps shortcut restoration bytes" }
+        Assert-LauncherSnapshot $official $before
+        Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) "$point crash and retry leave Hytale data intact"
+    }
     # Include a missing destination in rollback, as when an upgrade introduces a script.
-    foreach ($scenario in @('locked later destination','partial later write','missing destination','rollback write failure')) {
+    foreach ($scenario in @('locked later destination','partial staged write','later publication','missing destination','rollback write failure')) {
         foreach ($name in $replacementNames) { [IO.File]::WriteAllBytes((Join-Path $destination $name), $oldPayload[$name].Bytes) }
         Set-ItemProperty -LiteralPath $registry -Name DisplayVersion -Value 'previous fixture version'
         $missingPath = Join-Path $destination 'InstallerSafety.ps1'
         if ($scenario -eq 'missing destination') { [IO.File]::Delete($missingPath) }
         $snapshot = Get-InstallFixtureSnapshot
         $locked = $null
-        $probe = [pscustomobject]@{ HelperReplaced = $false; WriteFaultReached = $false }
-        $newHelper = [IO.File]::ReadAllText((Join-Path $package 'HytaleAccounts.exe'))
+        $probe = [pscustomobject]@{ WriteFaultReached = $false; Published = @() }
         try {
             if ($scenario -eq 'locked later destination') {
                 $locked = [IO.File]::Open((Join-Path $destination 'Repair-Integration.ps1'), 'Open', 'Read', 'Read')
-            } else {
+            } elseif ($scenario -eq 'partial staged write') {
                 [InstallerWriteProbe]::AfterWrite = {
                     param($bytes)
                     $text = [Text.Encoding]::UTF8.GetString($bytes)
-                    if ($text -ceq $newHelper) { $probe.HelperReplaced = $true }
                     if ($text.Contains('# NEW addon payload: Repair-Integration.ps1')) {
-                        if ($scenario -ne 'rollback write failure') { [InstallerWriteProbe]::AfterWrite = $null }
-                        Check $probe.HelperReplaced 'earlier helper replacement completed before the injected failure'
+                        [InstallerWriteProbe]::AfterWrite = $null
                         $probe.WriteFaultReached = $true
-                        throw 'Controlled failure after later payload write.'
+                        throw 'Controlled payload failure.'
                     }
-                    if ($scenario -eq 'rollback write failure' -and $probe.WriteFaultReached -and $text.Contains('# OLD addon payload: Repair-Integration.ps1')) {
+                }
+            } else {
+                [InstallerWriteProbe]::AfterPublish = {
+                    param($path)
+                    $probe.Published += Split-Path $path -Leaf
+                    if ($path -ne (Join-Path $destination 'Repair-Integration.ps1')) { return }
+                    [InstallerWriteProbe]::AfterPublish = $null
+                    Check ($probe.Published[0] -eq 'Install.ps1') 'earlier script publication completed before failure'
+                    Check ('HytaleAccounts.exe' -notin $probe.Published) 'helper remains old until every support file is published'
+                    $probe.WriteFaultReached = $true
+                    throw 'Controlled payload failure.'
+                }
+                if ($scenario -eq 'rollback write failure') {
+                    [InstallerWriteProbe]::AfterWrite = {
+                        param($bytes)
+                        if (!$probe.WriteFaultReached -or ![Text.Encoding]::UTF8.GetString($bytes).Contains('# OLD addon payload: Repair-Integration.ps1')) { return }
                         [InstallerWriteProbe]::AfterWrite = $null
                         throw 'Controlled rollback write failure.'
                     }
@@ -277,25 +403,23 @@ try {
         } finally {
             if ($locked) { $locked.Dispose() }
             [InstallerWriteProbe]::AfterWrite = $null
+            [InstallerWriteProbe]::AfterPublish = $null
         }
         if ($scenario -eq 'locked later destination') {
             Check ($null -ne $failure) 'upgrade rejects a locked later destination'
         } else {
-            Check ($failure -and $probe.WriteFaultReached -and $failure.ToString().Contains('Controlled failure after later payload write.')) "$scenario exercises rollback after replacement begins: $failure"
+            Check ($failure -and $probe.WriteFaultReached -and $failure.ToString().Contains('Controlled payload failure.')) "$scenario exercises controlled failure: $failure"
         }
         if ($scenario -eq 'rollback write failure') {
             $backups = @(Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*.bak' -Force)
             Check ($backups.Count -eq $replacementNames.Count -and $failure.ToString().Contains('Controlled rollback write failure.') -and $failure.ToString().Contains('Previous payload backups retained')) 'rollback failure reports and retains the entire previous payload for recovery'
-            # Exercise manual recovery using only the retained bytes, preserving destination ACLs.
             foreach ($name in $replacementNames) {
                 $backup = @($backups | Where-Object Name -like ('*-' + $name + '.bak'))
                 Check ($backup.Count -eq 1 -and (Get-FileHash -LiteralPath $backup[0].FullName).Hash -eq $oldPayload[$name].Hash) "retained backup has the previous $name bytes"
-                [IO.File]::WriteAllBytes((Join-Path $destination $name), [IO.File]::ReadAllBytes($backup[0].FullName))
-                [IO.File]::Delete($backup[0].FullName)
             }
         }
         $after = Get-InstallFixtureSnapshot
-        Check ($after.Files -ceq $snapshot.Files) "$scenario preserves or restores all bytes, permissions, directories and shortcuts"
+        if ($scenario -ne 'rollback write failure') { Check ($after.Files -ceq $snapshot.Files) "$scenario preserves or restores all bytes, permissions, directories and shortcuts" }
         Check ($after.Registry -ceq $snapshot.Registry -and $after.Tasks -ceq $snapshot.Tasks) "$scenario preserves Windows Apps uninstall availability and task ownership"
         Assert-LauncherSnapshot $official $before
         Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) "$scenario leaves Hytale data untouched"
@@ -516,7 +640,7 @@ try {
         Check $fixtureHelper.Closed 'setup closes a leftover helper error dialog before waiting for exit'
     }
 } finally {
-    if ('InstallerWriteProbe' -as [type]) { [InstallerWriteProbe]::AfterWrite = $null }
+    if ('InstallerWriteProbe' -as [type]) { [InstallerWriteProbe]::AfterWrite = $null; [InstallerWriteProbe]::AfterPublish = $null }
     if (Test-Path -LiteralPath $registry) { Remove-Item -LiteralPath $registry }
     $env:LOCALAPPDATA = $oldLocal
     $env:ProgramFiles = $oldPrograms

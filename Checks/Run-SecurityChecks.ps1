@@ -16,7 +16,7 @@ $steps = @(
     @{Name='update-ordering';Exe='dotnet';Arguments=@('run','--project','Checks/UpdateOrdering/UpdateOrdering.csproj','-c','Release','-p:NuGetAudit=false')},
     @{Name='frontend';Exe='node';Arguments=@('Checks/NativeLoginChecks.cjs')}
 )
-foreach ($entry in @(@('native-startup','Checks/NativeStartupRegressionChecks.ps1'),@('installer-fixtures','Checks/InstallerScriptChecks.ps1'),@('shortcut-races','Checks/ShortcutRaceChecks.ps1'),
+foreach ($entry in @(@('native-startup','Checks/NativeStartupRegressionChecks.ps1'),@('installer-fixtures','Checks/InstallerScriptChecks.ps1'),@('setup-upgrade','Checks/SetupUpgradeRegressionChecks.ps1'),@('shortcut-races','Checks/ShortcutRaceChecks.ps1'),
     @('acl-races','Checks/AclMigrationRaceChecks.ps1'),@('storage-races','Checks/AclMigrationRaceChecks.ps1','-Storage'),
     @('vm-harness-host-only','Checks/VmValidation/Validate.ps1'),@('evidence-gate','Checks/SecurityGateChecks.ps1'),
     @('runtime-notices','Checks/RuntimeNoticeChecks.ps1'))) {
@@ -24,6 +24,7 @@ foreach ($entry in @(@('native-startup','Checks/NativeStartupRegressionChecks.ps
 }
 if ($RegressionControls) {
     foreach ($entry in @(
+        @('DestinationPin','Checks/SetupUpgradeRegressionChecks.ps1','FAIL setup pin existing publication[\s\S]*FAIL setup pin missing publication[\s\S]*FAIL setup pin existing journal publication[\s\S]*FAIL setup pin missing journal publication'),
         @('Membership','Checks/AclMigrationRaceChecks.ps1','FAIL inspected protected-file insertion stops initialization'),
         @('Propagation','Checks/AclMigrationRaceChecks.ps1','FAIL uninspected child ACL is never changed'),
         @('Pins','Checks/AclMigrationRaceChecks.ps1','FAIL migration pins root'),

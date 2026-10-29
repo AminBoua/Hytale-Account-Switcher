@@ -52,7 +52,7 @@ public static class Setup
         using var installation = new SetupPayload.PinnedDirectories(launcherDirectory, requireTrusted: true);
         var destination = Path.Combine(launcherDirectory, ".hytale-accounts-addon");
         NativeStores.RegularPath(destination);
-        using var existing = Directory.Exists(destination) ? new SetupPayload.PinnedDirectories(destination, requireTrusted: true) : null;
+        using var existing = Directory.Exists(destination) ? new SetupPayload.PinnedDirectories(destination, requireTrusted: true, forMutation: true) : null;
         if (existing != null)
         {
             foreach (var path in Directory.EnumerateFileSystemEntries(destination))
