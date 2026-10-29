@@ -10,7 +10,9 @@
   const url = new URL(document.currentScript.src);
   const capability = url.pathname.split('/')[1];
   let state, user, pending = false, signature = '', reported = '', loginSince = 0, loginOpened = '', loginCompleted = '';
-  let logoutResult, sessionResult, updating = false;
+  let logoutResult, sessionResult, sessionReloaded, updating = false;
+  let nativeWork, userLoad, uncertain = false;
+  const timeout = Symbol('timeout'), withdrawn = Symbol('withdrawn');
   let listening = false;
   let commandVersion = 0;
   let fastUpdate;
@@ -26,6 +28,38 @@
     });
     if (!response.ok) throw new Error('Account switch unavailable. Previous selection kept.');
     return body ? null : response.json();
+  }
+  async function bounded(work, deadline) {
+    let timer;
+    try {
+      return await Promise.race([work, new Promise((_, reject) => {
+        timer = setTimeout(() => { uncertain = true; reject(timeout); }, Math.max(0, deadline - Date.now()));
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+  async function invoke(action, current, deadline, loading = false) {
+    if (!current()) throw withdrawn;
+    if (Date.now() >= deadline) { uncertain = true; throw timeout; }
+    const previous = loading ? userLoad : nativeWork;
+    if (previous) {
+      try { await bounded(previous, deadline); }
+      catch (error) { if (error === timeout) throw error; }
+    }
+    if (!current()) throw withdrawn;
+    if (Date.now() >= deadline) { uncertain = true; throw timeout; }
+    // A deadline cannot cancel native work or a Pinia load; retain ownership until it actually settles.
+    if (loading) uncertain = true;
+    const work = Promise.resolve().then(action);
+    if (loading) userLoad = work; else nativeWork = work;
+    const release = () => {
+      if (loading) { if (userLoad === work) userLoad = null; }
+      else if (nativeWork === work) nativeWork = null;
+      if (!updating) wake();
+    };
+    work.then(release, release);
+    const result = await bounded(work, deadline);
+    if (!current()) throw withdrawn;
+    return result;
   }
   async function command(action, store) {
     if (!state || ((state.busy || state.login) && action !== 'cancel') || pending) return;
@@ -46,7 +80,7 @@
   document.addEventListener('click', event => {
     if (event.target.closest('.launch-game__play-hytale .hybutton-split__main')) {
       const profile = user?.getUserProfile?.uuid;
-      if (!state || pending || state.busy || state.holdLogin || state.logout || state.login ||
+      if (!state || pending || uncertain || nativeWork || userLoad || state.busy || state.holdLogin || state.logout || state.login ||
           state.active !== state.selected || !state.profile || profile !== state.profile) {
         event.preventDefault(); event.stopImmediatePropagation();
       }
@@ -88,15 +122,27 @@
   async function update() {
     if (updating) return;
     updating = true;
+    const version = commandVersion;
     try {
-      const version = commandVersion;
       const next = await request('state');
       if (version !== commandVersion) return;
       state = next;
       if (sessionResult?.request !== state.session?.request) sessionResult = null;
       if (logoutResult?.request !== state.logout) logoutResult = null;
       const loginRequest = state.login;
-      const current = () => version === commandVersion && state?.login === loginRequest;
+      const sessionRequest = state.session?.request, logoutRequest = state.logout;
+      const current = () => version === commandVersion && state?.login === loginRequest &&
+        state?.session?.request === sessionRequest && state?.logout === logoutRequest;
+      const confirmCurrent = async () => {
+        const latest = await request('state');
+        if (version !== commandVersion) return false;
+        state = latest;
+        return current();
+      };
+      // Leave time for delivery and helper recovery before its 30-second acknowledgement deadline.
+      const deadline = Date.now() + 6000;
+      const native = action => invoke(action, current, deadline);
+      const loadUser = () => invoke(() => user.load(), current, deadline, true);
       if (!listening && window.runtime?.EventsOn) {
         for (const event of ['reload', 'profile_changed'])
           window.runtime.EventsOn(event, () => {
@@ -116,23 +162,30 @@
           try {
             if (!['stop', 'load', 'run', 'clear'].includes(operation)) throw new Error('Invalid native operation.');
             // Signed-out UI refresh must not start authenticated background tasks.
-            if (operation !== 'run' || await window.go.account.Service.IsUserLoggedIn())
-              await window.go.account.Service.CheckNetworkMode(operation === 'clear', 'hya:' +
-                (operation === 'run' ? 'run!' : operation === 'clear' ? 'stop' : operation));
+            if (operation !== 'run' || await native(() => window.go.account.Service.IsUserLoggedIn()))
+              await native(() => window.go.account.Service.CheckNetworkMode(operation === 'clear', 'hya:' +
+                (operation === 'run' ? 'run!' : operation === 'clear' ? 'stop' : operation)));
             if (operation !== 'stop') {
-              if (operation === 'load' && !await window.go.account.Service.HasValidSession()) throw new Error('Saved native session is signed out.');
-              loggedIn = await window.go.account.Service.IsUserLoggedIn();
-              if (loggedIn) profile = await window.go.user.Service.GetUserProfile();
+              if (operation === 'load' && !await native(() => window.go.account.Service.HasValidSession())) throw new Error('Saved native session is signed out.');
+              loggedIn = await native(() => window.go.account.Service.IsUserLoggedIn());
+              if (loggedIn) profile = await native(() => window.go.user.Service.GetUserProfile());
               if (operation === 'run') {
-                await user.load();
-                reported = '';
-                window.runtime.EventsEmit('reload');
+                await loadUser();
               }
             }
             success = true;
-          } catch { /* The helper restores and verifies the previous native session. */ }
+          } catch (error) {
+            if (error === withdrawn) return;
+            // Unknown completion must not masquerade as a definite native failure.
+            if (error === timeout) success = null;
+          }
           sessionResult = { action: 'session-result', request: requestId, success,
             profile: profile?.uuid ?? null, username: profile?.username ?? null, loggedIn };
+        }
+        if (!await confirmCurrent()) return;
+        if (state.session.operation === 'run' && sessionResult.success && sessionReloaded !== sessionRequest) {
+          uncertain = false; reported = ''; sessionReloaded = sessionRequest;
+          window.runtime.EventsEmit('reload');
         }
         await request('command', sessionResult);
         return;
@@ -141,26 +194,29 @@
         if (!logoutResult) {
           logoutResult = { action: 'logout-result', request: state.logout, success: null };
           try {
-            await window.go.account.Service.LogoutUser();
-          } catch { logoutResult.success = false; }
+            await native(() => window.go.account.Service.LogoutUser());
+          } catch (error) {
+            if (error === withdrawn) return;
+            if (error !== timeout) logoutResult.success = false;
+          }
         }
         if (logoutResult.success === null) {
           try {
-            if (await window.go.account.Service.IsUserLoggedIn() === false) logoutResult.success = true;
+            if (await native(() => window.go.account.Service.IsUserLoggedIn()) === false) logoutResult.success = true;
           } catch { /* Retry confirmation, never an already completed logout. */ }
         }
-        await request('command', logoutResult);
+        if (await confirmCurrent()) await request('command', logoutResult);
         return;
       }
       if (loginRequest && loginOpened !== loginRequest) {
         loginCompleted = '';
         try {
-          const authorization = new URL(await window.go.account.Service.GenerateOauthURL());
-          if (!current()) return;
+          const authorization = new URL(await native(() => window.go.account.Service.GenerateOauthURL()));
+          if (!await confirmCurrent()) return;
           if (authorization.protocol !== 'https:' || authorization.hostname !== 'oauth.accounts.hytale.com') throw new Error('Invalid native login URL.');
           authorization.searchParams.set('prompt', 'login');
           loginOpened = loginRequest;
-          await window.runtime.BrowserOpenURL(authorization.href);
+          await native(() => window.runtime.BrowserOpenURL(authorization.href));
         } catch {
           if (current()) { await request('command', { action: 'login-failed', loginRequest }); wake(); }
           return;
@@ -173,8 +229,13 @@
         return;
       }
       if (!user) return;
-      if (loginRequest && loginCompleted === loginRequest) await user.load();
+      if (loginRequest && loginCompleted === loginRequest) {
+        await loadUser();
+        if (!await confirmCurrent()) return;
+        uncertain = false;
+      }
       if (!current()) return;
+      if (uncertain || nativeWork || userLoad) return;
       const profile = user.getUserProfile?.uuid;
       if (!profile && document.querySelector('.login__container')) loginSince ||= Date.now();
       else loginSince = 0;
@@ -186,7 +247,7 @@
         wake();
       }
       refresh();
-    } catch { state = null; /* Block new Play until the selected native identity is verified again. */ }
+    } catch { if (version === commandVersion) state = null; /* Block Play without discarding a newer command's state. */ }
     finally {
       updating = false;
       // Keep the idle poll quiet; advance native transitions without one-second gaps.

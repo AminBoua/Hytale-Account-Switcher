@@ -6,6 +6,27 @@ const calls = [], created = [], browserUrls = [], events = {}, nativeActions = [
 const deliveryFailures = new Map(), delivered = [];
 const timers = new Map();
 let timerId = 0, automaticSwitch = false, disconnected = false, loadGate, urlGate, commandGate, stateGate, refresh;
+let nativeGate, logoutGate, verificationGate, now = Date.now(), completed = false, reloads = 0;
+process.on('beforeExit', () => {
+  if (!completed && !process.exitCode) {
+    console.error('FAIL frontend checks did not finish (an unresolved promise cannot silently pass)');
+    process.exitCode = 1;
+  }
+});
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+async function expireWait() {
+  await new Promise(setImmediate);
+  const waiting = [...timers].filter(([, task]) => task.delay > 25);
+  assert.equal(waiting.length, 1, 'stalled work has exactly one bounded wait');
+  const [id, task] = waiting[0];
+  assert(task.delay <= 6000, 'frontend deadline precedes the helper acknowledgement deadline');
+  timers.delete(id); now += task.delay; task.fn();
+  await new Promise(setImmediate);
+}
 const accountB = { uuid: 'accountB-profile', username: 'accountB' };
 const accountA = { uuid: 'accountA-profile', username: 'accountA' };
 let nativeProfile = accountB;
@@ -16,16 +37,17 @@ const state = { stores: [{ id: 'accountB', label: 'accountB' }, { id: 'accountA'
 const window = {
   go: { account: { Service: {
     GenerateOauthURL: async () => { generated++; await urlGate; if (failLogin) throw Error('native login failed'); return 'https://oauth.accounts.hytale.com/oauth2/auth?state=native-state&code_challenge=native-pkce'; },
-    LogoutUser: async () => { nativeLogouts++; if (logoutFailure) throw Error('native logout failed'); nativeProfile = null; },
-    IsUserLoggedIn: async () => { verifications++; if (verificationFailures > 0) { verificationFailures--; throw Error('verification unavailable'); } return !!nativeProfile; },
+    LogoutUser: async () => { nativeLogouts++; await logoutGate; if (logoutFailure) throw Error('native logout failed'); nativeProfile = null; },
+    IsUserLoggedIn: async () => { verifications++; await verificationGate; if (verificationFailures > 0) { verificationFailures--; throw Error('verification unavailable'); } return !!nativeProfile; },
     HasValidSession: async () => true,
     CheckNetworkMode: async (automatic, source) => {
       nativeActions.push(source);
+      await nativeGate;
       if (automatic) { assert.equal(source, 'hya:stop'); nativeProfile = null; }
       if (automaticSwitch && source === 'hya:load') nativeProfile = accountA;
     }
   } }, user: { Service: { GetUserProfile: async () => nativeProfile } } },
-  runtime: { BrowserOpenURL: url => browserUrls.push(url), EventsOn: (name, fn) => { events[name] = fn; }, EventsEmit: name => events[name]?.() }
+  runtime: { BrowserOpenURL: url => browserUrls.push(url), EventsOn: (name, fn) => { events[name] = fn; }, EventsEmit: name => { reloads++; events[name]?.(); } }
 };
 // shortcut: only the selectors/events used here are modeled; extend when production needs more DOM APIs.
 function element(className = '') {
@@ -97,7 +119,8 @@ const source = fs.readFileSync('Launcher/NativeDropdown.js', 'utf8');
 state.session = { request: 'startup-run', operation: 'run' }; state.busy = true;
 user.getUserProfile = null;
 vm.runInNewContext(source, {
-  location: { origin: 'http://wails.localhost', pathname: '/launch-game' }, window, document, URL, AbortSignal, Date,
+  location: { origin: 'http://wails.localhost', pathname: '/launch-game' }, window, document, URL, AbortSignal,
+  Date: class extends Date { static now() { return now; } },
   MutationObserver: class { constructor(fn) { refresh = fn; } observe() {} }, setInterval: fn => { tick = fn; },
   setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; },
   clearTimeout: id => timers.delete(id),
@@ -160,7 +183,13 @@ vm.runInNewContext(source, {
   assert.deepEqual(nativeActions, ['hya:run!'], 'first run starts native tasks exactly once across retries');
   assert.equal(userLoads, 1, 'first run reloads the mounted store exactly once across retries');
   assert.equal(nativeLogouts, 0); assert.equal(browserUrls.length, 0);
-  state.session = null; state.busy = false;
+  state.session = null;
+  await tick();
+  assert.equal(calls.at(-1).action, 'ready', 'initial native startup can report readiness while the helper is busy');
+  user.getUserProfile = null;
+  await tick(); now += 3000; await tick();
+  assert.equal(calls.at(-1).profile, null, 'signed-out startup can confirm the native sign-in screen while busy');
+  user.getUserProfile = accountB; state.busy = false;
   calls.length = delivered.length = nativeActions.length = 0;
   await tick();
   assert.deepEqual(created, ['style'], 'native sign-in receives no account controls');
@@ -434,6 +463,137 @@ vm.runInNewContext(source, {
   assert(schedulingDelay <= 100, 'three native stages have no multi-second artificial delay');
   assert.equal(user.getUserProfile.uuid, accountA.uuid);
   assert.equal(timers.size, 0, 'fast polling stops after the transition');
+  automaticSwitch = false;
+  for (const kind of ['session', 'login']) {
+    timers.clear();
+    state.session = null; state.logout = null; state.login = null; state.busy = state.holdLogin = false;
+    state.active = state.selected = 'accountA'; state.profile = accountA.uuid;
+    nativeProfile = user.getUserProfile = accountA;
+    await tick();
+    if (kind === 'login') { await command('add'); await tick(); events.reload(); }
+    else { state.session = { request: 'stalled-run', operation: 'run' }; state.busy = true; }
+    const gate = deferred(); loadGate = gate.promise;
+    const beforeLoads = userLoads, beforeReloads = reloads, beforeCalls = calls.length;
+    const stalled = tick(); await new Promise(setImmediate);
+    assert.equal(userLoads, beforeLoads + 1, kind + ' enters the controlled, never-settling user.load');
+    if (kind === 'login') await command('cancel');
+    await expireWait(); await stalled;
+    if (kind === 'session') {
+      assert.equal(calls.at(-1).request, 'stalled-run');
+      assert.equal(calls.at(-1).success, null, 'load deadline reports uncertainty instead of a definite native failure');
+    }
+    assert(playBlocked(), kind + ' load timeout keeps Play blocked');
+    state.login = null; state.busy = state.holdLogin = true;
+    nativeProfile = accountB;
+    for (const operation of ['stop', 'load']) {
+      state.session = { request: kind + '-recovery-' + operation, operation };
+      await tick();
+      assert.equal(calls.at(-1).request, state.session.request);
+      assert.equal(calls.at(-1).success, true, 'later recovery executes despite the unsettled frontend load');
+    }
+    state.session = { request: kind + '-recovery-run', operation: 'run' };
+    const recovering = tick(); await new Promise(setImmediate);
+    assert.equal(userLoads, beforeLoads + 1, 'a recovery cannot start a conflicting Pinia load');
+    await expireWait(); await recovering;
+    assert.equal(calls.at(-1).success, null, 'unresolved frontend refresh cannot confirm recovery');
+    state.session = null; state.busy = state.holdLogin = false;
+    state.active = state.selected = 'accountB'; state.profile = accountB.uuid;
+    user.getUserProfile = accountB;
+    await tick();
+    assert(playBlocked(), 'even a matching cached profile cannot clear uncertainty');
+    const afterWithdrawal = calls.length;
+    loadGate = null; gate.resolve(); await new Promise(setImmediate); await tick();
+    assert.equal(user.getUserProfile, accountA, 'late native load can still write its old Pinia result');
+    assert.equal(calls.length, afterWithdrawal, 'late completion cannot acknowledge a withdrawn request or publish readiness');
+    assert.equal(reloads, beforeReloads, 'withdrawn loads cannot emit stale reload events');
+    assert(!calls.slice(beforeCalls).some(call => call.action === 'ready'), 'neither timed-out load publishes readiness');
+    assert(playBlocked(), 'late completion cannot unblock Play');
+    state.session = { request: kind + '-fresh-run', operation: 'run' }; state.busy = true;
+    await tick();
+    assert.equal(calls.at(-1).request, state.session.request);
+    assert.equal(calls.at(-1).success, true, 'fresh load verifies recovery after the old load actually settles');
+    assert.equal(user.getUserProfile, accountB, 'a late old load cannot overwrite a newer frontend result');
+    assert.equal(reloads, beforeReloads + 1, 'only the current verified run emits reload');
+    state.session = null; state.busy = false; await tick();
+    assert(!playBlocked(), 'verified recovery restores Play in the existing frontend');
+  }
+  console.log('PASS controlled session/login load deadlines process later recovery, serialize Pinia loads, and fence withdrawn late completions, readiness and Play');
+  {
+    timers.clear();
+    const gate = deferred(); nativeGate = gate.promise;
+    state.session = { request: 'stalled-native-stop', operation: 'stop' }; state.busy = true;
+    const beforeActions = nativeActions.length;
+    const stalled = tick(); await expireWait(); await stalled;
+    assert.equal(calls.at(-1).success, null, 'unsettled native transition remains uncertain');
+    state.session = { request: 'later-native-stop', operation: 'stop' };
+    const recovering = tick(); await new Promise(setImmediate);
+    assert.equal(nativeActions.length, beforeActions + 1, 'recovery never overlaps an unsettled native transition');
+    await expireWait(); await recovering;
+    assert.equal(calls.at(-1).request, state.session.request);
+    assert.equal(calls.at(-1).success, null);
+    const recoveryResult = calls.at(-1);
+    nativeGate = null; gate.resolve(); await new Promise(setImmediate); await tick();
+    assert.deepEqual(calls.at(-1), recoveryResult, 'late native completion cannot replace a newer cached result');
+    assert.equal(nativeActions.length, beforeActions + 1, 'deadline and result retries do not repeat native transitions');
+    state.session = null; state.busy = false; await tick();
+    assert(playBlocked(), 'a late native completion alone cannot clear uncertainty');
+    state.session = { request: 'verified-native-run', operation: 'run' }; state.busy = true;
+    await tick(); state.session = null; state.busy = false; await tick();
+    assert(!playBlocked());
+  }
+  console.log('PASS native transition deadlines retain ownership until actual settlement and cannot overwrite newer results or enable Play');
+  for (const phase of ['logout', 'confirmation']) {
+    timers.clear();
+    nativeProfile = user.getUserProfile = accountB;
+    state.logout = 'deadline-' + phase; state.busy = true;
+    const gate = deferred();
+    if (phase === 'logout') logoutGate = gate.promise; else verificationGate = gate.promise;
+    const beforeLogouts = nativeLogouts, beforeCalls = calls.length;
+    const stalled = tick(); await expireWait(); await stalled;
+    assert.equal(calls.at(-1).success, null, phase + ' deadline preserves unconfirmed logout');
+    const retry = tick(); await expireWait(); await retry;
+    assert.equal(nativeLogouts, beforeLogouts + 1, 'deadline retries only confirmation, never LogoutUser');
+    state.logout = null; state.busy = false; state.holdLogin = true; state.profile = null;
+    await tick();
+    const withdrawnCalls = calls.length;
+    logoutGate = verificationGate = null; gate.resolve(); await new Promise(setImmediate); await tick();
+    assert.equal(calls.length, withdrawnCalls, 'late logout/confirmation cannot acknowledge a withdrawn request');
+    assert.equal(nativeLogouts, beforeLogouts + 1, 'withdrawal never repeats completed logout');
+    assert(!calls.slice(beforeCalls).some(call => call.action === 'ready'), 'unconfirmed logout never publishes cached readiness');
+    assert(playBlocked(), 'uncertain logout remains blocked after late settlement');
+    nativeProfile = accountB;
+    state.session = { request: 'logout-recovery-' + phase, operation: 'run' }; state.busy = true;
+    await tick();
+    assert.equal(calls.at(-1).success, true);
+    state.session = null; state.busy = state.holdLogin = false; state.profile = accountB.uuid;
+    await tick(); assert(!playBlocked());
+  }
+  console.log('PASS controlled LogoutUser and confirmation deadlines preserve uncertainty and never repeat logout after retries or withdrawal');
+  for (const kind of ['session', 'logout']) {
+    timers.clear();
+    const gate = deferred(), request = 'withdrawn-' + kind;
+    if (kind === 'session') { loadGate = gate.promise; state.session = { request, operation: 'run' }; }
+    else { logoutGate = gate.promise; state.logout = request; }
+    state.busy = true;
+    const beforeCalls = calls.length, beforeReloads = reloads, beforeLogouts = nativeLogouts;
+    const inFlight = tick(); await new Promise(setImmediate);
+    // Helper withdrawal can happen without a frontend command changing commandVersion.
+    state.logout = null; state.session = { request: request + '-recovery', operation: 'stop' };
+    loadGate = logoutGate = null; gate.resolve(); await inFlight;
+    assert.equal(calls.length, beforeCalls, 'completion rechecks the helper request before acknowledging it');
+    assert.equal(reloads, beforeReloads, 'withdrawal before the deadline also fences reload');
+    await tick();
+    assert.equal(calls.at(-1).request, state.session.request, 'the next poll immediately handles the replacement request');
+    assert.equal(calls.at(-1).success, true);
+    assert.equal(nativeLogouts - beforeLogouts, kind === 'logout' ? 1 : 0, 'withdrawal cannot repeat completed logout');
+    nativeProfile = accountB;
+    state.session = { request: request + '-verified-run', operation: 'run' };
+    await tick();
+    assert.equal(calls.at(-1).success, true);
+    state.session = null; state.busy = false; await tick();
+    assert(!playBlocked());
+  }
+  console.log('PASS helper request identities fence session/logout completions withdrawn before the frontend deadline, without a command-version change');
   console.log('PASS first-update run uses the mounted Pinia store with renamed assets, waits for readiness, and retries results without repeating recovery');
   console.log('PASS production Play handler blocks pending, busy, disconnected and mismatched accounts; verified matching identity reaches native Play');
   console.log('PASS dropdown renders usable saved accounts and Add, dispatches click/keyboard actions, and leaves native sign-in free of addon controls');
@@ -445,4 +605,5 @@ vm.runInNewContext(source, {
   console.log('PASS lost session/logout results retry immediately with identical payloads and exactly one native execution per request');
   console.log('PASS transient and persistent logout verification errors retry confirmation only, preserve Play blocking, and remain distinct from genuine logout failure');
   console.log('PASS the existing row cancels login, restores Play/switching, and fences late profile loads and browser opens across retries');
+  completed = true;
 })().catch(error => { console.error(error); process.exitCode = 1; });
