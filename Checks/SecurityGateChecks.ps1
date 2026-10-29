@@ -39,21 +39,69 @@ try {
         'Unicode source' | Set-Content -LiteralPath $path
         $added = Get-SecuritySource $repo
         Check ($added.Fingerprint -ne $before.Fingerprint) "untracked Unicode addition invalidates source fingerprint: $relative"
-        Check ($added.Files.Path -contains $relative) "untracked Unicode path included verbatim: $relative"
+        Check (@($added.Files | Where-Object { [string]::Equals($_.Path, $relative, [StringComparison]::Ordinal) }).Count -eq 1) "untracked Unicode path included verbatim: $relative"
         'edited untracked source' | Set-Content -LiteralPath $path
         $edited = Get-SecuritySource $repo
         Check ($edited.Fingerprint -ne $added.Fingerprint) "untracked Unicode edit invalidates source fingerprint: $relative"
         & git -C $repo add -- $relative
         if ($LASTEXITCODE) { throw 'Cannot track Unicode source fingerprint fixture.' }
         $tracked = Get-SecuritySource $repo
-        Check ($tracked.Files.Path -contains $relative -and $tracked.Fingerprint -eq $edited.Fingerprint -and $tracked.Fingerprint -ne $before.Fingerprint) "tracked Unicode addition included with same fingerprint: $relative"
+        Check (@($tracked.Files | Where-Object { [string]::Equals($_.Path, $relative, [StringComparison]::Ordinal) }).Count -eq 1 -and $tracked.Fingerprint -eq $edited.Fingerprint -and $tracked.Fingerprint -ne $before.Fingerprint) "tracked Unicode addition included with same fingerprint: $relative"
         'edited tracked source' | Set-Content -LiteralPath $path
         $changed = Get-SecuritySource $repo
         Check ($changed.Fingerprint -ne $tracked.Fingerprint) "tracked Unicode edit invalidates source fingerprint: $relative"
         Remove-Item -LiteralPath $path
         $removed = Get-SecuritySource $repo
-        $entry = @($removed.Files | Where-Object Path -eq $relative)
+        $entry = @($removed.Files | Where-Object { [string]::Equals($_.Path, $relative, [StringComparison]::Ordinal) })
         Check ($entry.Count -eq 1 -and $entry[0].Hash -eq 'DELETED' -and $removed.Fingerprint -ne $changed.Fingerprint) "tracked Unicode deletion retains DELETED marker and invalidates source fingerprint: $relative"
+    }
+    foreach ($mode in @('untracked-first','tracked-first')) {
+        $repo = Join-Path $root $mode
+        $null = New-Item -ItemType Directory -Path $repo
+        & git init --quiet $repo
+        & git -C $repo config core.quotePath true
+        if ($LASTEXITCODE) { throw 'Cannot configure leading U+FEFF source fingerprint fixture.' }
+        if ($mode -eq 'untracked-first') {
+            $null = New-Item -ItemType Directory -Path (Join-Path $repo 'Launcher')
+            'baseline source' | Set-Content -LiteralPath (Join-Path $repo 'Launcher/Base.cs')
+            & git -C $repo add -- Launcher/Base.cs
+            if ($LASTEXITCODE) { throw 'Cannot track leading U+FEFF fixture baseline.' }
+        }
+        & git -C $repo -c core.hooksPath=disabled-fixture-hooks -c user.name=Fixture -c user.email=fixture.invalid -c commit.gpgsign=false commit --quiet --allow-empty -m fixture
+        if ($LASTEXITCODE) { throw 'Cannot commit leading U+FEFF source fingerprint fixture.' }
+        if ($mode -eq 'untracked-first') { $before = Get-SecuritySource $repo }
+        $relative = "$([char]0xfeff)Build.ps1"
+        $path = Join-Path $repo $relative
+        'leading U+FEFF source' | Set-Content -LiteralPath $path
+        if ($mode -eq 'tracked-first') {
+            & git -C $repo add -- $relative
+            if ($LASTEXITCODE) { throw 'Cannot track leading U+FEFF source fingerprint fixture.' }
+        }
+        # The sole untracked path (or sole tracked path) is first in Git's NUL-separated output.
+        $added = Get-SecuritySource $repo
+        $entry = @($added.Files | Where-Object { [string]::Equals($_.Path, $relative, [StringComparison]::Ordinal) })
+        Check ($entry.Count -eq 1 -and $entry[0].Hash -eq (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash) "$mode leading U+FEFF filename preserved verbatim with real file hash"
+        Check (@($added.Files | Where-Object { [string]::Equals($_.Path, 'Build.ps1', [StringComparison]::Ordinal) }).Count -eq 0) "$mode has no phantom Build.ps1 entry"
+        if ($mode -eq 'untracked-first') {
+            Check ($added.Fingerprint -ne $before.Fingerprint) 'untracked leading U+FEFF addition invalidates source fingerprint'
+        }
+        'edited leading U+FEFF source' | Set-Content -LiteralPath $path
+        $edited = Get-SecuritySource $repo
+        $entry = @($edited.Files | Where-Object { [string]::Equals($_.Path, $relative, [StringComparison]::Ordinal) })
+        Check ($edited.Fingerprint -ne $added.Fingerprint -and $entry.Count -eq 1 -and $entry[0].Hash -eq (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash) "$mode leading U+FEFF edit invalidates fingerprint with exact path and real file hash"
+        & git -C $repo add -- $relative
+        if ($LASTEXITCODE) { throw 'Cannot stage leading U+FEFF source fingerprint fixture.' }
+        $tracked = Get-SecuritySource $repo
+        $entry = @($tracked.Files | Where-Object { [string]::Equals($_.Path, $relative, [StringComparison]::Ordinal) })
+        Check ($tracked.Fingerprint -eq $edited.Fingerprint -and $entry.Count -eq 1 -and $entry[0].Hash -eq (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash) "$mode tracking leading U+FEFF path preserves fingerprint and real file hash"
+        'edited tracked leading U+FEFF source' | Set-Content -LiteralPath $path
+        $changed = Get-SecuritySource $repo
+        $entry = @($changed.Files | Where-Object { [string]::Equals($_.Path, $relative, [StringComparison]::Ordinal) })
+        Check ($changed.Fingerprint -ne $tracked.Fingerprint -and $entry.Count -eq 1 -and $entry[0].Hash -eq (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash) "$mode tracked leading U+FEFF edit invalidates fingerprint with exact path and real file hash"
+        Remove-Item -LiteralPath $path
+        $removed = Get-SecuritySource $repo
+        $entry = @($removed.Files | Where-Object { [string]::Equals($_.Path, $relative, [StringComparison]::Ordinal) })
+        Check ($removed.Fingerprint -ne $changed.Fingerprint -and $entry.Count -eq 1 -and $entry[0].Hash -eq 'DELETED') "$mode leading U+FEFF deletion retains exact path and DELETED marker"
     }
     Check ((Test-VmEvidence '' $source $environment).Status -eq 'unverified') 'missing VM evidence is unverified'
     Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') 'empty VM evidence is unverified'
