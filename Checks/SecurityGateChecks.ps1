@@ -103,6 +103,42 @@ try {
         $entry = @($removed.Files | Where-Object { [string]::Equals($_.Path, $relative, [StringComparison]::Ordinal) })
         Check ($removed.Fingerprint -ne $changed.Fingerprint -and $entry.Count -eq 1 -and $entry[0].Hash -eq 'DELETED') "$mode leading U+FEFF deletion retains exact path and DELETED marker"
     }
+    $collisionFingerprint = $null
+    foreach ($mode in @('untracked','tracked')) {
+        $repo = Join-Path $root ("collision-$mode")
+        $null = New-Item -ItemType Directory -Path $repo
+        & git init --quiet $repo
+        if ($LASTEXITCODE) { throw 'Cannot initialize colliding filename fixture.' }
+        & git -C $repo -c core.hooksPath=disabled-fixture-hooks -c user.name=Fixture -c user.email=fixture.invalid -c commit.gpgsign=false commit --quiet --allow-empty -m fixture
+        if ($LASTEXITCODE) { throw 'Cannot commit colliding filename fixture.' }
+        $relatives = @('Build.ps1', "$([char]0xfeff)Build.ps1")
+        foreach ($relative in $relatives[1..0]) {
+            "collision source: $relative" | Set-Content -LiteralPath (Join-Path $repo $relative)
+        }
+        if ($mode -eq 'tracked') {
+            & git -C $repo add -- $relatives
+            if ($LASTEXITCODE) { throw 'Cannot track colliding filename fixture.' }
+        }
+        $current = Get-SecuritySource $repo
+        Check ($current.Files.Count -eq 2) "$mode colliding filenames both included"
+        foreach ($index in 0..1) {
+            $relative = $relatives[$index]
+            Check ([string]::Equals($current.Files[$index].Path, $relative, [StringComparison]::Ordinal) -and $current.Files[$index].Hash -eq (Get-FileHash -LiteralPath (Join-Path $repo $relative) -Algorithm SHA256).Hash) "$mode colliding filename has exact path and real hash in ordinal order: $relative"
+        }
+        Check ((Get-SecuritySource $repo).Fingerprint -eq $current.Fingerprint) "$mode colliding filename fingerprint is repeatable"
+        if ($mode -eq 'untracked') { $collisionFingerprint = $current.Fingerprint }
+        else { Check ($current.Fingerprint -eq $collisionFingerprint) 'tracking colliding filenames preserves fingerprint and ordering' }
+        foreach ($relative in $relatives) {
+            $before = $current
+            "edited collision source: $relative" | Set-Content -LiteralPath (Join-Path $repo $relative)
+            $current = Get-SecuritySource $repo
+            Check ($current.Fingerprint -ne $before.Fingerprint) "$mode colliding filename edit invalidates source fingerprint: $relative"
+            foreach ($expected in $relatives) {
+                $entry = @($current.Files | Where-Object { [string]::Equals($_.Path, $expected, [StringComparison]::Ordinal) })
+                Check ($entry.Count -eq 1 -and $entry[0].Hash -eq (Get-FileHash -LiteralPath (Join-Path $repo $expected) -Algorithm SHA256).Hash) "$mode colliding filename retains exact path and real hash after editing ${relative}: $expected"
+            }
+        }
+    }
     Check ((Test-VmEvidence '' $source $environment).Status -eq 'unverified') 'missing VM evidence is unverified'
     Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') 'empty VM evidence is unverified'
     # Fabricated schema fixtures ONLY, never exported as a real VM validation report.
