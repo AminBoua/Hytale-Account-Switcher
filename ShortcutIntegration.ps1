@@ -139,8 +139,12 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
     }
 }
 function Remove-ShortcutStateFiles {
-    foreach ($name in @('shortcuts.json','shortcuts.new') + @($records | Where-Object Backup | ForEach-Object Backup)) {
-        $file = Open-ShortcutFile (Join-Path $state $name)
-        try { if ($file.Exists) { $file.Delete() } } finally { $file.Dispose() }
-    }
+    $removalFiles = @()
+    try {
+        # Acquire the entire cleanup set before deleting recovery data; delete its journal last.
+        foreach ($name in @('shortcuts.new') + @($records | Where-Object Backup | ForEach-Object Backup) + @('shortcuts.json')) {
+            $removalFiles += Open-ShortcutFile (Join-Path $state $name)
+        }
+        foreach ($file in $removalFiles) { if ($file.Exists) { $file.Delete() } }
+    } finally { foreach ($file in $removalFiles) { $file.Dispose() } }
 }

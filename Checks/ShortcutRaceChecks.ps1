@@ -288,6 +288,59 @@ try {
         }
         Check ((Get-FileHash -LiteralPath $backupPath).Hash -eq $backupHash -and (Get-Item -LiteralPath $backupPath).LastWriteTimeUtc -eq $backupWritten) "$operation partial-write recovery preserves the original backup"
     }
+    # Exercise the production cleanup after real shortcut writes have produced several recovery records.
+    $backups = @($records | Where-Object Backup | ForEach-Object Backup)
+    Check ($backups.Count -gt 1) 'cleanup fixture has multiple recorded backups'
+    [IO.File]::WriteAllText((Join-Path $state 'shortcuts.new'), 'unfinished journal fixture')
+    $cleanupNames = @('shortcuts.new') + $backups + @('shortcuts.json')
+    $cleanupHashes = @{}
+    foreach ($name in $cleanupNames) { $cleanupHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $state $name)).Hash }
+    foreach ($lockedName in @('shortcuts.new', $backups[-1])) {
+        $locked = [IO.File]::Open((Join-Path $state $lockedName), 'Open', 'Read', 'Read')
+        $failure = $null
+        try { Remove-ShortcutStateFiles } catch { $failure = $_ }
+        finally { $locked.Dispose() }
+        Check ($failure -and $failure.Exception.GetBaseException() -is [ComponentModel.Win32Exception] -and $failure.Exception.GetBaseException().NativeErrorCode -eq 32) "cleanup rejects locked $lockedName with a sharing violation"
+        foreach ($name in $cleanupNames) {
+            $recoveryPath = Join-Path $state $name
+            Check ((Test-Path -LiteralPath $recoveryPath) -and (Get-FileHash -LiteralPath $recoveryPath).Hash -eq $cleanupHashes[$name]) "locked $lockedName preserves recovery file $name"
+            Check ((Get-ShortcutHash (Read-ShortcutBytes $recoveryPath)).Replace('-','') -eq $cleanupHashes[$name]) "failed cleanup releases its handle for $name"
+        }
+    }
+    $lastBackup = Join-Path $state $backups[-1]
+    $backupBytes = [IO.File]::ReadAllBytes($lastBackup)
+    foreach ($linkType in @('HardLink','Junction')) {
+        [IO.File]::Delete($lastBackup)
+        $target = if ($linkType -eq 'HardLink') { $victim } else { $outside }
+        New-Item -ItemType $linkType -Path $lastBackup -Target $target | Out-Null
+        $failure = $null
+        try { Remove-ShortcutStateFiles } catch { $failure = $_ }
+        finally {
+            if ($linkType -eq 'Junction') { [IO.Directory]::Delete($lastBackup) } else { [IO.File]::Delete($lastBackup) }
+            [IO.File]::WriteAllBytes($lastBackup, $backupBytes)
+        }
+        if ($linkType -eq 'Junction') {
+            Check ($failure -and $failure.Exception.GetBaseException() -is [ComponentModel.Win32Exception] -and $failure.Exception.GetBaseException().NativeErrorCode -eq 5) 'cleanup refuses to acquire a directory junction as a backup file'
+        } else { Check ($failure -and $failure.ToString().Contains('link')) 'cleanup rejects a later hard-linked backup' }
+        foreach ($name in $cleanupNames) { Check ((Get-FileHash -LiteralPath (Join-Path $state $name)).Hash -eq $cleanupHashes[$name]) "$linkType refusal preserves recovery file $name" }
+        Check ((Get-FileHash -LiteralPath $victim).Hash -eq $sentinel) "$linkType cleanup refusal preserves the outside victim"
+    }
+    $unknown = Join-Path $state ('shortcut-' + [Guid]::NewGuid().ToString('N') + '.lnk')
+    $lookalike = Join-Path $state 'shortcuts.json.bak'
+    foreach ($unowned in @($unknown,$lookalike)) { [IO.File]::WriteAllText($unowned, 'unowned fixture') }
+    $script:afterOpen = {
+        param($opened,$create,$lease)
+        if ($opened -ne $manifestPath) { return }
+        foreach ($name in $cleanupNames) {
+            Check (Test-Path -LiteralPath (Join-Path $state $name)) "cleanup acquires the journal before deleting $name"
+            Reject { [IO.File]::WriteAllText((Join-Path $state $name), 'racing edit') } "cleanup holds $name until the entire set is acquired"
+        }
+    }
+    Remove-ShortcutStateFiles
+    $script:afterOpen = $null
+    foreach ($name in $cleanupNames) { Check (!(Test-Path -LiteralPath (Join-Path $state $name))) "cleanup retry removes $name after releasing locks" }
+    foreach ($unowned in @($unknown,$lookalike)) { Check ([IO.File]::ReadAllText($unowned) -eq 'unowned fixture') 'cleanup preserves unrecorded files and lookalikes' }
+    Reject { $otherLock = Open-ShortcutJournal $state; $otherLock.Dispose() } 'cleanup retains the caller journal lock'
 } finally {
     [ShortcutRaceProbe]::BeforeLeaf = $null
     if ($journalLock) { $journalLock.Dispose() }

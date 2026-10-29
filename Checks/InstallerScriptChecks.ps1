@@ -251,15 +251,19 @@ try {
         $userState = Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration'
         $userManifest = Join-Path $userState 'shortcuts.json'
         $userJournal = Get-Content -LiteralPath $userManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+        $pendingJournal = Join-Path $userState 'shortcuts.new'
+        Set-Content -LiteralPath $pendingJournal -Value 'unfinished per-user journal fixture'
         $recoveryHashes = @{}
-        foreach ($name in @('shortcuts.json') + @($userJournal.Shortcuts | ForEach-Object Backup)) {
+        foreach ($name in @('shortcuts.json','shortcuts.new') + @($userJournal.Shortcuts | ForEach-Object Backup)) {
             $path = Join-Path $userState $name
             $recoveryHashes[$path] = (Get-FileHash -LiteralPath $path).Hash
         }
         $installedHash = (Get-FileHash -LiteralPath (Join-Path $destination 'HytaleAccounts.exe')).Hash
         $entry = Get-ItemProperty -LiteralPath $registry | ConvertTo-Json -Compress
         $tasks = @($global:HytaleFixtureTasks.Values | Sort-Object TaskName) | ConvertTo-Json -Depth 6 -Compress
-        & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly -KeepJournal
+        $locked = [IO.File]::Open($pendingJournal, 'Open', 'Read', 'Read')
+        try { & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly -KeepJournal }
+        finally { $locked.Dispose() }
         Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $previousHash) 'pre-elevation phase restores the original shortcut'
         foreach ($path in $recoveryHashes.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $recoveryHashes[$path]) 'pre-elevation phase retains journal and original backup bytes' }
         $failure = $null
