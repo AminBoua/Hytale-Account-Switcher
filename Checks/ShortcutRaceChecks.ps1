@@ -237,6 +237,57 @@ try {
     Reject { Update-Shortcut $path Remove $record } 'missing shortcut restoration rejects a broken backup before creating a leaf'
     Check (!(Test-Path -LiteralPath $path)) 'invalid backup cannot be installed as a restored shortcut'
     [IO.File]::WriteAllBytes($backupPath, $backupBytes)
+    foreach ($operation in @('Remove','Repair','Install')) {
+        $path = Join-Path $folder ("Recovery-$operation.lnk")
+        OfficialLink
+        $originalBytes = [IO.File]::ReadAllBytes($path)
+        Update-Shortcut $path Install $null
+        $record = $records | Where-Object Path -eq $path
+        $appliedBytes = [IO.File]::ReadAllBytes($path)
+        $backupPath = Join-Path $state $record.Backup
+        $backupHash = (Get-FileHash -LiteralPath $backupPath).Hash
+        $backupWritten = (Get-Item -LiteralPath $backupPath).LastWriteTimeUtc
+        $journalHash = (Get-FileHash -LiteralPath $manifestPath).Hash
+        $recordJson = $record | ConvertTo-Json -Compress
+        # Keep the original alive so the replacement cannot reuse its native file identity.
+        $moved = $path + '.original'
+        [IO.File]::Move($path, $moved)
+        [IO.File]::WriteAllBytes($path, [byte[]]@(1,2,3))
+        $lease = Open-ShortcutFile $path
+        try { Check ($lease.Identity -ne $record.FileId) "$operation unreadable replacement has a different file identity" } finally { $lease.Dispose() }
+        Check (![ShortcutFile]::IsReadableShortcut($path)) "$operation replacement is unreadable by the native shortcut loader"
+        $replacementHash = (Get-FileHash -LiteralPath $path).Hash
+        $failure = $null
+        try { Update-Shortcut $path $operation $record } catch { $failure = $_ }
+        Check ((Get-FileHash -LiteralPath $path).Hash -eq $replacementHash) "$operation preserves different-identity unreadable replacement bytes"
+        Check ($failure -and $failure.Exception.Message -like '*ownership*') "$operation refuses recovery when replacement ownership cannot be validated"
+        Check ((Get-FileHash -LiteralPath $manifestPath).Hash -eq $journalHash -and ($record | ConvertTo-Json -Compress) -ceq $recordJson) "$operation refusal retains the journal and in-memory recovery record"
+        Check ((Get-FileHash -LiteralPath $backupPath).Hash -eq $backupHash -and (Get-Item -LiteralPath $backupPath).LastWriteTimeUtc -eq $backupWritten) "$operation refusal retains the original backup without rewriting it"
+        [IO.File]::Delete($path)
+        [IO.File]::Move($moved, $path)
+        Check ($appliedBytes.Length -gt $originalBytes.Length) "$operation partial-write fixture has an original tail"
+        # Tear a real in-place shortcut write at a native structure boundary.
+        for ($prefixLength = 76; $prefixLength -lt $originalBytes.Length; $prefixLength += 8) {
+            [IO.File]::WriteAllBytes($path, $originalBytes)
+            $stream = [IO.File]::Open($path, 'Open', 'Write', 'None')
+            try { $stream.Write($appliedBytes, 0, $prefixLength); $stream.Flush($true) } finally { $stream.Dispose() }
+            if (![ShortcutFile]::IsReadableShortcut($path)) { break }
+        }
+        $lease = Open-ShortcutFile $path
+        try { Check ($lease.Identity -eq $record.FileId) "$operation partial write retains the recorded file identity" } finally { $lease.Dispose() }
+        Check ((Get-Item -LiteralPath $path).Length -eq $originalBytes.Length -and ![ShortcutFile]::IsReadableShortcut($path)) "$operation partial in-place write is unreadable"
+        $partialHash = (Get-FileHash -LiteralPath $path).Hash
+        $legacyRecord = [pscustomobject]@{ Path = $path; Backup = $record.Backup; Arguments = ''; AppliedHash = $record.AppliedHash }
+        Reject { Update-Shortcut $path $operation $legacyRecord } "$operation refuses unreadable legacy recovery without a recorded identity"
+        Check ((Get-FileHash -LiteralPath $path).Hash -eq $partialHash -and (Get-FileHash -LiteralPath $manifestPath).Hash -eq $journalHash -and (Get-FileHash -LiteralPath $backupPath).Hash -eq $backupHash) "$operation missing-identity refusal preserves shortcut and recovery data"
+        Update-Shortcut $path $operation $record
+        if ($operation -eq 'Remove') {
+            Check ((Get-FileHash -LiteralPath $path).Hash -eq $backupHash) 'removal recovers a same-identity partial write byte-for-byte'
+        } else {
+            Check ([ShortcutFile]::IsReadableShortcut($path) -and $shell.CreateShortcut($path).TargetPath -eq $installed) "$operation recovers a same-identity partial write to the addon target"
+        }
+        Check ((Get-FileHash -LiteralPath $backupPath).Hash -eq $backupHash -and (Get-Item -LiteralPath $backupPath).LastWriteTimeUtc -eq $backupWritten) "$operation partial-write recovery preserves the original backup"
+    }
 } finally {
     [ShortcutRaceProbe]::BeforeLeaf = $null
     if ($journalLock) { $journalLock.Dispose() }

@@ -76,6 +76,7 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
         if ($broken) {
             if (!$Record) { return }
             if ($Operation -eq 'Remove' -and $Path -ne $Record.Path) { throw "Renamed shortcut is unreadable; ownership cannot be validated; files preserved: $Path" }
+            if (!$Record.FileId -or $Record.FileId -ne $file.Identity) { throw "Unreadable shortcut ownership cannot be validated; files preserved: $Path" }
             if (!$Record.Backup) { throw "Broken journal-owned shortcut has no restoration backup; files preserved: $Path" }
             $bytes = Read-ShortcutBytes (Join-Path $state $Record.Backup)
             Write-ShortcutBytes $scratch $bytes
