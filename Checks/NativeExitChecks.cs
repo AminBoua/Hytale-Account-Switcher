@@ -47,7 +47,7 @@ internal static class NativeExitChecks
                 check(File.ReadAllText(Path.Combine(root, "account.dat")) == (failure == "pending-login" ? "opaque-accountB" : "opaque-current") &&
                     File.ReadAllText(Path.Combine(root, "Accounts", "run", "hytale-launcher.exe")) == "generated runtime fixture" &&
                     File.ReadAllText(Directory.GetFiles(Path.Combine(root, "Accounts"), "account.dat", SearchOption.AllDirectories).Single()) ==
-                        (failure is "snapshot" or "pending-login" or "pending-logout" ? "opaque-saved" : "opaque-current"), "shutdown preserves pending snapshots and captures refreshed sessions otherwise: " + failure);
+                        (failure is "snapshot" or "pending-login" or "pending-session" or "pending-logout" ? "opaque-saved" : "opaque-current"), "shutdown preserves pending snapshots and captures refreshed sessions otherwise: " + failure);
                 if (failure == "pending-login")
                 {
                     check(File.ReadAllBytes(Path.Combine(root, "Accounts", "native-stores.json")).SequenceEqual(metadata) &&
@@ -166,7 +166,7 @@ internal static class NativeExitChecks
                 Task transition = Task.CompletedTask;
                 session.Closed += () =>
                 {
-                    if (!transition.IsCompletedSuccessfully || Get(session, "busy") is not false || Get(session, "holdLogin") is not false ||
+                    if (!transition.IsCompletedSuccessfully || Get(session, "busy") is not false || Get(session, "holdLogin") is not false || Get(session, "verifiedSession") is not false ||
                         Get(session, "sessionResult") is not null || Get(session, "logoutResult") is not null || requests.Count != 1)
                         throw new Exception("Exit did not finish the pending transition or sent a recovery command.");
                     var rejected = Invoke(session, "NativeAction", "run");
