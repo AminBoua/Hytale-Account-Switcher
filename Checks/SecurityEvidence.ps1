@@ -21,7 +21,9 @@ function Get-SecuritySource([string]$Repository) {
         $process.WaitForExit()
         if ($process.ExitCode) { throw 'Cannot enumerate security-sensitive source.' }
     } finally { $reader.Dispose(); $process.Dispose() }
-    $files = @($paths | Sort-Object -Unique | Where-Object {
+    # Culture-aware sorting can collapse distinct filenames, including a leading U+FEFF.
+    $paths = [Collections.Generic.SortedSet[string]]::new([string[]]$paths, [StringComparer]::Ordinal)
+    $files = @($paths | Where-Object {
         ($_ -match '^(Launcher|Checks)/' -and $_ -notmatch '\.md$') -or
         ($_ -notmatch '/' -and $_ -match '\.(ps1|cs|props|targets|sln|slnx)$') -or
         $_ -match '(^|/)(global\.json|NuGet\.Config|Directory\.Build\.(props|targets))$' -or $_ -match '^\.github/workflows/'
