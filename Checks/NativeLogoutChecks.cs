@@ -142,6 +142,8 @@ internal static class NativeLogoutChecks
                     {
                         foreach (var scenario in new[] { "transient", "persistent", "failed" })
                             await Confirmation(Path.Combine(root, "confirmation-" + scenario), dispatcher, scenario, check);
+                        foreach (var failure in new[] { "stop", "clear", "run", "authenticated refresh" })
+                            await ConfirmedRecoveryFence(Path.Combine(root, "confirmed-recovery-" + failure), dispatcher, failure, check);
                         foreach (var mismatch in new[] { false, true })
                             foreach (var scenario in new[] { "switch", "failed rollback", "failed precheck rollback", "deadline rollback", "logout" })
                                 await ResumeRecovery(Path.Combine(root, $"resume-{mismatch}-{scenario}"), dispatcher, mismatch, scenario, check);
@@ -243,6 +245,122 @@ internal static class NativeLogoutChecks
         }
         check(new[] { fallback, unrelated }.All(s => File.ReadAllBytes(Snapshot(s)).SequenceEqual(snapshots[s.Folder])),
             scenario + " leaves unrelated saved snapshots intact");
+    }
+
+    private static async Task ConfirmedRecoveryFence(string root, Dispatcher dispatcher, string failure, Action<bool, string> check)
+    {
+        var stores = new NativeStores(root);
+        var native = Path.Combine(root, "account.dat");
+        NativeStore Account(string label)
+        {
+            var store = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), label);
+            File.WriteAllText(native, label); stores.Capture(store);
+            return store;
+        }
+        var accountB = Account("accountB");
+        var unrelated = Account("unrelated");
+        stores.MarkSignedOut(unrelated);
+        var accountA = Account("accountA");
+        stores.Activate(accountA); stores.Select(accountA);
+        string Snapshot(NativeStore store) => Path.Combine(stores.Folder(store.Folder), "AppData", "Hytale", "account.dat");
+        var snapshots = new[] { accountB, unrelated }.ToDictionary(s => s.Folder, s => File.ReadAllBytes(Snapshot(s)));
+        using var owner = Process.GetCurrentProcess();
+        var window = owner.MainWindowHandle;
+        var session = new NativeSession(stores, dispatcher);
+        const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        object? Get(string name) => typeof(NativeSession).GetField(name, flags)!.GetValue(session);
+        void Set(string name, object value) => typeof(NativeSession).GetField(name, flags)!.SetValue(session, value);
+        Task Invoke(string name, params object[] args) => (Task)typeof(NativeSession).GetMethod(name, flags)!.Invoke(session, args)!;
+        var signal = new TaskCompletionSource<Guid?>();
+        Set("launcher", owner); Set("active", accountA); Set("verifiedSession", true); Set("ready", signal);
+        Task<bool> Command(object data) => (Task<bool>)typeof(NativeSession).GetMethod("Command", flags)!
+            .Invoke(session, [JsonSerializer.SerializeToElement(data), signal])!;
+        Guid? resident = accountA.Profile;
+        var requests = new Dictionary<string, string>();
+        var operations = new List<string>();
+        var revoked = new List<Guid?>();
+        var failRecovery = true;
+        var status = "";
+        session.Status += text =>
+        {
+            status = text;
+            if (Get("logoutRequest") is string logout && requests.TryAdd(logout, "logout"))
+            {
+                revoked.Add(resident); resident = null; File.Delete(native);
+                ((TaskCompletionSource<bool>)Get("logoutResult")!).TrySetResult(true);
+            }
+            if (Get("sessionRequest") is not string request || !requests.TryAdd(request, (string)Get("sessionOperation")!)) return;
+            var operation = requests[request]; operations.Add(operation);
+            if (operation == "load")
+            {
+                // Native load can replace the resident session before reporting failure.
+                resident = accountB.Profile;
+                if (!failRecovery) File.WriteAllText(native, "accountB-refreshed");
+            }
+            if (operation == "clear" && (!failRecovery || failure != "clear")) resident = null;
+            if (failRecovery && operation == "run" && failure == "authenticated refresh")
+            {
+                resident = accountB.Profile; File.WriteAllText(native, "accountB");
+            }
+            var success = !failRecovery || operation switch
+            {
+                "load" => false,
+                "stop" => failure != "stop" || !operations.Contains("load"),
+                "clear" => failure != "clear",
+                "run" => failure != "run",
+                _ => true
+            };
+            ((TaskCompletionSource<JsonElement>)Get("sessionResult")!).TrySetResult(JsonSerializer.SerializeToElement(new
+                { success, profile = resident?.ToString(), loggedIn = resident is not null }));
+        };
+        var label = "confirmed logout with failed load and sign-in " + failure;
+        await Invoke("LogoutCore", accountA);
+        check(Get("holdLogin") is true && Get("verifiedSession") is false && Get("busy") is false &&
+            stores.Catalog.Selected is null && stores.Catalog.Stores.Single(s => s.Folder == accountA.Folder).SignedOut &&
+            status.Contains("Native logout succeeded, but account recovery did not complete.") && operations.Contains("load"),
+            label + " keeps the recovery fence and Play block after revocation succeeds");
+        var saved = stores.Catalog.Stores.ToArray();
+        var metadata = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
+        var active = Get("active");
+        foreach (var profile in new[] { accountA.Profile, accountB.Profile })
+            check(!await Command(new { action = "ready", profile, username = "cached" }),
+                label + " rejects cached authenticated readiness before signed-out refresh");
+        foreach (var request in requests)
+            check(!await Command(new { action = request.Value == "logout" ? "logout-result" : "session-result", request = request.Key,
+                success = true, loggedIn = true, profile = accountA.Profile }),
+                label + " rejects late completion of " + request.Value);
+        check(await Command(new { action = "ready", profile = (Guid?)null }) &&
+            !await Command(new { action = "ready", profile = accountA.Profile }) &&
+            Get("holdLogin") is true && Get("verifiedSession") is false && ReferenceEquals(Get("active"), active) &&
+            stores.Catalog.Stores.SequenceEqual(saved) && File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(metadata) &&
+            snapshots.All(s => File.ReadAllBytes(Snapshot(saved.Single(a => a.Folder == s.Key))).SequenceEqual(s.Value)) &&
+            !File.Exists(Snapshot(accountA)) && !await session.AddAccount(),
+            label + " fences late readiness after signed-out UI reports without capturing B into A or changing unrelated snapshots");
+        failRecovery = false;
+        if (failure == "stop")
+        {
+            await session.Open(accountB, true);
+            check(Get("holdLogin") is false && Get("verifiedSession") is true && stores.Catalog.Selected == accountB.Folder &&
+                resident == accountB.Profile && File.ReadAllText(Snapshot(accountB)) == "accountB-refreshed" && !File.Exists(Snapshot(accountA)),
+                label + " releases the fence after retry verifies and captures only the expected account");
+        }
+        else
+        {
+            await Invoke("ShowSignIn");
+            check(Get("holdLogin") is false && Get("verifiedSession") is false && resident is null &&
+                Get("active") is NativeStore pending && stores.IsPending(pending) && operations.Last() == "run" &&
+                await Command(new { action = "ready", profile = (Guid?)null }),
+                label + " releases the fence only after a successful signed-out UI refresh");
+            var signedIn = Guid.NewGuid(); File.WriteAllText(native, "new-native-session");
+            check(await Command(new { action = "ready", profile = signedIn, username = "new account" }) &&
+                Get("verifiedSession") is true && stores.Catalog.Stores.Single(s => s.Folder == stores.Catalog.Selected).Profile == signedIn &&
+                !File.Exists(Snapshot(accountA)) && File.ReadAllBytes(Snapshot(accountB)).SequenceEqual(snapshots[accountB.Folder]),
+                label + " accepts subsequent native authentication without reusing a saved account's snapshot");
+        }
+        check(ReferenceEquals(Get("launcher"), owner) && session.IsOpen && owner.MainWindowHandle == window &&
+            ReferenceEquals(Get("ready"), signal) && revoked.SequenceEqual(new[] { accountA.Profile }) &&
+            File.ReadAllBytes(Snapshot(unrelated)).SequenceEqual(snapshots[unrelated.Folder]),
+            label + " retains the launcher process, window and unrelated snapshot without repeating logout");
     }
 
     private static async Task ResumeRecovery(string root, Dispatcher dispatcher, bool mismatch, string scenario, Action<bool, string> check)
