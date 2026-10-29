@@ -13,13 +13,14 @@ function Get-SecuritySource([string]$Repository) {
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
-    $start.StandardOutputEncoding = [Text.Encoding]::UTF8
     $process = [Diagnostics.Process]::Start($start)
+    # A leading U+FEFF belongs to the filename; disable both UTF-8 preamble stripping and BOM detection.
+    $reader = [IO.StreamReader]::new($process.StandardOutput.BaseStream, [Text.UTF8Encoding]::new($false), $false)
     try {
-        $paths = $process.StandardOutput.ReadToEnd().Split([char[]]@([char]0), [StringSplitOptions]::RemoveEmptyEntries)
+        $paths = $reader.ReadToEnd().Split([char[]]@([char]0), [StringSplitOptions]::RemoveEmptyEntries)
         $process.WaitForExit()
         if ($process.ExitCode) { throw 'Cannot enumerate security-sensitive source.' }
-    } finally { $process.Dispose() }
+    } finally { $reader.Dispose(); $process.Dispose() }
     $files = @($paths | Sort-Object -Unique | Where-Object {
         ($_ -match '^(Launcher|Checks)/' -and $_ -notmatch '\.md$') -or
         ($_ -notmatch '/' -and $_ -match '\.(ps1|cs|props|targets|sln|slnx)$') -or
