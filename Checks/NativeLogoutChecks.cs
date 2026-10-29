@@ -139,8 +139,13 @@ internal static class NativeLogoutChecks
                         foreach (var metadata in new[] { false, true })
                             await StorageRecovery(Path.Combine(root, $"storage-{fallback}-{metadata}"), dispatcher, fallback, metadata, check);
                     if (!lockSnapshot)
+                    {
                         foreach (var scenario in new[] { "transient", "persistent", "failed" })
                             await Confirmation(Path.Combine(root, "confirmation-" + scenario), dispatcher, scenario, check);
+                        foreach (var mismatch in new[] { false, true })
+                            foreach (var scenario in new[] { "switch", "failed rollback", "logout" })
+                                await ResumeRecovery(Path.Combine(root, $"resume-{mismatch}-{scenario}"), dispatcher, mismatch, scenario, check);
+                    }
                     complete.TrySetResult();
                 }
                 catch (Exception ex) { complete.TrySetException(ex); }
@@ -238,6 +243,102 @@ internal static class NativeLogoutChecks
         }
         check(new[] { fallback, unrelated }.All(s => File.ReadAllBytes(Snapshot(s)).SequenceEqual(snapshots[s.Folder])),
             scenario + " leaves unrelated saved snapshots intact");
+    }
+
+    private static async Task ResumeRecovery(string root, Dispatcher dispatcher, bool mismatch, string scenario, Action<bool, string> check)
+    {
+        var stores = new NativeStores(root);
+        var native = Path.Combine(root, "account.dat");
+        NativeStore Account(string label)
+        {
+            var store = stores.CommitPending(stores.CreatePending(), Guid.NewGuid(), label);
+            File.WriteAllText(native, label); stores.Capture(store);
+            return store;
+        }
+        var accountB = Account("accountB");
+        var accountC = Account("accountC");
+        var accountA = Account("accountA");
+        stores.Activate(accountA); stores.Select(accountA);
+        string Snapshot(NativeStore store) => Path.Combine(stores.Folder(store.Folder), "AppData", "Hytale", "account.dat");
+        var session = new NativeSession(stores, dispatcher);
+        using var owner = Process.GetCurrentProcess();
+        var window = owner.MainWindowHandle;
+        const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        object? Get(string name) => typeof(NativeSession).GetField(name, flags)!.GetValue(session);
+        void Set(string name, object value) => typeof(NativeSession).GetField(name, flags)!.SetValue(session, value);
+        Task Invoke(string name, params object[] args) => (Task)typeof(NativeSession).GetMethod(name, flags)!.Invoke(session, args)!;
+        Set("launcher", owner); Set("active", accountA); Set("verifiedSession", true);
+        var signal = new TaskCompletionSource<Guid?>(); Set("ready", signal);
+        Guid? resident = accountA.Profile;
+        NativeStore? loaded = null;
+        var handled = new HashSet<string>();
+        var loads = new List<string>();
+        var revoked = new List<Guid?>();
+        var rejectResume = true;
+        var unverified = true;
+        var deferredSelection = true;
+        var deferredSnapshot = true;
+        var signIn = false;
+        session.Status += _ =>
+        {
+            if (Get("logoutRequest") is string logout && handled.Add(logout))
+            {
+                revoked.Add(resident); resident = null; File.Delete(native);
+                ((TaskCompletionSource<bool>)Get("logoutResult")!).TrySetResult(true);
+            }
+            if (Get("sessionRequest") is not string request || !handled.Add(request)) return;
+            var operation = (string)Get("sessionOperation")!;
+            if (operation == "load")
+            {
+                loaded = stores.Catalog.Stores.Single(s => s.Label == File.ReadAllText(native));
+                loads.Add(loaded.Folder); resident = loaded.Profile;
+                File.WriteAllText(native, loaded.Label + "-refreshed");
+            }
+            if (operation == "run")
+            {
+                unverified &= Get("verifiedSession") is false && Get("busy") is true && Get("holdLogin") is true;
+                var expectedSelection = scenario == "logout" ? null : accountA.Folder;
+                deferredSelection &= stores.Catalog.Selected == expectedSelection && new NativeStores(root).Catalog.Selected == expectedSelection;
+                deferredSnapshot &= loaded is not null && File.ReadAllText(Snapshot(loaded)) == loaded.Label;
+                if (rejectResume && (loaded?.Folder == accountB.Folder || scenario == "failed rollback" && loaded?.Folder == accountA.Folder))
+                {
+                    // Native load succeeded, but resume lost authentication or changed identity and storage.
+                    resident = mismatch ? accountC.Profile : null;
+                    if (mismatch) File.WriteAllText(native, accountC.Label); else File.Delete(native);
+                }
+            }
+            if (operation == "clear") { signIn = true; resident = null; }
+            ((TaskCompletionSource<JsonElement>)Get("sessionResult")!).TrySetResult(JsonSerializer.SerializeToElement(new
+                { success = true, profile = resident?.ToString(), loggedIn = resident is not null, username = loaded?.Label }));
+        };
+        var label = scenario + (mismatch ? " with mismatched resume" : " with signed-out resume");
+        if (scenario == "logout") await Invoke("LogoutCore", accountA);
+        else await session.Open(accountB, true);
+        check(unverified && deferredSelection && deferredSnapshot,
+            label + " blocks Play and defers selection and snapshot capture until resume verifies the expected profile");
+        check(loads.SequenceEqual(new[] { accountB.Folder, scenario == "logout" ? accountC.Folder : accountA.Folder }) && !signIn,
+            label + " rejects a successful but unusable resume and attempts the next saved session");
+        check(File.ReadAllText(Snapshot(accountB)) == "accountB" && revoked.SequenceEqual(scenario == "logout" ? new[] { accountA.Profile } : Array.Empty<Guid?>()),
+            label + " preserves the rejected account snapshot and revokes only the requested logout account");
+        if (scenario == "failed rollback")
+        {
+            check(Get("verifiedSession") is false && stores.Catalog.Selected == accountA.Folder &&
+                File.ReadAllText(Snapshot(accountA)) == "accountA" && File.ReadAllText(Snapshot(accountC)) == "accountC" &&
+                ((string)Get("message")!).Contains("Native recovery failed:"),
+                label + " keeps Play blocked and snapshots unchanged when rollback also fails verification");
+            rejectResume = false;
+            await session.Open(accountC, true);
+            check(File.ReadAllText(Snapshot(accountA)) == "accountA" && File.ReadAllText(Snapshot(accountB)) == "accountB",
+                label + " never captures another account's resident session into a failed recovery snapshot");
+        }
+        var expected = scenario == "switch" ? accountA : accountC;
+        check(resident == expected.Profile && Get("verifiedSession") is true && Get("active") is NativeStore active && active.Folder == expected.Folder &&
+            stores.Catalog.Selected == expected.Folder && stores.Catalog.Active == expected.Folder &&
+            File.ReadAllText(native) == expected.Label + "-refreshed" && File.ReadAllText(Snapshot(expected)) == expected.Label + "-refreshed",
+            label + " commits only the verified resumed account and its refreshed snapshot");
+        check(ReferenceEquals(Get("launcher"), owner) && session.IsOpen && owner.MainWindowHandle == window &&
+            ReferenceEquals(Get("ready"), signal) && Get("busy") is false && Get("holdLogin") is false,
+            label + " preserves the existing process, window and bridge without browser authentication");
     }
 
     private static async Task StorageRecovery(string root, Dispatcher dispatcher, bool fallback, bool metadata, Action<bool, string> check)

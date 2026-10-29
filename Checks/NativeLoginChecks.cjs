@@ -329,6 +329,9 @@ vm.runInNewContext(source, {
   const beforeSignedOutRun = nativeActions.length;
   state.session = { request: 'signed-out-ui', operation: 'run' };
   await tick();
+  assert.equal(calls.at(-1).success, true, 'signed-out resume remains a valid sign-in UI refresh');
+  assert.equal(calls.at(-1).loggedIn, false); assert.equal(calls.at(-1).profile, null);
+  assert(playBlocked(), 'signed-out resume cannot enable Play');
   assert.equal(nativeActions.length, beforeSignedOutRun, 'sign-in refresh never starts account background tasks');
   assert.equal(user.getUserProfile, null, 'native sign-in clears the existing frontend profile');
   assert.equal(nativeLogouts, 1, 'clearing cached state never logs out a fallback account');
