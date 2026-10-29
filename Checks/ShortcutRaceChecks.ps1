@@ -148,6 +148,20 @@ try {
     Check ($restored.TargetPath -eq $official -and $restored.Description -eq 'User changed description only') 'removal preserves edited metadata while restoring a working official target'
     OfficialLink; Update-Shortcut $path Install $record
     $applied = [IO.File]::ReadAllBytes($path)
+    $copy = Join-Path $folder 'Replacement.lnk'
+    [IO.File]::Copy($path, $copy)
+    Update-Shortcut $copy Remove $null
+    Check ((Get-ShortcutHash (Read-ShortcutBytes $copy)) -eq $record.AppliedHash) 'unique unchanged bytes cannot override a different recorded file identity'
+    $identity = $record.FileId; $record.FileId = ''
+    $link = $shell.CreateShortcut($copy); $link.Description = 'Unsupported legacy edit'; $link.Save()
+    $legacyHash = (Get-FileHash -LiteralPath $copy).Hash
+    Update-Shortcut $copy Remove $null
+    Check ((Get-FileHash -LiteralPath $copy).Hash -eq $legacyHash) 'renamed legacy metadata edits remain untouched without a recorded file identity'
+    [IO.File]::WriteAllBytes($copy, $applied)
+    Update-Shortcut $copy Remove $null
+    Check ($shell.CreateShortcut($copy).TargetPath -eq $official) 'unique unchanged legacy shortcut still restores without a recorded file identity'
+    $record.FileId = $identity
+    [IO.File]::Delete($copy)
     $twin = Join-Path $folder 'Twin.lnk'
     $link = $shell.CreateShortcut($twin); $link.TargetPath = $official; $link.Description = 'Different original metadata'; $link.Save()
     Update-Shortcut $twin Install $null
@@ -164,10 +178,24 @@ try {
         if ($opened -ne $renamed) { return }
         $script:beforeOpen = $null
         $link = $shell.CreateShortcut($renamed); $link.Description = 'Changed after discovery'; $link.Save()
-        $script:racingHash = (Get-FileHash -LiteralPath $renamed).Hash
     }
     Update-Shortcut $renamed Remove $null
-    Check ((Get-FileHash -LiteralPath $renamed).Hash -eq $script:racingHash) 'renamed shortcut changed before acquisition is preserved'
+    $restored = $shell.CreateShortcut($renamed)
+    Check ($restored.TargetPath -eq $official -and !$restored.Arguments -and $restored.Description -eq 'Changed after discovery') 'renamed metadata edit before acquisition restores the validated target and retains the edit'
+    foreach ($foreign in @('target','arguments')) {
+        [IO.File]::WriteAllBytes($renamed, $applied)
+        $link = $shell.CreateShortcut($renamed)
+        if ($foreign -eq 'target') { $link.TargetPath = Join-Path $root 'foreign.exe' } else { $link.Arguments = '--foreign' }
+        $link.Save()
+        $foreignHash = (Get-FileHash -LiteralPath $renamed).Hash
+        Update-Shortcut $renamed Remove $null
+        Check ((Get-FileHash -LiteralPath $renamed).Hash -eq $foreignHash) "renamed identity match with foreign $foreign remains untouched"
+    }
+    [IO.File]::WriteAllBytes($renamed, $applied)
+    $twinIdentity = $twinRecord.FileId; $twinRecord.FileId = $record.FileId
+    Update-Shortcut $renamed Remove $null
+    Check ((Get-ShortcutHash (Read-ShortcutBytes $renamed)) -eq $record.AppliedHash) 'ambiguous recorded file identities remain untouched'
+    $twinRecord.FileId = $twinIdentity
     [IO.File]::WriteAllBytes($renamed, $applied)
     $identity = $record.FileId; $record.FileId = ''
     Update-Shortcut $renamed Remove $null
@@ -176,7 +204,7 @@ try {
     $script:afterOpen = {
         param($opened,$create,$lease)
         if ($opened -ne $renamed) { return }
-        Reject { [IO.File]::WriteAllText($renamed, 'racing user edit') } 'renamed shortcut hash and restoration hold the same file'
+        Reject { [IO.File]::WriteAllText($renamed, 'racing user edit') } 'renamed shortcut identity, inspection and restoration hold the same file'
         Reject { [IO.Directory]::Move($folder, $folder + '-moved') } 'renamed shortcut restoration pins its directory'
     }
     Update-Shortcut $renamed Remove $null

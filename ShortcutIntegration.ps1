@@ -59,11 +59,15 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
         }
         $bytes = $file.Read()
         if ($Operation -eq 'Remove' -and !$Record) {
-            # Identify renamed links only by unchanged bytes held through restoration.
-            $hash = Get-ShortcutHash $bytes
-            $matches = @($records | Where-Object { $_.AppliedHash -and $_.AppliedHash -eq $hash })
-            # Renames keep file identity even when different originals produced identical addon links.
-            if ($matches.Count -gt 1) { $matches = @($matches | Where-Object { $_.FileId -and $_.FileId -eq $file.Identity }) }
+            # Renames retain identity through metadata edits; inspect and restore through this same handle.
+            $identity = $file.Identity
+            $matches = @($records | Where-Object { $_.FileId -and $_.FileId -eq $identity })
+            if (!$matches.Count) {
+                $hash = Get-ShortcutHash $bytes
+                $matches = @($records | Where-Object { $_.AppliedHash -and $_.AppliedHash -eq $hash })
+                # Legacy discovery requires unique unchanged bytes; a different recorded identity is a replacement.
+                if ($matches.Count -ne 1 -or $matches[0].FileId) { return }
+            }
             if ($matches.Count -ne 1) { return }
             $Record = $matches[0]
         }
@@ -71,6 +75,7 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
         $broken = ![ShortcutFile]::IsReadableShortcut($scratch)
         if ($broken) {
             if (!$Record) { return }
+            if ($Operation -eq 'Remove' -and $Path -ne $Record.Path) { throw "Renamed shortcut is unreadable; ownership cannot be validated; files preserved: $Path" }
             if (!$Record.Backup) { throw "Broken journal-owned shortcut has no restoration backup; files preserved: $Path" }
             $bytes = Read-ShortcutBytes (Join-Path $state $Record.Backup)
             Write-ShortcutBytes $scratch $bytes

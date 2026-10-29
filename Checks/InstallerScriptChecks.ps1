@@ -567,7 +567,7 @@ try {
     Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) 'opaque stores, encryption keys, installation and UserData preserved'
     $restorationCases = @()
     foreach ($folder in @($programs,$commonPrograms)) {
-        foreach ($scenario in @('renamed','deleted','unchanged','replaced')) {
+        foreach ($scenario in @('renamed','renamed-description','renamed-icon','deleted','unchanged','replaced')) {
             $path = Join-Path $folder ($scenario + '.lnk')
             $previous = $shell.CreateShortcut($path); $previous.TargetPath = $official
             $previous.Description = "$folder $scenario"; $previous.Save()
@@ -577,9 +577,15 @@ try {
     & (Join-Path $package 'Install.ps1') @options
     & (Join-Path $package 'Install.ps1') @options -UserOnly
     foreach ($case in $restorationCases) {
-        if ($case.Scenario -in @('renamed','replaced')) {
+        if ($case.Scenario -like 'renamed*' -or $case.Scenario -eq 'replaced') {
             $case.Current = Join-Path (Split-Path $case.Path) ('moved-' + (Split-Path $case.Path -Leaf))
             [IO.File]::Move($case.Path, $case.Current)
+        }
+        if ($case.Scenario -eq 'renamed-description') {
+            $edited = $shell.CreateShortcut($case.Current); $edited.Description = 'User description after rename'; $edited.Save()
+        }
+        if ($case.Scenario -eq 'renamed-icon') {
+            $edited = $shell.CreateShortcut($case.Current); $edited.IconLocation = (Join-Path $root 'custom.ico') + ',3'; $edited.Save()
         }
         if ($case.Scenario -eq 'deleted') { [IO.File]::Delete($case.Path) }
         if ($case.Scenario -eq 'replaced') {
@@ -588,15 +594,40 @@ try {
         }
     }
     $beforeRemoval = (@($programs,$desktop,$commonPrograms,$commonDesktop) | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -Recurse | ForEach-Object FullName } | Sort-Object) -join "`n"
+    foreach ($folder in @($programs,$commonPrograms)) {
+        $case = $restorationCases | Where-Object { $_.Scenario -eq 'renamed-description' -and (Split-Path $_.Path) -eq $folder }
+        $fixtureState = if ($folder -eq $programs) { $userState } else { $destination }
+        $manifest = Join-Path $fixtureState 'shortcuts.json'
+        $journal = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+        $record = $journal.Shortcuts | Where-Object Path -eq $case.Path
+        $backup = Join-Path $fixtureState $record.Backup
+        $manifestHash = (Get-FileHash -LiteralPath $manifest).Hash; $backupHash = (Get-FileHash -LiteralPath $backup).Hash
+        $editedBytes = [IO.File]::ReadAllBytes($case.Current)
+        $editedHash = (Get-FileHash -LiteralPath $case.Current).Hash
+        $held = [ShortcutFile]::new($case.Current, $false)
+        try { Check ($held.Identity -eq $record.FileId -and $editedHash -ne $record.AppliedHash.Replace('-','')) 'renamed description fixture retains identity while changing its applied hash' } finally { $held.Dispose() }
+        [IO.File]::WriteAllBytes($case.Current, [byte[]]@(1,2,3))
+        $failure = $null
+        try { & (Join-Path $package 'Uninstall.ps1') @options -UserOnly:($folder -eq $programs) } catch { $failure = $_ }
+        Check ($failure -and $failure.Exception.Message -like '*ownership cannot be validated*') 'uninstall refuses unreadable renamed identity matches without target validation'
+        Check ((Get-FileHash -LiteralPath $manifest).Hash -eq $manifestHash -and (Get-FileHash -LiteralPath $backup).Hash -eq $backupHash -and (Test-Path -LiteralPath (Join-Path $destination 'HytaleAccounts.exe'))) 'incomplete renamed restoration retains its journal, backup and helper for retry'
+        Check ([BitConverter]::ToString([IO.File]::ReadAllBytes($case.Current)) -eq '01-02-03') 'unreadable renamed shortcut remains untouched'
+        [IO.File]::WriteAllBytes($case.Current, $editedBytes)
+    }
     & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
     & (Join-Path $package 'Uninstall.ps1') @options
     foreach ($case in $restorationCases) {
         if ($case.Scenario -eq 'deleted') {
             Check (!(Test-Path -LiteralPath $case.Path)) 'uninstall does not recreate a deleted shortcut'
+        } elseif ($case.Scenario -in @('renamed-description','renamed-icon')) {
+            $restored = $shell.CreateShortcut($case.Current)
+            Check ($restored.TargetPath -eq $official -and !$restored.Arguments -and (Test-Path -LiteralPath $restored.TargetPath)) "uninstall restores a working target for $($case.Scenario) in $(Split-Path $case.Path)"
+            if ($case.Scenario -eq 'renamed-description') { Check ($restored.Description -eq 'User description after rename') 'uninstall retains the renamed shortcut description edit' }
+            if ($case.Scenario -eq 'renamed-icon') { Check ($restored.IconLocation -eq ((Join-Path $root 'custom.ico') + ',3')) 'uninstall retains the renamed shortcut icon edit' }
         } else {
             Check ((Get-FileHash -LiteralPath $case.Current).Hash -eq $case.Hash) "uninstall restores $($case.Scenario) shortcut byte-for-byte at its current location"
         }
-        if ($case.Scenario -eq 'renamed') { Check (!(Test-Path -LiteralPath $case.Path)) 'renamed shortcut does not reappear under its original name' }
+        if ($case.Scenario -like 'renamed*') { Check (!(Test-Path -LiteralPath $case.Path)) 'renamed shortcut does not reappear under its original name' }
         if ($case.Scenario -eq 'replaced') { Check ((Get-FileHash -LiteralPath $case.Path).Hash -eq $case.ForeignHash) 'unrelated replacement at the original path is preserved' }
     }
     $afterRemoval = (@($programs,$desktop,$commonPrograms,$commonDesktop) | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -Recurse | ForEach-Object FullName } | Sort-Object) -join "`n"
