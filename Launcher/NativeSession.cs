@@ -221,15 +221,18 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             throw new IOException("Saved account is signed out. Add it again to sign in.");
         await NativeAction("stop");
         if (active is not null && verifiedSession) stores.Capture(active);
-        stores.ActivatePaused(store, launcher!);
         verifiedSession = false;
+        stores.ActivatePaused(store, launcher!);
         var result = await NativeAction("load");
         if (!result.TryGetProperty("profile", out var profile) || !Guid.TryParse(profile.GetString(), out var uuid) || uuid != store.Profile)
             throw new IOException("Native profile does not match the selected account.");
+        result = await NativeAction("run");
+        if (!result.TryGetProperty("loggedIn", out var loggedIn) || loggedIn.ValueKind != JsonValueKind.True ||
+            !result.TryGetProperty("profile", out profile) || !Guid.TryParse(profile.GetString(), out uuid) || uuid != store.Profile)
+            throw new IOException("Native resume did not verify the selected account.");
         nativeName = result.TryGetProperty("username", out var name) ? name.GetString() : null;
         active = store;
         CommitProfile(uuid, commit);
-        await NativeAction("run");
     }
     private async Task ShowSignIn()
     {
