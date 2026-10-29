@@ -6,7 +6,7 @@ const calls = [], created = [], browserUrls = [], events = {}, nativeActions = [
 const deliveryFailures = new Map(), delivered = [];
 const timers = new Map();
 let timerId = 0, automaticSwitch = false, disconnected = false, loadGate, urlGate, commandGate, stateGate, refresh;
-let nativeGate, logoutGate, verificationGate, now = Date.now(), completed = false, reloads = 0;
+let nativeGate, nativeFailure, logoutGate, verificationGate, now = Date.now(), completed = false, reloads = 0;
 process.on('beforeExit', () => {
   if (!completed && !process.exitCode) {
     console.error('FAIL frontend checks did not finish (an unresolved promise cannot silently pass)');
@@ -43,6 +43,7 @@ const window = {
     CheckNetworkMode: async (automatic, source) => {
       nativeActions.push(source);
       await nativeGate;
+      if (source === nativeFailure) throw Error('native recovery failed');
       if (automatic) { assert.equal(source, 'hya:stop'); nativeProfile = null; }
       if (automaticSwitch && source === 'hya:load') nativeProfile = accountA;
     }
@@ -442,6 +443,50 @@ vm.runInNewContext(source, {
     verificationFailures = 0; logoutFailure = false; state.holdLogin = false;
   }
   assert.equal(browserUrls.length, browserCount, 'logout confirmation never opens an authentication browser');
+  {
+    timers.clear();
+    nativeProfile = user.getUserProfile = accountA;
+    state.active = state.selected = 'accountA'; state.profile = null;
+    state.busy = state.holdLogin = true; state.logout = 'confirmed-recovery-logout';
+    const beforeLogouts = nativeLogouts, beforeBrowsers = browserUrls.length;
+    await tick();
+    assert.equal(calls.at(-1).success, true, 'logout completes before recovery fails');
+    state.logout = null; state.selected = null; nativeProfile = accountB;
+    for (const operation of ['load', 'stop']) {
+      state.session = { request: 'failed-confirmed-recovery-' + operation, operation };
+      nativeFailure = 'hya:' + operation;
+      await tick();
+      assert.equal(calls.at(-1).success, false, 'failed recovery reports its native failure');
+    }
+    nativeFailure = null; state.session = null; state.busy = false;
+    for (const cached of [accountA, null, accountB, accountA]) {
+      user.getUserProfile = cached;
+      await tick();
+      assert(playBlocked(), 'confirmed logout recovery fence rejects cached or late frontend identity');
+      assert(Object.hasOwn(document.documentElement.attrs, 'data-account-transition'), 'failed recovery keeps native sign-in concealed');
+    }
+    state.session = { request: 'confirmed-recovery-run', operation: 'run' }; state.busy = true;
+    await tick();
+    assert.equal(calls.at(-1).profile, accountB.uuid, 'fresh recovery reports the actual native account');
+    state.session = null; state.busy = false; await tick();
+    assert(playBlocked(), 'frontend success waits for helper verification to release the fence');
+    state.holdLogin = false; state.active = state.selected = 'accountB'; state.profile = accountB.uuid;
+    await tick(); assert(!playBlocked(), 'verified saved-account recovery restores Play');
+    state.busy = state.holdLogin = true; state.profile = null; state.selected = null;
+    for (const operation of ['clear', 'run']) {
+      state.session = { request: 'confirmed-sign-in-' + operation, operation };
+      await tick();
+      assert.equal(calls.at(-1).success, true);
+      assert.equal(calls.at(-1).loggedIn, false, 'final-account sign-in accepts a signed-out UI refresh');
+    }
+    state.session = null; state.busy = state.holdLogin = false; state.active = 'pending-sign-in';
+    await tick();
+    assert(!Object.hasOwn(document.documentElement.attrs, 'data-account-transition'), 'completed signed-out refresh reveals native sign-in');
+    assert.equal(user.getUserProfile, null); assert(playBlocked(), 'sign-in remains signed out until authentication');
+    assert.equal(nativeLogouts, beforeLogouts + 1, 'recovery retries never repeat confirmed logout');
+    assert.equal(browserUrls.length, beforeBrowsers, 'recovery never starts browser authentication');
+  }
+  console.log('PASS confirmed logout recovery failures fence cached and late readiness and Play until verified recovery or signed-out UI refresh');
   state.active = state.selected = 'accountB'; state.profile = accountB.uuid;
   nativeProfile = user.getUserProfile = accountB;
   timers.clear(); await tick();

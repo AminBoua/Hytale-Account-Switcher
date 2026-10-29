@@ -248,7 +248,10 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             if (!result.TryGetProperty("loggedIn", out var loggedIn) || loggedIn.ValueKind != JsonValueKind.False)
                 throw new IOException("Native sign-out could not be verified.");
             active = pending;
-            await NativeAction("run");
+            result = await NativeAction("run");
+            if (!result.TryGetProperty("loggedIn", out loggedIn) || loggedIn.ValueKind != JsonValueKind.False)
+                throw new IOException("Native sign-in refresh could not be verified.");
+            holdLogin = false;
         }
         finally { if (active?.Folder != pending.Folder) stores.DiscardPending(pending); }
     }
@@ -356,7 +359,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             }
             catch (Exception recovery) { verifiedSession = false; message += " Native recovery failed: " + recovery.Message; }
         }
-        finally { logoutRequest = null; logoutResult = null; holdLogin = IsOpen && requested && !confirmed && !verifiedSession; busy = false; await Publish(); }
+        finally { logoutRequest = null; logoutResult = null; holdLogin = IsOpen && holdLogin && !verifiedSession; busy = false; await Publish(); }
     }
     private static void RequireNoGame()
     {
