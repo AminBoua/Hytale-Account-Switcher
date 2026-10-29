@@ -736,17 +736,29 @@ vm.runInNewContext(source, {
   {
     timers.clear();
     const browsers = browserUrls.length;
-    nativeProfile = user.getUserProfile = accountB;
+    const startupProfile = { ...accountB, uuid: 'replacement-startup-profile' };
+    nativeProfile = user.getUserProfile = startupProfile;
     state.active = state.selected = 'accountB'; state.profile = null;
+    state.signInRecovery = 'previous-sign-in-recovery';
     state.busy = state.holdLogin = true;
+    let beforeReady = calls.length;
     await tick(); assert(playBlocked(), 'existing recovery fence blocks Play during replacement startup');
-    state.profile = accountB.uuid; state.busy = state.holdLogin = false;
+    assert(calls.slice(beforeReady).some(call => call.action === 'ready' && call.profile === startupProfile.uuid),
+      'an old final-account recovery request cannot suppress replacement startup readiness');
+    assert(!calls.slice(beforeReady).some(call => call.action === 'retry-signin'), 'startup verification cannot overlap a sign-in retry');
+    state.signInRecovery = null; state.profile = startupProfile.uuid; state.busy = state.holdLogin = false;
     await tick(); assert(!playBlocked(), 'authenticated startup completion restores native Play');
     state.profile = null; state.busy = state.holdLogin = true;
+    state.signInRecovery = 'previous-sign-in-recovery';
     nativeProfile = user.getUserProfile = null;
     dropdown.remove(); play.remove(); body.append(login);
+    beforeReady = calls.length;
+    await tick(); now += 3000;
     await tick();
     assert(Object.hasOwn(document.documentElement.attrs, 'data-account-transition'), 'startup retains sign-in concealment until verification completes');
+    assert(calls.slice(beforeReady).some(call => call.action === 'ready' && call.profile === null),
+      'signed-out startup readiness reaches the helper while the previous recovery fence remains active');
+    state.signInRecovery = null;
     state.active = 'pending-startup-sign-in'; state.busy = state.holdLogin = false;
     await tick(); now += 3000; await tick();
     assert(!Object.hasOwn(document.documentElement.attrs, 'data-account-transition'), 'signed-out startup completion reveals native sign-in');
@@ -762,6 +774,7 @@ vm.runInNewContext(source, {
     assert.equal(browserUrls.length, browsers, 'startup completion opens no browser authentication');
   }
   console.log('PASS startup recovery completion releases Play and native sign-in concealment only after authenticated or signed-out verification');
+  console.log('PASS replacement startup readiness bypasses obsolete final-account retries while Play and native sign-in remain fenced');
   console.log('PASS first-update run uses the mounted Pinia store with renamed assets, waits for readiness, and retries results without repeating recovery');
   console.log('PASS production Play handler blocks pending, busy, disconnected and mismatched accounts; verified matching identity reaches native Play');
   console.log('PASS dropdown renders usable saved accounts and Add, dispatches click/keyboard actions, and leaves native sign-in free of addon controls');

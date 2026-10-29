@@ -23,7 +23,8 @@ public static class NativeStartupRecoveryChecks
     private static Process? process;
     public static Process Launch(NativeSession session)
     {
-        Check(Get(session, "holdLogin") is true && Get(session, "verifiedSession") is false,
+        Check(Get(session, "holdLogin") is true && Get(session, "verifiedSession") is false &&
+            Get(session, "signInRecovery") is "previous-sign-in-recovery",
             "startup retains the existing fence before native verification: " + outcome);
         if (outcome == "launch-failure") throw new IOException("Synthetic launch failure.");
         return process = outcome == "exited-process" ? Process.Start(new ProcessStartInfo("cmd.exe", "/d /c set /p startup_fixture_wait=")
@@ -95,6 +96,7 @@ public static class NativeStartupRecoveryChecks
                 session = new NativeSession(stores, Dispatcher.CurrentDispatcher);
                 var oldSignal = new TaskCompletionSource<Guid?>(); Set(session, "ready", oldSignal);
                 Set(session, "holdLogin", true); Set(session, "busy", true);
+                Set(session, "signInRecovery", "previous-sign-in-recovery");
                 Task<bool> Command(object data, TaskCompletionSource<Guid?> signal) =>
                     Invoke<bool>(session, "Command", JsonSerializer.SerializeToElement(data), signal);
                 var startup = Invoke<bool>(session, "Start", store, commit);
@@ -122,6 +124,11 @@ public static class NativeStartupRecoveryChecks
                 var state = JsonSerializer.Deserialize<JsonElement>((byte[])Get(bridge, "state")!);
                 Check(state.GetProperty("holdLogin").GetBoolean() == !success && !state.GetProperty("busy").GetBoolean(),
                     "published startup state releases the fence only on complete success: " + scenario);
+                Check(success ? state.GetProperty("signInRecovery").ValueKind == JsonValueKind.Null :
+                    state.GetProperty("signInRecovery").GetString() == "previous-sign-in-recovery",
+                    "startup retires an obsolete final-account retry only after complete success: " + scenario);
+                if (success) Check(!await Command(new { action = "retry-signin", request = "previous-sign-in-recovery" }, signal),
+                    "completed startup rejects the previous process's final-account retry: " + scenario);
                 if (!success)
                 {
                     Check(!await Command(new { action = "ready", profile, username = "late" }, signal) && Get(session, "holdLogin") is true,

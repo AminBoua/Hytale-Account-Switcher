@@ -418,7 +418,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         if (profile is Guid uuid) CommitProfile(uuid, commit);
         else if (active is not null && !stores.IsPending(active)) active = stores.CreatePending();
         // Only this process's completed verification and storage work can release an earlier recovery fence.
-        holdLogin = false;
+        holdLogin = false; signInRecovery = null;
         _ = ObserveExit(process);
         return profile is not null;
     }

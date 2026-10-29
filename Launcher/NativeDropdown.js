@@ -210,8 +210,8 @@
         if (await confirmCurrent()) await request('command', logoutResult);
         return;
       }
-      if (state.signInRecovery) {
-        if (!state.busy && !nativeWork && !userLoad && Date.now() >= signInRetryAt) {
+      if (state.signInRecovery && !state.busy) {
+        if (!nativeWork && !userLoad && Date.now() >= signInRetryAt) {
           signInRetryAt = Date.now() + signInRetryDelay;
           signInRetryDelay = Math.min(signInRetryDelay * 2, 30000);
           await request('command', { action: 'retry-signin', request: state.signInRecovery });
