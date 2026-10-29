@@ -149,6 +149,10 @@ try {
     $env:ProgramFiles = Join-Path $root 'program-files'
     $official = Join-Path $env:ProgramFiles 'Hypixel Studios\Hytale Launcher\hytale-launcher.exe'
     foreach ($folder in @($package, $programs, (Split-Path $official))) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+    # Give existing and newly created fixture files the same automatic ACL inheritance format.
+    $acl = Get-Acl -LiteralPath (Split-Path $official)
+    $acl.SetAccessRuleProtection($true, $true)
+    [IO.Directory]::SetAccessControl((Split-Path $official), $acl)
     $scripts = @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1')
     foreach ($name in $scripts) {
         Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $package
@@ -296,10 +300,6 @@ try {
     $oldPayload = @{}
     foreach ($name in $replacementNames) {
         $path = Join-Path $destination $name
-        # Normalize legacy inherited ACLs before the baseline; ReplaceFile upgrades their inheritance format.
-        $acl = Get-Acl -LiteralPath $path
-        $acl.SetSecurityDescriptorSddlForm($acl.Sddl, [Security.AccessControl.AccessControlSections]::Access)
-        [IO.File]::SetAccessControl($path, $acl)
         $oldPayload[$name] = [pscustomobject]@{ Bytes = [IO.File]::ReadAllBytes($path); Hash = (Get-FileHash -LiteralPath $path).Hash; Permissions = (Get-Acl -LiteralPath $path).Sddl }
     }
     foreach ($name in @('HytaleAccounts.exe') + $scripts) {
