@@ -72,7 +72,7 @@ internal static class NativeAddChecks
             var operations = new List<string>();
             var handled = new HashSet<string>();
             var restored = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var failLoad = false;
+            var failRecovery = false;
             var mismatchLoad = false;
             session.Status += _ =>
             {
@@ -82,7 +82,7 @@ internal static class NativeAddChecks
                     var isOther = File.ReadAllText(officialSession) is "opaque-accountA-session" or "opaque-refreshed-accountA-session";
                     ((TaskCompletionSource<JsonElement>)Get("sessionResult")!).TrySetResult(JsonSerializer.SerializeToElement(new
                     {
-                        success = operation != "load" || !failLoad,
+                        success = !failRecovery || operation is not ("load" or "run"),
                         profile = operation == "load" && mismatchLoad && isOther ? Guid.NewGuid() : isOther ? other.Profile : oldProfile,
                         username = isOther ? "accountA" : "accountB", loggedIn = true
                     }));
@@ -209,10 +209,10 @@ internal static class NativeAddChecks
             mismatchLoad = false;
             check(await session.AddAccount(), "another Add can follow switching");
             var third = Pending();
-            failLoad = true; restored = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            failRecovery = true; restored = new(TaskCreationOptions.RunContinuationsAsynchronously);
             check(await Command(new { action = "login-failed", loginRequest = third }), "matching native login failure uses the cancellation recovery path");
             await restored.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            check(Get("pendingLogin") is null && Get("busy") is false && Get("holdLogin") is false &&
+            check(Get("pendingLogin") is null && Get("busy") is false && Get("holdLogin") is true &&
                 Get("verifiedSession") is false && stores.Catalog.Selected == current.Folder && session.IsOpen &&
                 !await session.AddAccount(), "failed cancellation recovery keeps Play unverified, preserves selection and leaves the process open");
             var failure = new UnauthorizedAccessException("synthetic session failure");

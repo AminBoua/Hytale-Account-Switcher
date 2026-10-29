@@ -70,7 +70,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             else if (pendingLogin is not null) return false;
             Guid? profile = data.TryGetProperty("profile", out var value) && Guid.TryParse(value.GetString(), out var id) ? id : null;
             if (profile == Guid.Empty) return false;
-            if (profile is not null && holdLogin && !busy) return false; // A cached UI profile cannot confirm an uncertain logout.
+            if (profile is not null && holdLogin && !busy) return false; // A cached UI profile cannot confirm uncertain native recovery.
             nativeName = data.TryGetProperty("username", out var name) ? name.GetString() : null;
             if (profile is null && !holdLogin && pendingLogin is null && active is not null && !stores.IsPending(active))
             {
@@ -268,6 +268,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         }
         catch (Exception ex)
         {
+            if (attempted) verifiedSession = false;
             message = ex.Message + " Previous selection kept.";
             try
             {
@@ -275,12 +276,19 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
                 {
                     if (stores.Catalog.Active != previous.Folder || active?.Folder != previous.Folder)
                         await RestoreSession(stores.Catalog.Stores.Single(s => s.Folder == previous.Folder), true);
-                    else await NativeAction("run");
+                    else
+                    {
+                        var result = await NativeAction("run");
+                        if (!result.TryGetProperty("loggedIn", out var loggedIn) || loggedIn.ValueKind != JsonValueKind.True ||
+                            !result.TryGetProperty("profile", out var profile) || !Guid.TryParse(profile.GetString(), out var uuid) || uuid != previous.Profile)
+                            throw new IOException("Previous native account could not be verified.");
+                        verifiedSession = true;
+                    }
                 }
             }
             catch (Exception recovery) { verifiedSession = false; message += " Native recovery failed: " + recovery.Message; }
         }
-        finally { busy = false; holdLogin = false; await Publish(); }
+        finally { busy = false; holdLogin = IsOpen && !verifiedSession; await Publish(); }
     }
     private async Task LogoutCore(NativeStore target)
     {

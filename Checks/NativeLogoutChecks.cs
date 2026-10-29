@@ -143,7 +143,7 @@ internal static class NativeLogoutChecks
                         foreach (var scenario in new[] { "transient", "persistent", "failed" })
                             await Confirmation(Path.Combine(root, "confirmation-" + scenario), dispatcher, scenario, check);
                         foreach (var mismatch in new[] { false, true })
-                            foreach (var scenario in new[] { "switch", "failed rollback", "logout" })
+                            foreach (var scenario in new[] { "switch", "failed rollback", "failed precheck rollback", "logout" })
                                 await ResumeRecovery(Path.Combine(root, $"resume-{mismatch}-{scenario}"), dispatcher, mismatch, scenario, check);
                     }
                     complete.TrySetResult();
@@ -269,6 +269,12 @@ internal static class NativeLogoutChecks
         Task Invoke(string name, params object[] args) => (Task)typeof(NativeSession).GetMethod(name, flags)!.Invoke(session, args)!;
         Set("launcher", owner); Set("active", accountA); Set("verifiedSession", true);
         var signal = new TaskCompletionSource<Guid?>(); Set("ready", signal);
+        Task<bool> Command(object data) => (Task<bool>)typeof(NativeSession).GetMethod("Command", flags)!
+            .Invoke(session, [JsonSerializer.SerializeToElement(data), signal])!;
+        var saved = stores.Catalog.Stores.ToArray();
+        var snapshots = saved.ToDictionary(s => s.Folder, s => File.ReadAllBytes(Snapshot(s)));
+        var metadata = File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json"));
+        var failedRollback = scenario is "failed rollback" or "failed precheck rollback";
         Guid? resident = accountA.Profile;
         NativeStore? loaded = null;
         var handled = new HashSet<string>();
@@ -299,10 +305,10 @@ internal static class NativeLogoutChecks
                 unverified &= Get("verifiedSession") is false && Get("busy") is true && Get("holdLogin") is true;
                 var expectedSelection = scenario == "logout" ? null : accountA.Folder;
                 deferredSelection &= stores.Catalog.Selected == expectedSelection && new NativeStores(root).Catalog.Selected == expectedSelection;
-                deferredSnapshot &= loaded is not null && File.ReadAllText(Snapshot(loaded)) == loaded.Label;
-                if (rejectResume && (loaded?.Folder == accountB.Folder || scenario == "failed rollback" && loaded?.Folder == accountA.Folder))
+                deferredSnapshot &= loaded is null || File.ReadAllText(Snapshot(loaded)) == loaded.Label;
+                if (rejectResume && (loaded?.Folder == accountB.Folder || failedRollback))
                 {
-                    // Native load succeeded, but resume lost authentication or changed identity and storage.
+                    // Resume lost authentication or changed identity and storage.
                     resident = mismatch ? accountC.Profile : null;
                     if (mismatch) File.WriteAllText(native, accountC.Label); else File.Delete(native);
                 }
@@ -313,19 +319,29 @@ internal static class NativeLogoutChecks
         };
         var label = scenario + (mismatch ? " with mismatched resume" : " with signed-out resume");
         if (scenario == "logout") await Invoke("LogoutCore", accountA);
-        else await session.Open(accountB, true);
+        else await session.Open(scenario == "failed precheck rollback" ? accountB with { SignedOut = true } : accountB, true);
         check(unverified && deferredSelection && deferredSnapshot,
             label + " blocks Play and defers selection and snapshot capture until resume verifies the expected profile");
-        check(loads.SequenceEqual(new[] { accountB.Folder, scenario == "logout" ? accountC.Folder : accountA.Folder }) && !signIn,
-            label + " rejects a successful but unusable resume and attempts the next saved session");
+        check(loads.SequenceEqual(scenario == "failed precheck rollback" ? Array.Empty<string>() :
+                new[] { accountB.Folder, scenario == "logout" ? accountC.Folder : accountA.Folder }) && !signIn,
+            label + " rejects unusable resume without loading an unexpected saved session");
         check(File.ReadAllText(Snapshot(accountB)) == "accountB" && revoked.SequenceEqual(scenario == "logout" ? new[] { accountA.Profile } : Array.Empty<Guid?>()),
             label + " preserves the rejected account snapshot and revokes only the requested logout account");
-        if (scenario == "failed rollback")
+        if (failedRollback)
         {
             check(Get("verifiedSession") is false && stores.Catalog.Selected == accountA.Folder &&
                 File.ReadAllText(Snapshot(accountA)) == "accountA" && File.ReadAllText(Snapshot(accountC)) == "accountC" &&
                 ((string)Get("message")!).Contains("Native recovery failed:"),
                 label + " keeps Play blocked and snapshots unchanged when rollback also fails verification");
+            check(await Command(new { action = "ready", profile = (Guid?)null }) &&
+                !await Command(new { action = "ready", profile = accountA.Profile, username = "cached-accountA" }) &&
+                Get("verifiedSession") is false && Get("holdLogin") is true && Get("busy") is false &&
+                Get("active") is NativeStore kept && kept.Folder == accountA.Folder && Get("pendingLogin") is null &&
+                stores.Catalog.Selected == accountA.Folder && stores.Catalog.Stores.SequenceEqual(saved) &&
+                File.ReadAllBytes(Path.Combine(stores.Root, "native-stores.json")).SequenceEqual(metadata) &&
+                saved.All(s => File.ReadAllBytes(Snapshot(s)).SequenceEqual(snapshots[s.Folder])) &&
+                !await session.AddAccount() && ReferenceEquals(Get("launcher"), owner) && session.IsOpen && owner.MainWindowHandle == window,
+                label + " rejects late cached ready after signed-out UI refresh, preserving snapshots, selection, Play fence and launcher");
             rejectResume = false;
             await session.Open(accountC, true);
             check(File.ReadAllText(Snapshot(accountA)) == "accountA" && File.ReadAllText(Snapshot(accountB)) == "accountB",
