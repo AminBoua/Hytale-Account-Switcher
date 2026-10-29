@@ -148,7 +148,7 @@
       if (!listening && window.runtime?.EventsOn) {
         for (const event of ['reload', 'profile_changed'])
           window.runtime.EventsOn(event, () => {
-            if (pending !== 'cancel' && state?.login && loginOpened === state.login) { loginCompleted = loginOpened; reported = ''; }
+            if (pending !== 'cancel' && state?.login && loginOpened === state.login) { loginCompleted = loginOpened; reported = ''; wake(); }
           });
         listening = true;
       }
