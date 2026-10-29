@@ -19,6 +19,7 @@ $steps = @(
 foreach ($entry in @(@('native-startup','Checks/NativeStartupRegressionChecks.ps1'),@('installer-fixtures','Checks/InstallerScriptChecks.ps1'),@('setup-upgrade','Checks/SetupUpgradeRegressionChecks.ps1'),@('shortcut-races','Checks/ShortcutRaceChecks.ps1'),
     @('acl-races','Checks/AclMigrationRaceChecks.ps1'),@('storage-races','Checks/AclMigrationRaceChecks.ps1','-Storage'),
     @('vm-harness-host-only','Checks/VmValidation/Validate.ps1'),@('evidence-gate','Checks/SecurityGateChecks.ps1'),
+    @('evidence-runner','Checks/SecurityRunnerRegressionChecks.ps1'),
     @('runtime-notices','Checks/RuntimeNoticeChecks.ps1'))) {
     $steps += @{Name=$entry[0];Exe='powershell.exe';Arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File') + $entry[1..($entry.Length-1)]}
 }
@@ -51,11 +52,18 @@ try {
             if ($step.Name -eq 'csharp-safe' -and $report.Checks[0].Status -ne 'passed') { throw 'Build failed; refusing stale check binaries.' }
             $executable = (Get-Command $step.Exe -ErrorAction Stop).Source
             $arguments = $step.Arguments
+            $logError = $null
             $ErrorActionPreference = 'Continue' # Capture expected negative-control stderr without discarding the exit code.
-            & $executable @arguments 2>&1 | ForEach-Object { $line=$_.ToString(); Add-Content -LiteralPath $log -Value $line; Write-Host $line }
+            & $executable @arguments 2>&1 | ForEach-Object {
+                $line = $_.ToString()
+                # Drain the child before failing so its exit code and diagnostics are retained.
+                try { Add-Content -LiteralPath $log -Value $line -ErrorAction Stop } catch { if (!$logError) { $logError = $_.Exception.Message } }
+                Write-Host $line
+            }
             $code = $LASTEXITCODE
             $ErrorActionPreference = 'Stop'
             $row.ExitCode = $code
+            if ($logError) { throw "Cannot write evidence log '$log': $logError" }
             if ($step.ExpectedFailure) {
                 $row.ExpectedFailure = $step.ExpectedFailure
                 if ($code -eq 0 -or (Get-Content -LiteralPath $log -Raw) -notmatch $step.ExpectedFailure) { throw 'Mutation did not fail at its expected regression.' }
@@ -64,7 +72,11 @@ try {
         } catch { $row.Error=$_.Exception.Message; Write-Host "FAIL $($step.Name): $($row.Error)" }
         finally {
             $ErrorActionPreference = 'Stop'; $row.FinishedUtc=[DateTime]::UtcNow.ToString('o')
-            if (Test-Path -LiteralPath $log) { $row.LogHash=(Get-FileHash -LiteralPath $log).Hash }
+            try { if (Test-Path -LiteralPath $log) { $row.LogHash=(Get-FileHash -LiteralPath $log -ErrorAction Stop).Hash } }
+            catch {
+                $row.Status='failed'; $row.Error=("$($row.Error) Cannot hash evidence log '$log': $($_.Exception.Message)").Trim()
+                Write-Host "FAIL $($step.Name): $($row.Error)"
+            }
         }
     }
     if ((Get-SecuritySource $repository).Fingerprint -ne $report.Source.Fingerprint) { throw 'Source changed during checks; rerun the gate.' }
