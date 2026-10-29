@@ -384,7 +384,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         launcher = Process.Start(start) ?? throw new IOException("Could not open native launcher.");
         var process = launcher;
         var exit = process.WaitForExitAsync();
-        var verified = ready.Task.WaitAsync(TimeSpan.FromSeconds(45));
+        var verified = signal.Task.WaitAsync(TimeSpan.FromSeconds(45));
         if (await Task.WhenAny(verified, exit) == exit)
         {
             // The native updater must be able to rename the old image after its launcher exits.
@@ -393,8 +393,13 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
             throw new IOException("Native launcher exited before profile verification.");
         }
         var profile = await verified;
+        if (launcher != process || ready != signal || process.HasExited)
+            throw new IOException("Native launcher changed before startup verification completed.");
         if (profile is null && commit) throw new IOException("Native store is signed out. Sign in before selecting it.");
         if (profile is Guid uuid) CommitProfile(uuid, commit);
+        else if (active is not null && !stores.IsPending(active)) active = stores.CreatePending();
+        // Only this process's completed verification and storage work can release an earlier recovery fence.
+        holdLogin = false;
         _ = ObserveExit(process);
         return profile is not null;
     }
