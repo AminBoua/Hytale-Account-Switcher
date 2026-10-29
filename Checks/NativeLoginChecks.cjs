@@ -5,7 +5,7 @@ let tick, nativeLogouts = 0, generated = 0, requestId = 0, failLogin = false, us
 const calls = [], created = [], browserUrls = [], events = {}, nativeActions = [];
 const deliveryFailures = new Map(), delivered = [];
 const timers = new Map();
-let timerId = 0, automaticSwitch = false, disconnected = false, loadGate, urlGate, commandGate, stateGate, refresh;
+let timerId = 0, automaticSwitch = false, automaticSignIn = false, signInAttempts = 0, disconnected = false, loadGate, urlGate, commandGate, stateGate, refresh;
 let nativeGate, nativeFailure, logoutGate, verificationGate, now = Date.now(), completed = false, reloads = 0;
 process.on('beforeExit', () => {
   if (!completed && !process.exitCode) {
@@ -146,6 +146,24 @@ vm.runInNewContext(source, {
         state.session = next ? { request: 'fast-' + next, operation: next } : null;
         if (!next) {
           state.busy = false; state.active = state.selected = 'accountA'; state.profile = accountA.uuid;
+        }
+      }
+      if (automaticSignIn && data.action === 'retry-signin') {
+        assert.equal(data.request, state.signInRecovery, 'automatic sign-in retry uses the current helper request');
+        assert(!state.busy, 'automatic sign-in retries cannot overlap');
+        state.busy = true; state.signInRecovery = 'sign-in-retry-' + ++signInAttempts;
+        state.session = { request: state.signInRecovery + '-stop', operation: 'stop' };
+      }
+      if (automaticSignIn && data.action === 'session-result') {
+        assert.equal(data.request, state.session.request);
+        const stages = ['stop', 'clear', 'run'];
+        const next = data.success === true && stages[stages.indexOf(state.session.operation) + 1];
+        if (next) state.session = { request: state.signInRecovery + '-' + next, operation: next };
+        else {
+          state.session = null; state.busy = false;
+          if (data.success === true && data.loggedIn === false) {
+            state.signInRecovery = null; state.holdLogin = false; state.active = 'pending-sign-in';
+          }
         }
       }
       if (data.action === 'ready' && data.loginRequest === state.login) {
@@ -487,6 +505,78 @@ vm.runInNewContext(source, {
     assert.equal(browserUrls.length, beforeBrowsers, 'recovery never starts browser authentication');
   }
   console.log('PASS confirmed logout recovery failures fence cached and late readiness and Play until verified recovery or signed-out UI refresh');
+  for (const failure of ['ordinary', 'native deadline', 'refresh deadline']) {
+    timers.clear();
+    nativeProfile = user.getUserProfile = accountA;
+    state.active = state.selected = 'accountA'; state.profile = null;
+    state.busy = state.holdLogin = true; state.logout = 'final-sign-in-' + failure;
+    const beforeLogouts = nativeLogouts, beforeBrowsers = browserUrls.length;
+    await tick();
+    assert.equal(calls.at(-1).success, true, 'final account completes native logout before sign-in failure');
+    state.logout = null; state.selected = null;
+    state.session = { request: 'final-sign-in-fault-' + failure, operation: failure === 'refresh deadline' ? 'run' : 'stop' };
+    const gate = deferred();
+    if (failure === 'ordinary') nativeFailure = 'hya:stop';
+    else if (failure === 'native deadline') nativeGate = gate.promise;
+    else loadGate = gate.promise;
+    const stalled = tick();
+    if (failure !== 'ordinary') await expireWait();
+    await stalled;
+    assert.equal(calls.at(-1).success, failure === 'ordinary' ? false : null);
+    state.session = null; state.busy = false; state.signInRecovery = 'final-sign-in-recovery-' + failure;
+    automaticSignIn = true;
+    const beforeAttempts = signInAttempts;
+    if (failure !== 'ordinary') {
+      for (let i = 0; i < 3; i++) await tick();
+      assert.equal(signInAttempts, beforeAttempts, 'recovery waits for outstanding native work and Pinia loads to settle');
+    }
+    disconnected = true; await tick();
+    assert(playBlocked(), 'disconnect keeps the final-account recovery fence');
+    assert(Object.hasOwn(document.documentElement.attrs, 'data-account-transition'), 'sign-in remains concealed during uncertainty');
+    nativeGate = loadGate = null; gate.resolve(); await new Promise(setImmediate);
+    assert.equal(signInAttempts, beforeAttempts, 'late completion and disconnection cannot release the fence or start recovery');
+    disconnected = false;
+    if (failure === 'ordinary') deliveryFailures.set(state.signInRecovery, 1);
+    await tick(); // Automatic retry after reconnect; ordinary case first loses its command before delivery.
+    if (failure === 'ordinary') {
+      assert.equal(signInAttempts, beforeAttempts);
+      await tick(); assert.equal(signInAttempts, beforeAttempts, 'lost retry commands observe backoff');
+      now += 250; await tick();
+    }
+    assert.equal(signInAttempts, beforeAttempts + 1, 'the normal frontend exchange automatically retries confirmed sign-in recovery');
+    if (failure === 'ordinary') {
+      for (let attempt = 0; attempt < 9; attempt++) {
+        await tick(); // Stop fails through the ordinary native service.
+        assert.equal(state.busy, false); assert(state.signInRecovery); assert(state.holdLogin);
+        const count = signInAttempts;
+        await tick(); await tick();
+        assert.equal(signInAttempts, count, 'repeated polls do not create an uncontrolled retry loop');
+        const scheduled = [...timers.values()].at(-1);
+        assert(scheduled.delay > 0 && scheduled.delay <= 30000, 'retry delay is positive and capped at thirty seconds');
+        now += scheduled.delay; await tick();
+        assert.equal(signInAttempts, count + 1, 'persistent ordinary failure remains retryable after bounded backoff');
+      }
+    }
+    nativeFailure = null;
+    const resumed = nativeActions.length;
+    for (let stage = 0; stage < 3; stage++) {
+      await tick();
+      if (stage < 2) {
+        assert(state.holdLogin, 'successful stop and clear keep the fence until fresh signed-out refresh');
+        assert(playBlocked());
+      }
+    }
+    await tick();
+    assert.equal(state.signInRecovery, null); assert.equal(state.holdLogin, false);
+    assert.equal(user.getUserProfile, null, 'fresh refresh clears cached identity before exposing sign-in');
+    assert(!Object.hasOwn(document.documentElement.attrs, 'data-account-transition'), 'automatic successful recovery reveals native sign-in');
+    assert(playBlocked(), 'signed-out recovery never permits Play');
+    assert.deepEqual(nativeActions.slice(resumed), ['hya:stop', 'hya:stop'], 'recovery stops and clears without starting signed-in background work');
+    assert.equal(nativeLogouts, beforeLogouts + 1, 'automatic recovery never repeats completed logout');
+    assert.equal(browserUrls.length, beforeBrowsers, 'automatic recovery never starts browser authentication');
+    automaticSignIn = false;
+  }
+  console.log('PASS final-account sign-in automatically retries through frontend commands after ordinary failures, deadlines and reconnects, with serialized capped backoff and exactly one logout');
   state.active = state.selected = 'accountB'; state.profile = accountB.uuid;
   nativeProfile = user.getUserProfile = accountB;
   timers.clear(); await tick();

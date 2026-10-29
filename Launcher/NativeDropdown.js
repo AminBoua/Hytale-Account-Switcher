@@ -12,6 +12,7 @@
   let state, user, pending = false, signature = '', reported = '', loginSince = 0, loginOpened = '', loginCompleted = '';
   let logoutResult, sessionResult, sessionReloaded, updating = false;
   let nativeWork, userLoad, uncertain = false;
+  let signInRetryAt = 0, signInRetryDelay = 250;
   const timeout = Symbol('timeout'), withdrawn = Symbol('withdrawn');
   let listening = false;
   let commandVersion = 0;
@@ -127,6 +128,7 @@
       const next = await request('state');
       if (version !== commandVersion) return;
       state = next;
+      if (!state.signInRecovery) { signInRetryAt = 0; signInRetryDelay = 250; }
       if (sessionResult?.request !== state.session?.request) sessionResult = null;
       if (logoutResult?.request !== state.logout) logoutResult = null;
       const loginRequest = state.login;
@@ -208,6 +210,15 @@
         if (await confirmCurrent()) await request('command', logoutResult);
         return;
       }
+      if (state.signInRecovery) {
+        if (!state.busy && !nativeWork && !userLoad && Date.now() >= signInRetryAt) {
+          signInRetryAt = Date.now() + signInRetryDelay;
+          signInRetryDelay = Math.min(signInRetryDelay * 2, 30000);
+          await request('command', { action: 'retry-signin', request: state.signInRecovery });
+          wake();
+        }
+        return;
+      }
       if (loginRequest && loginOpened !== loginRequest) {
         loginCompleted = '';
         try {
@@ -254,6 +265,9 @@
       if (pending || state?.busy || state?.session || state?.logout || sessionResult || logoutResult) {
         clearTimeout(fastUpdate);
         fastUpdate = setTimeout(update, 25);
+      } else if (state?.signInRecovery && !nativeWork && !userLoad) {
+        clearTimeout(fastUpdate);
+        fastUpdate = setTimeout(update, Math.max(25, signInRetryAt - Date.now()));
       }
     }
   }
