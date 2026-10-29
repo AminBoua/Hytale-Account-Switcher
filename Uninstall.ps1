@@ -75,6 +75,13 @@ try {
     if ($before) { Assert-LauncherSnapshot $official $before }
     # Only exact addon-owned files; accounts, encryption keys, worlds and Hytale remain untouched.
     $files = @('Install.ps1','Repair-Integration.ps1','launcher-baseline.json','HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs')
+    $retained = @()
+    foreach ($file in Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*' -Force) {
+        if ($file.Name -cmatch '^\.upgrade-[a-f0-9]{32}-(.+)\.(bak|new)$' -and $Matches[1] -cin $files) {
+            $retained += $file.Name
+        }
+    }
+    $files += $retained
     foreach ($name in $files) { Assert-RegularPath (Join-Path $destination $name) }
     $files += @('shortcuts.new') + @($records | Where-Object Backup | ForEach-Object Backup) + @('shortcuts.json')
     $removalFiles = @()
