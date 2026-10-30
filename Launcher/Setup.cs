@@ -1,11 +1,26 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Security.AccessControl;
 using System.Security.Principal;
 
 namespace HytaleAccounts;
 
 public static class Setup
 {
+    internal static EventWaitHandle RemovalEvent(string attempt, string phase, bool acknowledge = false)
+    {
+        var security = new EventWaitHandleSecurity();
+        security.SetAccessRuleProtection(true, false);
+        // OWNER RIGHTS removes the owner's implicit WRITE_DAC; only the original handle can confirm.
+        foreach (var sid in new[] { "S-1-3-4", WindowsIdentity.GetCurrent().User!.Value, "S-1-5-32-544", "S-1-5-18" })
+            security.AddAccessRule(new EventWaitHandleAccessRule(new SecurityIdentifier(sid),
+                EventWaitHandleRights.Synchronize | (acknowledge ? EventWaitHandleRights.Modify : 0), AccessControlType.Allow));
+        var signal = EventWaitHandleAcl.Create(false, EventResetMode.ManualReset,
+            "Local\\HytaleAccounts-Uninstall-" + attempt + "-" + phase, out var created, security);
+        if (!created) { signal.Dispose(); throw new IOException("Removal confirmation already exists."); }
+        return signal;
+    }
+
     internal const string ElevatedMode = "--install-elevated";
     private static bool IsAdministrator => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
 
@@ -105,6 +120,11 @@ public static class Setup
         start.ArgumentList.Add(WindowsIdentity.GetCurrent().User!.Value);
         start.ArgumentList.Add("-WaitForPid");
         start.ArgumentList.Add(Environment.ProcessId.ToString());
+        var attempt = Guid.NewGuid().ToString("N");
+        using var confirmed = RemovalEvent(attempt, "confirmed");
+        using var received = RemovalEvent(attempt, "received", acknowledge: true);
+        start.ArgumentList.Add("-RemovalAttempt");
+        start.ArgumentList.Add(attempt);
         start.ArgumentList.Add("-Interactive");
         // Older installations have only the machine journal; their guarded removal handles migration.
         var userIntegration = File.Exists(Path.Combine(destination, "ShortcutIntegration.ps1"));
@@ -130,6 +150,10 @@ public static class Setup
         }
         // Repair can run while UAC is open; restore again under the journal lock before deleting state.
         if (userIntegration) await integrateUser(UserIntegrationStart(destination, uninstall: true));
+        confirmed.Set();
+        // Keep confirmation alive until the worker has opened and consumed it, even on a fast parent exit.
+        if (!await Task.Run(() => received.WaitOne(TimeSpan.FromSeconds(30))))
+            throw new IOException("Uninstall did not acknowledge shortcut finalization. Files were preserved; retry removal.");
     }
 
     public static async Task<int> Run(bool uninstall)

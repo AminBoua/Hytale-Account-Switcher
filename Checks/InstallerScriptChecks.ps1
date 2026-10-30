@@ -24,6 +24,29 @@ function Check($Condition, [string]$Message) {
     if (!$Condition) { throw "FAIL $Message" }
     Write-Host "PASS $Message"
 }
+function Invoke-FixtureUninstall {
+    param([string]$Script, [string]$ProgramsDirectory, [string]$DesktopDirectory, [string]$RegistryPath, [string]$UserSid,
+        [string]$CommonProgramsDirectory, [string]$CommonDesktopDirectory, [switch]$UserOnly, [switch]$KeepJournal)
+    $arguments = @{ ProgramsDirectory=$ProgramsDirectory; DesktopDirectory=$DesktopDirectory; RegistryPath=$RegistryPath; UserSid=$UserSid }
+    if ($UserOnly) { & $Script @arguments -UserOnly -KeepJournal:$KeepJournal; return }
+    # Existing script fixtures supply a confirmed disposable parent; orchestration regressions exercise Setup's actual events.
+    $attempt = [Guid]::NewGuid().ToString('N')
+    $name = 'Local\HytaleAccounts-Uninstall-' + $attempt
+    $confirmed = [Threading.EventWaitHandle]::new($false, 'ManualReset', $name + '-confirmed')
+    $received = [Threading.EventWaitHandle]::new($false, 'ManualReset', $name + '-received')
+    $parent = $null
+    try {
+        $command = "[Threading.EventWaitHandle]::OpenExisting('$name-received').WaitOne(30000) | Out-Null"
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $parent = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -WindowStyle Hidden -PassThru
+        $null = $confirmed.Set()
+        & $Script @arguments -WaitForPid $parent.Id -RemovalAttempt $attempt
+    } finally {
+        $null = $received.Set()
+        if ($parent) { if (!$parent.WaitForExit(5000)) { $parent.Kill(); $parent.WaitForExit() }; $parent.Dispose() }
+        $confirmed.Dispose(); $received.Dispose()
+    }
+}
 function Interrupt-ShortcutWrite($Fixture) {
     Check ($Fixture.Replacement.Length -gt $Fixture.Original.Length) 'partial shortcut overwrite has a longer replacement and an original tail'
     # Find a torn native structure in these COM-generated links; offsets depend on the temp path.
@@ -210,7 +233,7 @@ try {
     $userJournal = Get-Content -LiteralPath $userManifest -Raw -Encoding UTF8 | ConvertFrom-Json
     Check ($userJournal.Shortcuts.Count -eq 1 -and $userJournal.Shortcuts[0].Path -ceq $shortcutPath -and (Get-FileHash -LiteralPath (Join-Path $userState $userJournal.Shortcuts[0].Backup)).Hash -eq $previousHash) 'installation reloads the Unicode journal without duplicating records or replacing original backup bytes'
     & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
-    & (Join-Path $package 'Uninstall.ps1') @options
+    Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
     foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'Unicode journal reload and uninstall restore original user and system shortcut bytes' }
     # Machine roots are scanned desktop first, then Programs; deny writes/deletion on each matching link.
     $firstShortcut = Join-Path $commonDesktop 'Hytale Launcher.lnk'
@@ -237,7 +260,7 @@ try {
             Check ($record.Path -eq $firstShortcut -and (Get-FileHash -LiteralPath (Join-Path $destination $record.Backup)).Hash -eq $originalLinks[$firstShortcut]) 'partial installation journals the changed shortcut and its exact original bytes'
         }
         # Use only the installed removal script, without executing the synthetic helper or requesting elevation.
-        & (Join-Path $destination 'Uninstall.ps1') @options
+        Invoke-FixtureUninstall (Join-Path $destination 'Uninstall.ps1') @options
         foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'removal after failed installation restores original shortcut bytes' }
         Check (!(Test-Path -LiteralPath $destination) -and !(Test-Path -LiteralPath $registry) -and !$global:HytaleFixtureTasks.Count) 'removal after failed installation clears addon recovery state and Windows Apps entry'
         Check ((Get-FileHash -LiteralPath $officialUninstall).Hash -eq $uninstallHash) 'failed installation and removal preserve the official uninstall shortcut'
@@ -287,7 +310,7 @@ try {
         & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly
         & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly
         Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $previousHash -and !(Test-Path -LiteralPath $userManifest)) 'finalization restores original bytes and prevents repair from reapplying the addon'
-        & (Join-Path $package 'Uninstall.ps1') @options
+        Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
         foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'later uninstall restores existing shortcuts byte-for-byte' }
         $allLinks = @($programs,$desktop,$commonPrograms,$commonDesktop) | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -Recurse }
         Check ($allLinks.Count -eq 4 -and (Get-FileHash -LiteralPath $officialUninstall).Hash -eq $uninstallHash) 'failed elevation and retry create no duplicate shortcuts'
@@ -459,7 +482,10 @@ try {
     foreach ($operation in @('Install.ps1','Uninstall.ps1')) {
         $ownedHash = (Get-FileHash -LiteralPath $shortcutPath).Hash
         $rejected = $false
-        try { & (Join-Path $package $operation) @wrongUser } catch { $rejected = $true }
+        try {
+            if ($operation -eq 'Uninstall.ps1') { Invoke-FixtureUninstall (Join-Path $package $operation) @wrongUser }
+            else { & (Join-Path $package $operation) @wrongUser }
+        } catch { $rejected = $true }
         Check ($rejected -and (Get-FileHash -LiteralPath $shortcutPath).Hash -eq $ownedHash) 'another Windows account cannot orphan the owner shortcut journal'
     }
     # Remove directly after a killed upgrade, without letting installation clean up the transaction.
@@ -472,7 +498,7 @@ try {
         Check (@($retained | Where-Object Extension -eq '.bak').Count -gt 0) "$point direct uninstall starts with retained backups"
         if ($point -ne 'HytaleAccounts.exe') { Check (@($retained | Where-Object Extension -eq '.new').Count -gt 0) "$point direct uninstall starts with retained staging files" }
         & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly
-        & (Join-Path $destination 'Uninstall.ps1') @options
+        Invoke-FixtureUninstall (Join-Path $destination 'Uninstall.ps1') @options
         Check (!@($retained | Where-Object { Test-Path -LiteralPath $_.FullName }).Count -and !(Test-Path -LiteralPath $destination)) "$point direct uninstall removes retained transactions and the empty addon directory"
         Check (!(Test-Path -LiteralPath $registry) -and !$global:HytaleFixtureTasks.Count) "$point direct uninstall clears the Windows Apps entry and mocked tasks"
         foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) "$point direct uninstall restores original shortcuts" }
@@ -515,7 +541,7 @@ try {
         $target = if ($linkType -eq 'HardLink') { $protected[0] } else { Split-Path $protected[0] }
         New-Item -ItemType $linkType -Path $linkedArtifact -Target $target | Out-Null
         $failure = $null
-        try { & (Join-Path $destination 'Uninstall.ps1') @options } catch { $failure = $_ }
+        try { Invoke-FixtureUninstall (Join-Path $destination 'Uninstall.ps1') @options } catch { $failure = $_ }
         finally {
             if ($linkType -eq 'Junction') { [IO.Directory]::Delete($linkedArtifact) }
             else { [IO.File]::Delete($linkedArtifact) }
@@ -529,13 +555,13 @@ try {
         $lockedName = $transactionPrefix + 'HytaleAccounts.exe.' + $extension
         $locked = [IO.File]::Open((Join-Path $destination $lockedName), 'Open', 'Read', 'Read')
         $failure = $null
-        try { & (Join-Path $destination 'Uninstall.ps1') @options } catch { $failure = $_ }
+        try { Invoke-FixtureUninstall (Join-Path $destination 'Uninstall.ps1') @options } catch { $failure = $_ }
         finally { $locked.Dispose() }
         Check ($failure -and $failure.Exception.GetBaseException() -is [ComponentModel.Win32Exception] -and $failure.Exception.GetBaseException().NativeErrorCode -eq 32) "locked retained $extension rejects uninstall with a sharing violation"
         foreach ($path in $recovery.Keys) { Check ((Test-Path -LiteralPath $path) -and (Get-FileHash -LiteralPath $path).Hash -eq $recovery[$path]) "locked $extension preserves all payload, transaction and recovery bytes" }
         Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -ceq $uninstallString) "locked $extension retains the installed helper's Windows Apps retry entry"
     }
-    & (Join-Path $destination 'Uninstall.ps1') @options
+    Invoke-FixtureUninstall (Join-Path $destination 'Uninstall.ps1') @options
     Check (!@($retainedNames | Where-Object { Test-Path -LiteralPath (Join-Path $destination $_) }).Count) 'retry removes valid bak and new files for every known addon payload'
     Check (!(Test-Path -LiteralPath $registry) -and !$global:HytaleFixtureTasks.Count) 'retained file retry clears the Windows Apps entry and mocked tasks'
     $remaining = @(Get-ChildItem -LiteralPath $destination -Force)
@@ -566,7 +592,7 @@ try {
         $sharing = if ($lockedName -eq 'shortcuts.json') { 'ReadWrite' } else { 'Read' }
         $locked = [IO.File]::Open((Join-Path $destination $lockedName), 'Open', 'Read', $sharing)
         $failure = $null
-        try { & (Join-Path $destination 'Uninstall.ps1') @options } catch { $failure = $_ }
+        try { Invoke-FixtureUninstall (Join-Path $destination 'Uninstall.ps1') @options } catch { $failure = $_ }
         finally { $locked.Dispose() }
         Check ($failure -and $failure.Exception.GetBaseException() -is [ComponentModel.Win32Exception] -and $failure.Exception.GetBaseException().NativeErrorCode -eq 32) ("locked $lockedName rejects removal with a sharing violation")
         foreach ($path in $originalLinks.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $originalLinks[$path]) 'failed removal leaves original user and system shortcuts restored' }
@@ -575,10 +601,10 @@ try {
         Check ((Get-ItemProperty -LiteralPath $registry).UninstallString -ceq $uninstallString -and $uninstallString -ceq ('"' + (Join-Path $destination 'HytaleAccounts.exe') + '" --uninstall')) 'failed removal retains the executable entry point for retry from Windows Apps'
         foreach ($path in $recovery.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $recovery[$path]) 'failed removal preserves recovery bytes' }
         $rejected = $false
-        try { & (Join-Path $destination 'Uninstall.ps1') @wrongUser } catch { $rejected = $true }
+        try { Invoke-FixtureUninstall (Join-Path $destination 'Uninstall.ps1') @wrongUser } catch { $rejected = $true }
         Check $rejected 'retry still enforces the shortcut journal owner'
         & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly
-        & (Join-Path $destination 'Uninstall.ps1') @options
+        Invoke-FixtureUninstall (Join-Path $destination 'Uninstall.ps1') @options
         Check (!(Test-Path -LiteralPath $destination)) 'retry after releasing the lock removes addon files and machine recovery state'
         Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) 'failed removal and retry preserve Hytale data'
         Assert-LauncherSnapshot $official $before
@@ -615,16 +641,16 @@ try {
             Interrupt-ShortcutWrite $fixture
             $held = [IO.File]::Open($fixture.Path, 'Open', 'Read', 'Read')
             $failure = $null
-            try { & (Join-Path $package 'Uninstall.ps1') @options -UserOnly:$fixture.User } catch { $failure = $_ } finally { $held.Dispose() }
+            try { Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options -UserOnly:$fixture.User } catch { $failure = $_ } finally { $held.Dispose() }
             Check ($failure -and (Test-Path -LiteralPath $fixture.Manifest) -and (Get-FileHash -LiteralPath $fixture.Backup).Hash -eq $fixture.BackupHash) 'blocked restoration retains its journal and usable original backup'
             # A corrupt backup must stop removal before either journal or addon files are discarded.
             [IO.File]::WriteAllBytes($fixture.Backup, [byte[]]@(1,2,3))
             $failure = $null
-            try { & (Join-Path $package 'Uninstall.ps1') @options -UserOnly:$fixture.User } catch { $failure = $_ }
+            try { Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options -UserOnly:$fixture.User } catch { $failure = $_ }
             Check ($failure -and $failure.Exception.Message -like '*restoration backup is unreadable*') 'uninstall rejects an unusable restoration backup'
             Check ((Test-Path -LiteralPath $fixture.Manifest) -and (Test-Path -LiteralPath $fixture.Backup) -and (Test-Path -LiteralPath (Join-Path $destination 'HytaleAccounts.exe'))) 'failed shortcut recovery retains the journal, backup and addon for retry'
             [IO.File]::WriteAllBytes($fixture.Backup, $fixture.Original)
-            & (Join-Path $package 'Uninstall.ps1') @options -UserOnly:$fixture.User
+            Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options -UserOnly:$fixture.User
             Check ((Get-FileHash -LiteralPath $fixture.Path).Hash -eq $fixture.BackupHash) 'uninstall restores a partially overwritten shortcut byte-for-byte'
             Check (!(Test-Path -LiteralPath $fixture.Manifest) -and !(Test-Path -LiteralPath $fixture.Backup)) 'uninstall removes recovery data after successful restoration'
         }
@@ -660,7 +686,7 @@ try {
     & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly
     Assert-LauncherSnapshot $official $updated
     & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
-    & (Join-Path $package 'Uninstall.ps1') @options
+    Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
     Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $updatedLink) 'uninstall restores latest official updater shortcut, not an obsolete backup'
     Check ($global:HytaleFixtureTasks.Count -eq 0) 'uninstall removes hidden update repair task'
     & (Join-Path $package 'Install.ps1') @options
@@ -671,7 +697,7 @@ try {
     & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly
     Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $foreignHash) 'automatic repair leaves user-selected shortcut targets alone'
     & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
-    & (Join-Path $package 'Uninstall.ps1') @options
+    Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
     Assert-LauncherSnapshot $official $updated
     Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $foreignHash) 'uninstall preserves a replaced foreign shortcut and updated launcher'
     Check (!(Test-Path -LiteralPath (Join-Path $destination 'HytaleAccounts.exe'))) 'addon executable removed'
@@ -719,14 +745,14 @@ try {
         try { Check ($held.Identity -eq $record.FileId -and $editedHash -ne $record.AppliedHash.Replace('-','')) 'renamed description fixture retains identity while changing its applied hash' } finally { $held.Dispose() }
         [IO.File]::WriteAllBytes($case.Current, [byte[]]@(1,2,3))
         $failure = $null
-        try { & (Join-Path $package 'Uninstall.ps1') @options -UserOnly:($folder -eq $programs) } catch { $failure = $_ }
+        try { Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options -UserOnly:($folder -eq $programs) } catch { $failure = $_ }
         Check ($failure -and $failure.Exception.Message -like '*ownership cannot be validated*') 'uninstall refuses unreadable renamed identity matches without target validation'
         Check ((Get-FileHash -LiteralPath $manifest).Hash -eq $manifestHash -and (Get-FileHash -LiteralPath $backup).Hash -eq $backupHash -and (Test-Path -LiteralPath (Join-Path $destination 'HytaleAccounts.exe'))) 'incomplete renamed restoration retains its journal, backup and helper for retry'
         Check ([BitConverter]::ToString([IO.File]::ReadAllBytes($case.Current)) -eq '01-02-03') 'unreadable renamed shortcut remains untouched'
         [IO.File]::WriteAllBytes($case.Current, $editedBytes)
     }
     & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
-    & (Join-Path $package 'Uninstall.ps1') @options
+    Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
     foreach ($case in $restorationCases) {
         if ($case.Scenario -eq 'deleted') {
             Check (!(Test-Path -LiteralPath $case.Path)) 'uninstall does not recreate a deleted shortcut'
@@ -760,11 +786,11 @@ try {
     $journal.Shortcuts[0].Backup = '..\outside.lnk'
     ConvertTo-Json -InputObject $journal -Depth 4 | Set-Content -LiteralPath $manifest -Encoding UTF8
     $rejected = $false
-    try { & (Join-Path $package 'Uninstall.ps1') @options } catch { $rejected = $true }
+    try { Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options } catch { $rejected = $true }
     Check ($rejected -and (Test-Path -LiteralPath (Join-Path $destination 'HytaleAccounts.exe'))) 'invalid restoration journal rejected before removal'
     Set-Content -LiteralPath $manifest -Encoding UTF8 -Value $valid
     & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
-    & (Join-Path $package 'Uninstall.ps1') @options
+    Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
     New-Item -Path $registry -Force | Out-Null
     New-ItemProperty -Path $registry -Name InstallLocation -Value 'foreign installation' -Force | Out-Null
     $rejected = $false

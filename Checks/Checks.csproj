@@ -4,4 +4,5 @@
   <ItemGroup><Compile Include="SetupChecks.cs"/><Compile Include="BridgeAuthenticationChecks.cs"/><Compile Include="BridgeLimitChecks.cs"/><Compile Include="EffectiveAccessChecks.cs"/><Compile Include="AclPropagationChecks.cs"/><Compile Include="SecurityFixture.cs"/><Compile Include="StorageSafetyChecks.cs"/></ItemGroup>
   <ItemGroup><Compile Include="NativeStartupChecks.cs"/><Compile Include="NativeExitChecks.cs"/><Compile Include="NativeAdapterChecks.cs"/><Compile Include="LoggingChecks.cs"/></ItemGroup>
   <ItemGroup><Compile Include="AccountStorageChecks.cs"/></ItemGroup>
+  <ItemGroup><Compile Include="UninstallFinalizationChecks.cs"/></ItemGroup>
 </Project>

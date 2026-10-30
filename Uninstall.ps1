@@ -3,6 +3,7 @@ param(
     [string]$DesktopDirectory = [Environment]::GetFolderPath('DesktopDirectory'),
     [string]$RegistryPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HytaleAccounts',
     [int]$WaitForPid = 0,
+    [string]$RemovalAttempt = '',
     [switch]$UserOnly,
     [switch]$KeepJournal,
     [string]$UserSid = '',
@@ -13,7 +14,7 @@ try {
     . (Join-Path $PSScriptRoot 'InstallerSafety.ps1')
     . (Join-Path $PSScriptRoot 'ShortcutIntegration.ps1')
     if ($UserOnly -and [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Per-user shortcut removal must run without elevation.' }
-    if ($WaitForPid) { Wait-Process -Id $WaitForPid -Timeout 30 -ErrorAction SilentlyContinue }
+    if (!$UserOnly) { Wait-RemovalFinalization $WaitForPid $RemovalAttempt }
     $official = Join-Path $env:ProgramFiles 'Hypixel Studios\Hytale Launcher\hytale-launcher.exe'
     $destination = Join-Path (Split-Path $official) '.hytale-accounts-addon'
     $installed = Join-Path $destination 'HytaleAccounts.exe'
