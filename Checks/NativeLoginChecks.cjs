@@ -18,6 +18,13 @@ function deferred() {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 }
+function immediateUpdate() {
+  assert.equal(timers.size, 1, 'exactly one update is scheduled without an idle interval tick');
+  const [id, task] = [...timers][0];
+  assert.equal(task.delay, 0, 'the scheduled update starts immediately');
+  timers.delete(id);
+  return task.fn();
+}
 async function expireWait() {
   await new Promise(setImmediate);
   const waiting = [...timers].filter(([, task]) => task.delay > 25);
@@ -122,7 +129,8 @@ user.getUserProfile = null;
 vm.runInNewContext(source, {
   location: { origin: 'http://wails.localhost', pathname: '/launch-game' }, window, document, URL, AbortSignal,
   Date: class extends Date { static now() { return now; } },
-  MutationObserver: class { constructor(fn) { refresh = fn; } observe() {} }, setInterval: fn => { tick = fn; },
+  MutationObserver: class { constructor(fn) { refresh = fn; } observe() {} },
+  setInterval: (fn, delay) => { assert.equal(delay, 1000, 'idle polling remains at one second'); tick = fn; },
   setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; },
   clearTimeout: id => timers.delete(id),
   alert: message => { throw Error(message); },
@@ -323,14 +331,17 @@ vm.runInNewContext(source, {
   assert.equal(rows()[0].attrs['aria-disabled'], 'false', 'switching is enabled again');
   events.reload(); await tick();
   assert(!calls.some(call => call.loginRequest === 'login-4' && call.action === 'ready'), 'late event after cancel cannot complete the cancelled login');
-  await command('add'); await tick();
+  await command('add'); await immediateUpdate();
   let releaseLoad; loadGate = new Promise(resolve => { releaseLoad = resolve; });
-  events.profile_changed(); const oldCompletion = tick(); await new Promise(setImmediate);
+  assert.equal(timers.size, 0, 'browser login is idle before the completion starts a profile load');
+  events.profile_changed(); const oldCompletion = immediateUpdate(); await new Promise(setImmediate);
   await command('cancel'); await command('add');
   releaseLoad(); await oldCompletion; loadGate = null;
   assert(!calls.some(call => call.action === 'ready' && ['login-5', 'login-6'].includes(call.loginRequest)),
     'an in-flight old profile load cannot complete a cancelled or newer login');
-  await tick(); events.reload(); await tick();
+  await immediateUpdate();
+  assert.equal(timers.size, 0, 'the newer browser login waits quietly for its own completion');
+  events.reload(); await immediateUpdate();
   assert.equal(calls.at(-1).loginRequest, 'login-6', 'a fresh native event completes the newer login');
   await tick();
   let releaseUrl; urlGate = new Promise(resolve => { releaseUrl = resolve; });
@@ -775,6 +786,66 @@ vm.runInNewContext(source, {
   }
   console.log('PASS startup recovery completion releases Play and native sign-in concealment only after authenticated or signed-out verification');
   console.log('PASS replacement startup readiness bypasses obsolete final-account retries while Play and native sign-in remain fenced');
+  await immediateUpdate();
+  for (const event of ['reload', 'profile_changed']) {
+    assert.equal(timers.size, 0, 'verified idle frontend has no fast update scheduled');
+    const browsers = browserUrls.length;
+    await command('add');
+    const attempt = state.login;
+    await immediateUpdate();
+    assert.equal(browserUrls.length, browsers + 1, 'the scheduled Add opens one browser login');
+    assert.equal(timers.size, 0, 'opened browser login waits without continuous fast polling');
+    assert(playBlocked(), 'idle browser login keeps Play blocked');
+    const loads = userLoads;
+    nativeProfile = event === 'reload' ? accountB : accountA;
+    events[event]();
+    assert.equal(userLoads, loads, 'completion queues profile confirmation through the update loop');
+    await immediateUpdate();
+    assert.equal(userLoads, loads + 1, 'the event-scheduled update loads the completed native profile');
+    assert.deepEqual(calls.at(-1), { action: 'ready', profile: nativeProfile.uuid,
+      username: nativeProfile.username, loginRequest: attempt }, 'the event confirms only the opened attempt and actual account');
+    assert.equal(state.login, null); assert.equal(state.active, nativeProfile.username);
+    assert(playBlocked(), 'Play waits for completed login state to be read back');
+    await immediateUpdate();
+    assert(!playBlocked(), 'verified event completion restores Play');
+    assert.equal(actionRow().children[0].textContent, 'Add account');
+    assert.equal(browserUrls.length, browsers + 1, 'completion never reopens the browser');
+    const beforeUnrelated = calls.length;
+    events.reload(); events.profile_changed();
+    assert.equal(timers.size, 0, 'events without a pending login leave idle scheduling quiet');
+    assert.equal(calls.length, beforeUnrelated, 'unrelated events cannot confirm an account');
+  }
+  {
+    await command('add'); await immediateUpdate();
+    const cancelled = state.login, gate = deferred(), beforeCancel = calls.length;
+    commandGate = gate.promise;
+    const cancelling = command('cancel');
+    events.reload(); events.profile_changed();
+    assert.equal(timers.size, 0, 'completion during pending cancellation cannot wake confirmation');
+    gate.resolve(); await cancelling; commandGate = null;
+    await immediateUpdate(); await immediateUpdate();
+    events.reload(); events.profile_changed();
+    assert.equal(timers.size, 0, 'late cancelled events leave idle scheduling quiet');
+    assert(!calls.slice(beforeCancel).some(call => call.action === 'ready' && call.loginRequest === cancelled),
+      'pending and completed cancellation fence event-scheduled confirmation');
+    assert(!playBlocked(), 'cancel preserves the verified current account');
+  }
+  {
+    await command('add'); await immediateUpdate();
+    const obsolete = state.login, replacement = obsolete + '-replacement', loads = userLoads, beforeReplacement = calls.length;
+    state.login = replacement; // Helper withdrawal without a frontend command-version change.
+    events.reload(); await immediateUpdate();
+    assert.equal(userLoads, loads, 'an obsolete event opens the replacement without loading the old completion');
+    assert.equal(timers.size, 0, 'the replacement waits quietly for its own event');
+    assert(!calls.slice(beforeReplacement).some(call => call.action === 'ready' && call.loginRequest),
+      'an event accepted against obsolete cached state cannot confirm either attempt');
+    events.profile_changed(); await immediateUpdate();
+    assert.equal(calls.at(-1).loginRequest, replacement, 'a fresh completion confirms only the replacement attempt');
+    await immediateUpdate();
+    assert.equal(timers.size, 0, 'completion returns to quiet idle scheduling');
+    assert(!playBlocked());
+  }
+  console.log('PASS idle reload/profile_changed events schedule immediate login confirmation; cancelled, obsolete and unrelated events stay fenced without fast idle polling');
   console.log('PASS first-update run uses the mounted Pinia store with renamed assets, waits for readiness, and retries results without repeating recovery');
   console.log('PASS production Play handler blocks pending, busy, disconnected and mismatched accounts; verified matching identity reaches native Play');
   console.log('PASS dropdown renders usable saved accounts and Add, dispatches click/keyboard actions, and leaves native sign-in free of addon controls');
