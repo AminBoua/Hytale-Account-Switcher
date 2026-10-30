@@ -1,4 +1,25 @@
 $ErrorActionPreference = 'Stop'
+function Wait-RemovalFinalization([int]$ParentPid, [string]$Attempt, [int]$TimeoutMilliseconds = 30000) {
+    if ($ParentPid -le 0 -or $Attempt -cnotmatch '^[a-f0-9]{32}$') { throw 'Removal requires per-user finalization confirmation; files preserved.' }
+    $parent = $null; $confirmed = $null; $received = $null; $exited = $null
+    try {
+        $parent = [Diagnostics.Process]::GetProcessById($ParentPid)
+        $null = $parent.Handle # Pin this process identity across exit/PID reuse.
+        $name = 'Local\HytaleAccounts-Uninstall-' + $Attempt
+        $confirmed = [Threading.EventWaitHandle]::OpenExisting($name + '-confirmed', [Security.AccessControl.EventWaitHandleRights]::Synchronize)
+        $received = [Threading.EventWaitHandle]::OpenExisting($name + '-received', [Security.AccessControl.EventWaitHandleRights]::Modify)
+        $exited = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset)
+        $exited.SafeWaitHandle = [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new($parent.Handle, $false)
+        if ([Threading.WaitHandle]::WaitAny([Threading.WaitHandle[]]@($exited, $confirmed), $TimeoutMilliseconds) -ne 1) {
+            throw 'Per-user finalization was not confirmed before parent exit or timeout; files preserved.'
+        }
+        $null = $received.Set()
+        if (!$parent.WaitForExit($TimeoutMilliseconds)) { throw 'Removal parent did not exit; files preserved.' }
+        if ($parent.ExitCode -ne 0) { throw 'Removal parent failed; files preserved.' }
+    } finally {
+        foreach ($handle in @($exited, $received, $confirmed, $parent)) { if ($handle) { $handle.Dispose() } }
+    }
+}
 function Stop-InstalledLauncher([string]$Installed, [switch]$IncludeOfficial) {
     $helpers = @(Get-CimInstance Win32_Process -Filter "Name='HytaleAccounts.exe'" | Where-Object { $_.ExecutablePath -eq $Installed })
     $official = Join-Path $env:ProgramFiles 'Hypixel Studios\Hytale Launcher\hytale-launcher.exe'

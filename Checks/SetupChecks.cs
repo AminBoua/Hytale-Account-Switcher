@@ -73,6 +73,19 @@ internal static class SetupChecks
         }
         try
         {
+            var attempt = Guid.NewGuid().ToString("N");
+            using (var signal = Setup.RemovalEvent(attempt, "confirmed"))
+            {
+                Reject(() => EventWaitHandleAcl.OpenExisting("Local\\HytaleAccounts-Uninstall-" + attempt + "-confirmed", EventWaitHandleRights.Modify).Dispose(),
+                    "another handle cannot forge finalization, even as the event owner");
+                Reject(() => EventWaitHandleAcl.OpenExisting("Local\\HytaleAccounts-Uninstall-" + attempt + "-confirmed", EventWaitHandleRights.ChangePermissions).Dispose(),
+                    "event owner cannot grant itself confirmation rights");
+                using var reader = EventWaitHandleAcl.OpenExisting("Local\\HytaleAccounts-Uninstall-" + attempt + "-confirmed", EventWaitHandleRights.Synchronize);
+                check(!reader.WaitOne(0), "confirmation starts unsignaled");
+                signal.Set();
+                check(reader.WaitOne(0), "only the original confirmation handle signals success");
+                Reject(() => Setup.RemovalEvent(attempt, "confirmed").Dispose(), "an existing removal attempt cannot be adopted");
+            }
             File.WriteAllText(Path.Combine(root, "Uninstall.ps1"), "non-executed removal fixture");
             File.WriteAllText(Path.Combine(root, "ShortcutIntegration.ps1"), "non-executed integration fixture");
             foreach (var failure in new Exception[] { new Win32Exception(1223), new IOException("Could not start uninstall.") })
@@ -121,7 +134,17 @@ internal static class SetupChecks
                 check(start.ArgumentList.Contains(Path.Combine(root, "Uninstall.ps1")), "successful removal only invokes user uninstall");
                 successfulPhases.Add(start.ArgumentList.Contains("-KeepJournal") ? "prepare" : "finalize");
                 return Task.CompletedTask;
-            }, _ => successfulPhases.Add("start"));
+            }, start =>
+            {
+                successfulPhases.Add("start");
+                var removalAttempt = start.ArgumentList[start.ArgumentList.IndexOf("-RemovalAttempt") + 1];
+                _ = Task.Run(() =>
+                {
+                    using var confirmed = EventWaitHandleAcl.OpenExisting("Local\\HytaleAccounts-Uninstall-" + removalAttempt + "-confirmed", EventWaitHandleRights.Synchronize);
+                    using var received = EventWaitHandleAcl.OpenExisting("Local\\HytaleAccounts-Uninstall-" + removalAttempt + "-received", EventWaitHandleRights.Modify);
+                    if (confirmed.WaitOne(TimeSpan.FromSeconds(10))) received.Set();
+                });
+            });
             check(successfulPhases.SequenceEqual(["prepare", "start", "finalize"]), "successful start finalizes user restoration before the parent exits");
 
             using (var directories = new SetupPayload.PinnedDirectories(root, false))

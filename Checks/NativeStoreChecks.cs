@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 
 if (args.Length == 0) args = ["--safe"];
+if (args.Length == 4 && args[0] == "--uninstall-finalization-child") { await UninstallFinalizationChecks.Run(args); return; }
 var safe = args.SequenceEqual(new[] { "--safe" });
 if (args.Length == 3 && args[0] == "--native-exit-child") { NativeExitChecks.Child(args[1], args[2]); return; }
 if (args.Contains("--live-add")) { await NativeSessionChecks.Run(addAccount: true); return; }
