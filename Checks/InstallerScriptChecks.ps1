@@ -836,6 +836,8 @@ try {
     & (Join-Path $destination 'Repair-Integration.ps1')
     & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly
     foreach ($path in $repairSnapshot.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $repairSnapshot[$path]) 'repeated discovery repair preserves shortcuts, journals and original backups' }
+    & (Join-Path $package 'Install.ps1') @options -PreflightOnly
+    foreach ($path in $repairSnapshot.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $repairSnapshot[$path]) 'preflight after discovery repair preserves relocated records, edited shortcut bytes and original backups' }
     & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
     Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
     $afterRepairPaths = (@($programs,$commonPrograms) | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -File -Recurse | ForEach-Object FullName } | Sort-Object) -join "`n"
