@@ -23,6 +23,23 @@ internal static class EffectiveAccessChecks
         }
     }
 
+    internal static void RuntimeOwner(byte[] actualDescriptor, Action<bool, string> check)
+    {
+        // Model a native extractor's child owned by an ordinary SID, with the bootstrap's actual inherited DACL.
+        var descriptor = new RawSecurityDescriptor(actualDescriptor, 0) { Owner = Stranger };
+        byte[] Bytes()
+        {
+            var bytes = new byte[descriptor.BinaryLength]; descriptor.GetBinaryForm(bytes, 0); return bytes;
+        }
+        check(Allowed(Bytes(), Stranger, (uint)FileSystemRights.ReadPermissions), "simulated runtime owner can read permissions");
+        check(new[] { FileSystemRights.WriteData, FileSystemRights.Delete, FileSystemRights.ChangePermissions, FileSystemRights.TakeOwnership }
+            .All(right => !Allowed(Bytes(), Stranger, (uint)right)), "simulated lower-privilege runtime owner cannot mutate bytes or permissions");
+        for (var index = descriptor.DiscretionaryAcl!.Count - 1; index >= 0; index--)
+            if (descriptor.DiscretionaryAcl[index] is CommonAce ace && ace.SecurityIdentifier.Value == "S-1-3-4")
+                descriptor.DiscretionaryAcl.RemoveAce(index);
+        check(Allowed(Bytes(), Stranger, (uint)FileSystemRights.ChangePermissions), "positive control exposes implicit owner WRITE_DAC without OWNER RIGHTS");
+    }
+
     internal static void Check(string path, bool accessible, Action<bool, string> check)
     {
         FileSystemSecurity acl = Directory.Exists(path) ? new DirectoryInfo(path).GetAccessControl() : new FileInfo(path).GetAccessControl();

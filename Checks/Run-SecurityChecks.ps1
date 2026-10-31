@@ -20,11 +20,12 @@ foreach ($entry in @(@('native-startup','Checks/NativeStartupRegressionChecks.ps
     @('acl-races','Checks/AclMigrationRaceChecks.ps1'),@('storage-races','Checks/AclMigrationRaceChecks.ps1','-Storage'),
     @('vm-harness-host-only','Checks/VmValidation/Validate.ps1'),@('evidence-gate','Checks/SecurityGateChecks.ps1'),
     @('evidence-runner','Checks/SecurityRunnerRegressionChecks.ps1'),
-    @('runtime-notices','Checks/RuntimeNoticeChecks.ps1'))) {
+    @('runtime-notices','Checks/RuntimeNoticeChecks.ps1'),@('runtime-extraction','Checks/RuntimeExtractionChecks.ps1'))) {
     $steps += @{Name=$entry[0];Exe='powershell.exe';Arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File') + $entry[1..($entry.Length-1)]}
 }
 if ($RegressionControls) {
     foreach ($entry in @(
+        @('CacheEnvironment','Checks/RuntimeExtractionChecks.ps1','FAIL apphost extracts native libraries before application startup'),
         @('OriginalHandoff','Checks/UninstallFinalizationRegressionChecks.ps1','FAIL machine removal is prevented after failed or missing finalization'),
         @('DestinationPin','Checks/SetupUpgradeRegressionChecks.ps1','FAIL setup pin existing publication[\s\S]*FAIL setup pin missing publication[\s\S]*FAIL setup pin existing journal publication[\s\S]*FAIL setup pin missing journal publication'),
         @('Membership','Checks/AclMigrationRaceChecks.ps1','FAIL inspected protected-file insertion stops initialization'),
