@@ -9,6 +9,7 @@
     <Version>0.1.3</Version>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="ElevatedRuntime.ps1" LogicalName="HytaleAccounts.ElevatedRuntime.ps1" />
     <EmbeddedResource Include="NativeDropdown.js" LogicalName="HytaleAccounts.NativeDropdown.js" />
     <EmbeddedResource Include="../Install.ps1" LogicalName="HytaleAccounts.Install.ps1" />
     <EmbeddedResource Include="../Uninstall.ps1" LogicalName="HytaleAccounts.Uninstall.ps1" />

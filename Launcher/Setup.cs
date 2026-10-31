@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
 
 namespace HytaleAccounts;
 
@@ -26,8 +27,16 @@ public static class Setup
 
     internal static ProcessStartInfo ElevationStart(string executable, string programs, string desktop)
     {
-        var start = new ProcessStartInfo(executable) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Environment.SystemDirectory };
-        foreach (var arg in new[] { ElevatedMode, programs, desktop, WindowsIdentity.GetCurrent().User!.Value }) start.ArgumentList.Add(arg);
+        using var resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("HytaleAccounts.ElevatedRuntime.ps1")
+            ?? throw new IOException("The protected runtime bootstrap is missing.");
+        using var reader = new StreamReader(resource);
+        var command = reader.ReadToEnd() + "\nInvoke-ElevatedRuntime " + string.Join(" ",
+            new[] { executable, programs, desktop, WindowsIdentity.GetCurrent().User!.Value }.Select(value => "'" + value.Replace("'", "''") + "'"));
+        // Elevate system PowerShell first: managed startup cannot protect libraries already loaded by apphost.
+        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"))
+        { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Environment.SystemDirectory };
+        foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-EncodedCommand",
+            Convert.ToBase64String(Encoding.Unicode.GetBytes(command)) }) start.ArgumentList.Add(arg);
         return start;
     }
 
@@ -190,6 +199,7 @@ public static class Setup
             Environment.GetFolderPath(Environment.SpecialFolder.Programs), Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)))
             ?? throw new IOException("Could not start setup.");
         await worker.WaitForExitAsync();
+        if (worker.ExitCode == 125) throw new IOException("Could not prepare the protected installer runtime. Check Program Files permissions and retry setup normally.");
         if (worker.ExitCode != 0) return worker.ExitCode; // The worker already displayed the setup error.
         await IntegrateUser(UserIntegrationStart(destination, uninstall: false));
         using var launcher = Process.Start(LauncherStart(destination))

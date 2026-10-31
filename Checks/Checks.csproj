@@ -5,4 +5,5 @@
   <ItemGroup><Compile Include="NativeStartupChecks.cs"/><Compile Include="NativeExitChecks.cs"/><Compile Include="NativeAdapterChecks.cs"/><Compile Include="LoggingChecks.cs"/></ItemGroup>
   <ItemGroup><Compile Include="AccountStorageChecks.cs"/></ItemGroup>
   <ItemGroup><Compile Include="UninstallFinalizationChecks.cs"/></ItemGroup>
+  <ItemGroup><Compile Include="RuntimePackageChecks.cs"/></ItemGroup>
 </Project>

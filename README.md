@@ -17,6 +17,8 @@ A Windows x64 addon that keeps your usual **Hytale Launcher** shortcut, browser,
 
 You need **Windows x64**, the official Hytale Launcher installed at the path below, and an existing Hytale Launcher shortcut. Setup requests administrator approval; everyday launcher use runs as your normal Windows user. The download includes its .NET runtime.
 
+Open setup normally. Its UAC request starts a hidden **Windows PowerShell** bootstrap, which prepares a protected runtime directory before starting the installer worker. No separate runtime installation is required. Do not use **Run as administrator** on the downloaded executable.
+
 ```text
 C:\Program Files\Hypixel Studios\Hytale Launcher\hytale-launcher.exe
 ```

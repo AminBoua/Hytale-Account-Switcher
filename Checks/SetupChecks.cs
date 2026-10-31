@@ -165,10 +165,14 @@ internal static class SetupChecks
                         Reject(() => File.WriteAllText(payload, "substituted"), "payload overwrite blocked: " + name);
                         Reject(() => File.Delete(payload), "payload replacement blocked: " + name);
                     }
-                    var elevation = Setup.ElevationStart(executable, root, root);
-                    check(elevation.FileName == executable && elevation.Verb == "runas" && elevation.UseShellExecute &&
-                        elevation.WindowStyle == ProcessWindowStyle.Hidden && elevation.ArgumentList.SequenceEqual(new[] { Setup.ElevatedMode, root, root, user.Value }),
-                        "UAC targets installer executable, with shortcut paths as separate arguments");
+                    var hostilePath = Path.Combine(root, "quote's & $path", "end\\");
+                    var elevation = Setup.ElevationStart(executable, hostilePath, root);
+                    var command = Encoding.Unicode.GetString(Convert.FromBase64String(elevation.ArgumentList[^1]));
+                    check(elevation.FileName == Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe") &&
+                        elevation.Verb == "runas" && elevation.UseShellExecute && elevation.WindowStyle == ProcessWindowStyle.Hidden &&
+                        elevation.WorkingDirectory == Environment.SystemDirectory && elevation.ArgumentList[^2] == "-EncodedCommand" &&
+                        command.EndsWith("Invoke-ElevatedRuntime '" + executable.Replace("'", "''") + "' '" + hostilePath.Replace("'", "''") + "' '" + root.Replace("'", "''") + "' '" + user.Value + "'"),
+                        "UAC targets system PowerShell bootstrap before apphost, with literal encoded shortcut paths");
                     var start = Setup.InstallStart(stage, root, root);
                     check(!start.UseShellExecute && start.CreateNoWindow && start.Verb == "" && start.WindowStyle == ProcessWindowStyle.Hidden &&
                         start.WorkingDirectory == stage && start.ArgumentList.Contains(Path.Combine(stage, "Install.ps1")) &&
