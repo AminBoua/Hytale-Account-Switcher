@@ -16,6 +16,9 @@ if ($Worker) {
     git config --global --add safe.directory ($repository.Replace('\','/'))
     if ($LASTEXITCODE) { throw 'Cannot trust the CI checkout for the test user.' }
     Write-Output 'CI tests run with a standard-user token and a separate disposable profile.'
+    # The offline extraction fixtures and single-file package need runtime packs in this user's fresh cache.
+    dotnet restore (Join-Path $PSScriptRoot 'RuntimeExtraction/RuntimeExtraction.csproj') --source https://api.nuget.org/v3/index.json -p:NuGetAudit=false
+    if ($LASTEXITCODE) { throw 'Cannot prepare runtime extraction and packaging prerequisites for the CI user.' }
     & (Join-Path $repository 'Build-Installer.ps1') -RegressionControls
     exit 0
 }
