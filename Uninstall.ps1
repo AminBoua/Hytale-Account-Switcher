@@ -9,6 +9,8 @@ param(
     [string]$UserSid = '',
     [switch]$Interactive
 )
+# Shell elevation cannot supply a child environment; restrict discovery before the first cmdlet.
+$env:PSModulePath = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules')
 $ErrorActionPreference = 'Stop'
 try {
     . (Join-Path $PSScriptRoot 'InstallerSafety.ps1')

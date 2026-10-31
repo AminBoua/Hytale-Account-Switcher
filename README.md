@@ -119,7 +119,7 @@ Choose the checks-only command or the packaging command for your task; packaging
 - `dist\SECURITY-STATUS.json` — artifact hash and validation status.
 - `dist\security\<run>\` — check report and logs.
 
-The safe suite covers C# storage/session/bridge behavior, mocked frontend behavior, installer and shortcut fixtures, race checks, and evidence-gate validation. It does not use live Hytale accounts, request elevation, or prove live launcher compatibility. Its build step clears package sources, so missing local SDK/targeting prerequisites must be installed first. A direct `dotnet build` only compiles and does not substitute for the gate.
+The safe suite covers C# storage/session/bridge behavior, mocked frontend behavior, installer and shortcut fixtures, substitute PowerShell module rejection, race checks, and evidence-gate validation. It does not use live Hytale accounts, request elevation, or prove live launcher compatibility. Its build step clears package sources, so missing local SDK/targeting prerequisites must be installed first. A direct `dotnet build` only compiles and does not substitute for the gate.
 
 GitHub Actions runs the safe suite and regression controls under a disposable standard Windows user. Its administrator bootstrap only prepares that test account; it does not establish UAC or cross-user security validation. Packaging also extracts the notices from the runtime packs actually used by the build and fails if a required pack license is missing.
 

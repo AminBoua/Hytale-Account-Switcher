@@ -38,7 +38,7 @@ public static class Setup
         foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File",
             Path.Combine(package, "Install.ps1"), "-ProgramsDirectory", programs, "-DesktopDirectory", desktop }) start.ArgumentList.Add(arg);
         if (userSid != null) { start.ArgumentList.Add("-UserSid"); start.ArgumentList.Add(userSid); }
-        // Elevated PowerShell must not auto-load modules or resolve system paths from the caller's environment.
+        // PowerShell must resolve modules and system paths only from protected system locations.
         start.Environment["PSModulePath"] = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "Modules");
         start.Environment["ProgramFiles"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         start.Environment["SystemRoot"] = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
@@ -110,6 +110,7 @@ public static class Setup
     internal static async Task Remove(string destination, Func<ProcessStartInfo, Task> integrateUser, Action<ProcessStartInfo> startRemoval)
     {
         var powershell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+        // Uninstall.ps1 restricts module discovery itself because runas cannot use a custom child environment.
         var start = new ProcessStartInfo(powershell) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
         foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File" }) start.ArgumentList.Add(arg);
         var script = Path.Combine(destination, "Uninstall.ps1");

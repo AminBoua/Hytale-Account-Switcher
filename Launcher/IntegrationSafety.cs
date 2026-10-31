@@ -33,7 +33,7 @@ public static class IntegrationSafety
         var encodedPath = Convert.ToBase64String(Encoding.UTF8.GetBytes(path));
         var script = "$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encodedPath + "')); $s=Get-AuthenticodeSignature -LiteralPath $p; if ($s.Status -ne 'Valid' -or $s.SignerCertificate.GetNameInfo(0,$false) -ne 'Hypixel Studios Canada Inc') {exit 1}; exit 0";
         var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe")) { UseShellExecute = false, CreateNoWindow = true };
-        start.Environment.Remove("PSModulePath");
+        start.Environment["PSModulePath"] = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "Modules");
         foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script)) }) start.ArgumentList.Add(arg);
         using var check = Process.Start(start)!;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
