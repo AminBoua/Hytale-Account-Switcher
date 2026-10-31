@@ -758,6 +758,96 @@ try {
     Check ((Get-FileHash -LiteralPath $shortcutPath).Hash -eq $foreignHash) 'uninstall preserves a replaced foreign shortcut and updated launcher'
     Check (!(Test-Path -LiteralPath (Join-Path $destination 'HytaleAccounts.exe'))) 'addon executable removed'
     Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) 'opaque stores, encryption keys, installation and UserData preserved'
+    # Repair must find existing links at new paths, using only its own recorded repair roots.
+    $repairCases = @()
+    foreach ($folder in @($programs,$commonPrograms)) {
+        foreach ($scenario in @('renamed-official','renamed-addon','deleted')) {
+            $path = Join-Path $folder ("repair-$scenario.lnk")
+            $link = $shell.CreateShortcut($path); $link.TargetPath = $official
+            $link.Description = "Original $scenario"; $link.Save()
+            $repairCases += [pscustomobject]@{ Scenario = $scenario; Path = $path; Current = $path; Hash = (Get-FileHash -LiteralPath $path).Hash; User = ($folder -eq $programs) }
+        }
+    }
+    & (Join-Path $package 'Install.ps1') @options
+    & (Join-Path $package 'Install.ps1') @options -UserOnly
+    foreach ($case in $repairCases) {
+        if ($case.Scenario -eq 'deleted') { [IO.File]::Delete($case.Path); continue }
+        $case.Current = Join-Path (Split-Path $case.Path) ('new-folder\' + (Split-Path $case.Path -Leaf))
+        [IO.Directory]::CreateDirectory((Split-Path $case.Current)) | Out-Null
+        [IO.File]::Move($case.Path, $case.Current)
+        if ($case.Scenario -eq 'renamed-official') {
+            $link = $shell.CreateShortcut($case.Current); $link.TargetPath = $official
+            $link.Description = 'User description before repair'; $link.IconLocation = (Join-Path $root 'custom.ico') + ',3'; $link.Save()
+            $case.Hash = (Get-FileHash -LiteralPath $case.Current).Hash
+        }
+    }
+    foreach ($folder in @($programs,$commonPrograms)) {
+        foreach ($scenario in @('recreated','foreign','arguments','targetless','unreadable')) {
+            $path = Join-Path $folder ("new-folder\repair-$scenario.lnk")
+            if ($scenario -eq 'unreadable') { [IO.File]::WriteAllBytes($path, [byte[]]@(1,2,3)) }
+            else {
+                $link = $shell.CreateShortcut($path)
+                if ($scenario -ne 'targetless') { $link.TargetPath = if ($scenario -eq 'foreign') { Join-Path $root 'other.exe' } else { $official } }
+                if ($scenario -eq 'arguments') { $link.Arguments = '--uninstall' }
+                $link.Description = "Updater or user $scenario"; $link.Save()
+            }
+            $repairCases += [pscustomobject]@{ Scenario = $scenario; Path = $path; Current = $path; Hash = (Get-FileHash -LiteralPath $path).Hash; User = ($folder -eq $programs) }
+        }
+    }
+    $outside = Join-Path $root 'outside-repair-roots'
+    [IO.Directory]::CreateDirectory($outside) | Out-Null
+    $outsideLink = Join-Path $outside 'Hytale Launcher.lnk'
+    $link = $shell.CreateShortcut($outsideLink); $link.TargetPath = $official; $link.Save()
+    $outsideHash = (Get-FileHash -LiteralPath $outsideLink).Hash
+    foreach ($folder in @($programs,$commonPrograms)) { New-Item -ItemType Junction -Path (Join-Path $folder 'linked-outside') -Target $outside | Out-Null }
+    $beforeRepairPaths = (@($programs,$commonPrograms) | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -File -Recurse | ForEach-Object FullName } | Sort-Object) -join "`n"
+    # Older machine journals may also retain user restoration roots.
+    $machineManifest = Join-Path $destination 'shortcuts.json'
+    $machineJournal = Get-Content -LiteralPath $machineManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    $machineJournal.Roots = @($machineJournal.Roots) + @($programs)
+    [IO.File]::WriteAllText($machineManifest, ($machineJournal | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+    $userBeforeRepair = @{}
+    foreach ($case in $repairCases | Where-Object { $_.User -and $_.Scenario -ne 'deleted' }) { $userBeforeRepair[$case.Current] = (Get-FileHash -LiteralPath $case.Current).Hash }
+    & (Join-Path $destination 'Repair-Integration.ps1')
+    foreach ($path in $userBeforeRepair.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $userBeforeRepair[$path]) 'common repair does not scan legacy user restoration roots' }
+    # Legacy journals without RepairRoots still repair within their recorded Roots.
+    $userJournal = Get-Content -LiteralPath $userManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    $userJournal.PSObject.Properties.Remove('RepairRoots')
+    [IO.File]::WriteAllText($userManifest, ($userJournal | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+    & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly
+    Check ((Get-FileHash -LiteralPath $outsideLink).Hash -eq $outsideHash) 'repair does not follow junctions outside its approved roots'
+    foreach ($case in $repairCases) {
+        if ($case.Scenario -eq 'deleted') { Check (!(Test-Path -LiteralPath $case.Path)) 'repair does not recreate deleted shortcuts'; continue }
+        if ($case.Scenario -in @('renamed-official','recreated')) {
+            Check ($shell.CreateShortcut($case.Current).TargetPath -eq (Join-Path $destination 'HytaleAccounts.exe')) "repair discovers $($case.Scenario) shortcut (user: $($case.User))"
+            $fixtureState = if ($case.User) { $userState } else { $destination }
+            $journal = Get-Content -LiteralPath (Join-Path $fixtureState 'shortcuts.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            $record = @($journal.Shortcuts | Where-Object Path -eq $case.Current)
+            Check ($record.Count -eq 1 -and (Get-FileHash -LiteralPath (Join-Path $fixtureState $record[0].Backup)).Hash -eq $case.Hash) 'discovered shortcut journals its current official bytes before repair'
+            if ($case.Scenario -eq 'renamed-official') { Check (!@($journal.Shortcuts | Where-Object Path -eq $case.Path).Count) 'renamed repair reuses its restoration record without duplicating identity' }
+        } elseif ($case.Scenario -ne 'renamed-addon') {
+            Check ((Get-FileHash -LiteralPath $case.Current).Hash -eq $case.Hash) "repair preserves unrelated $($case.Scenario) shortcut"
+        }
+    }
+    $repairSnapshot = @{}
+    foreach ($folder in @($programs,$commonPrograms,$userState,$destination)) {
+        foreach ($file in Get-ChildItem -LiteralPath $folder -File -Recurse) { $repairSnapshot[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName).Hash }
+    }
+    & (Join-Path $destination 'Repair-Integration.ps1')
+    & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly
+    foreach ($path in $repairSnapshot.Keys) { Check ((Get-FileHash -LiteralPath $path).Hash -eq $repairSnapshot[$path]) 'repeated discovery repair preserves shortcuts, journals and original backups' }
+    & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
+    Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
+    $afterRepairPaths = (@($programs,$commonPrograms) | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -File -Recurse | ForEach-Object FullName } | Sort-Object) -join "`n"
+    Check ($afterRepairPaths -ceq $beforeRepairPaths) 'discovery repair and uninstall preserve the exact existing shortcut inventory'
+    foreach ($folder in @($programs,$commonPrograms)) { [IO.Directory]::Delete((Join-Path $folder 'linked-outside')) }
+    Check ((Get-FileHash -LiteralPath $outsideLink).Hash -eq $outsideHash) 'discovery and removal leave the outside shortcut untouched'
+    foreach ($case in $repairCases) {
+        if ($case.Scenario -ne 'deleted') { Check ((Get-FileHash -LiteralPath $case.Current).Hash -eq $case.Hash) "uninstall restores or preserves $($case.Scenario) shortcut byte-for-byte" }
+        if ($case.Path -ne $case.Current -or $case.Scenario -eq 'deleted') { Check (!(Test-Path -LiteralPath $case.Path)) 'repair and uninstall create no duplicate or deleted shortcuts' }
+        if (Test-Path -LiteralPath $case.Current) { [IO.File]::Delete($case.Current) }
+    }
+    Check (!$global:HytaleFixtureTasks.Count -and !(Test-Path -LiteralPath $destination)) 'discovery repair retains complete uninstall cleanup with mocked tasks'
     $restorationCases = @()
     foreach ($folder in @($programs,$commonPrograms)) {
         foreach ($scenario in @('renamed','renamed-description','renamed-icon','deleted','unchanged','replaced')) {
