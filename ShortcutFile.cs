@@ -21,8 +21,10 @@ public sealed class ShortcutFile : IDisposable
             return info.Volume.ToString("X8") + ":" + info.IndexHigh.ToString("X8") + info.IndexLow.ToString("X8");
         }
     }
-    public ShortcutFile(string path, bool create)
+    public ShortcutFile(string path, bool create) : this(path, create, false) { }
+    public ShortcutFile(string path, bool create, bool readOnly)
     {
+        if (create && readOnly) throw new ArgumentException("Read-only shortcut opens cannot create files.");
         try
         {
             path = Path.GetFullPath(path);
@@ -40,14 +42,14 @@ public sealed class ShortcutFile : IDisposable
                 directories.Add(parent);
                 RequireRegular(parent, true);
             }
-            var file = OpenRelative(parent, parts[parts.Length - 1], false, create);
+            var file = OpenRelative(parent, parts[parts.Length - 1], false, create, readOnly);
             if (file == null) return;
-            try { RequireRegular(file, false); stream = new FileStream(file, FileAccess.ReadWrite); }
+            try { RequireRegular(file, false); stream = new FileStream(file, readOnly ? FileAccess.Read : FileAccess.ReadWrite); }
             catch { file.Dispose(); throw; }
         }
         catch { Dispose(); throw; }
     }
-    private static SafeFileHandle OpenRelative(SafeFileHandle parent, string name, bool directory, bool create)
+    private static SafeFileHandle OpenRelative(SafeFileHandle parent, string name, bool directory, bool create, bool readOnly = false)
     {
         var buffer = Marshal.StringToHGlobalUni(name);
         var unicode = new UnicodeString { Length = checked((ushort)(name.Length * 2)), MaximumLength = checked((ushort)(name.Length * 2)), Buffer = buffer };
@@ -58,8 +60,8 @@ public sealed class ShortcutFile : IDisposable
             var attributes = new ObjectAttributes { Length = Marshal.SizeOf(typeof(ObjectAttributes)), Root = parent.DangerousGetHandle(), Name = pointer, Attributes = 0x40 };
             SafeFileHandle handle; IoStatus status;
             // Relative opens remain bound to the actual parent even if it later acquires reparse data.
-            int result = NtCreateFile(out handle, directory ? 0x100081u : 0xC0110000u, ref attributes, out status,
-                IntPtr.Zero, 0x80, directory ? 3u : 0u, create ? 2u : 1u, 0x00200020u | (directory ? 1u : 0x40u), IntPtr.Zero, 0);
+            int result = NtCreateFile(out handle, directory ? 0x100081u : (readOnly ? 0x80100000u : 0xC0110000u), ref attributes, out status,
+                IntPtr.Zero, 0x80, directory ? 3u : (readOnly ? 1u : 0u), create ? 2u : 1u, 0x00200020u | (directory ? 1u : 0x40u), IntPtr.Zero, 0);
             if (result >= 0) return handle;
             handle.Dispose();
             uint error = RtlNtStatusToDosError(result);

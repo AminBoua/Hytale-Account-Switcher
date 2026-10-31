@@ -1,8 +1,8 @@
 # Dot-source after InstallerSafety.ps1. The journal lock also pins its directory for COM staging.
 if (!('ShortcutFile' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'ShortcutFile.cs') }
 function Open-ShortcutFile([string]$Path, [switch]$Create) { [ShortcutFile]::new($Path, $Create.IsPresent) }
-function Read-ShortcutBytes([string]$Path) {
-    $file = Open-ShortcutFile $Path
+function Read-ShortcutBytes([string]$Path, [switch]$ReadOnly) {
+    $file = if ($ReadOnly) { [ShortcutFile]::new($Path, $false, $true) } else { Open-ShortcutFile $Path }
     try { if (!$file.Exists) { throw "Shortcut backup is missing; files preserved: $Path" }; return ,$file.Read() } finally { $file.Dispose() }
 }
 function Write-ShortcutBytes([string]$Path, [byte[]]$Bytes) {
@@ -38,11 +38,46 @@ function Save-ShortcutJournal {
     if (Test-Path -LiteralPath $manifestPath) { Assert-RegularPath $manifestPath; [IO.File]::Replace($temporary, $manifestPath, [System.Management.Automation.Language.NullString]::Value) }
     else { [IO.File]::Move($temporary, $manifestPath) }
 }
-function Assert-ShortcutRecord($Record, $Roots) {
+function Assert-ShortcutRecord($Record, $Roots, [switch]$ReadOnly) {
     $path = [IO.Path]::GetFullPath($Record.Path)
     $allowed = @($Roots | Where-Object { $path.StartsWith([IO.Path]::GetFullPath($_).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
     if (!$allowed -or [IO.Path]::GetExtension($path) -ne '.lnk' -or $Record.Arguments -notin @('','--uninstall') -or ($Record.Backup -and $Record.Backup -notmatch '^shortcut-[a-f0-9]{32}\.lnk$')) { throw 'Invalid shortcut restoration journal; files preserved.' }
-    if ($Record.Backup) { $null = Read-ShortcutBytes (Join-Path $state $Record.Backup) }
+    if ($Record.Backup) { $null = Read-ShortcutBytes (Join-Path $state $Record.Backup) -ReadOnly:$ReadOnly }
+}
+function Get-InstallShortcuts([string[]]$Roots, $Records = @()) {
+    foreach ($folder in $Roots) {
+        Assert-RegularPath $folder
+        if (!(Test-Path -LiteralPath $folder)) { continue }
+        foreach ($file in Get-ChildItem -LiteralPath $folder -Filter '*.lnk' -Recurse) {
+            Assert-RegularPath $file.FullName
+            $record = @($Records | Where-Object Path -eq $file.FullName)
+            $link = if (!$record.Count) { $shell.CreateShortcut($file.FullName) }
+            if ($record.Count -or ($link.TargetPath -in @($official, $installed) -and !$link.Arguments)) {
+                [pscustomobject]@{ Path = $file.FullName; Record = ($record | Select-Object -First 1) }
+            }
+        }
+    }
+}
+function Assert-LauncherShortcut {
+    $found = @()
+    foreach ($scope in @(
+        @{ Roots = @($CommonDesktopDirectory, $CommonProgramsDirectory); State = $destination },
+        @{ Roots = @($DesktopDirectory, $ProgramsDirectory); State = (Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration') }
+    )) {
+        $state = $scope.State
+        $manifest = Join-Path $state 'shortcuts.json'
+        Assert-RegularPath $manifest
+        $records = @()
+        if (Test-Path -LiteralPath $manifest) {
+            $journal = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+            $callerSid = if ($PreflightOnly -or $UserOnly) { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } else { $UserSid }
+            if ($journal.UserSid -and $journal.UserSid -ne $callerSid) { throw 'Remove the addon from the Windows account that installed it before installing for another user.' }
+            $records = @($journal.Shortcuts)
+            foreach ($record in $records) { Assert-ShortcutRecord $record $journal.Roots -ReadOnly }
+        }
+        $found += @(Get-InstallShortcuts $scope.Roots $records)
+    }
+    if (!$found.Count) { throw 'No Hytale launcher shortcut was found. Reinstall the official launcher first.' }
 }
 function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove')] [string]$Operation, $Record) {
     # Missing directories mean the user removed the shortcut location; do not recreate them.

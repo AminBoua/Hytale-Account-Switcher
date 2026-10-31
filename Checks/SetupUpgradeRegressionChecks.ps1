@@ -19,12 +19,19 @@ try {
     }
     $path = Join-Path $launcher 'Setup.cs'; $source = Get-Content -LiteralPath $path -Raw
     # Only this disposable worker maps elevation, system locations and embedded resources to user-owned fixtures.
-    Replace-Once 'new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator)' 'true'
+    Replace-Once 'new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator)' 'SetupUpgradeChecks.Administrator'
     Replace-Once 'var executable = Environment.ProcessPath!;' 'var executable = SetupUpgradeChecks.Executable;'
     Replace-Once 'var programs = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);' 'var programs = SetupUpgradeChecks.Programs;'
     Replace-Once 'var launcherDirectory = Path.GetDirectoryName(IntegrationSafety.OfficialPath)!;' 'var launcherDirectory = Path.GetDirectoryName(SetupUpgradeChecks.OfficialPath)!;'
-    Replace-Once 'name => Assembly.GetExecutingAssembly().GetManifestResourceStream("HytaleAccounts." + name) ?? throw new IOException("Setup resource is missing: " + name),' 'SetupUpgradeChecks.Resource,'
+    Replace-Once 'Assembly.GetExecutingAssembly().GetManifestResourceStream("HytaleAccounts." + name) ?? throw new IOException("Setup resource is missing: " + name);' 'SetupUpgradeChecks.Resource(name);'
     Replace-Once 'SetupPayload.Permissions());' 'SetupUpgradeChecks.Permissions());'
+    # Exercise the real parent ordering too; the elevation boundary can only throw in this fixture.
+    Replace-Once 'if (!await IntegrationSafety.VerifyExecutable(IntegrationSafety.OfficialPath))' 'if (!await Task.FromResult(true))'
+    Replace-Once 'Process.Start(ElevationStart(' 'SetupUpgradeChecks.StartElevation(ElevationStart('
+    $source = $source.Replace('Environment.ProcessPath!', 'SetupUpgradeChecks.Executable').Replace('IntegrationSafety.OfficialPath', 'SetupUpgradeChecks.OfficialPath')
+    foreach ($folder in @('LocalApplicationData','Programs','DesktopDirectory')) {
+        $source = $source.Replace(('Environment.GetFolderPath(Environment.SpecialFolder.' + $folder + ')'), ('SetupUpgradeChecks.' + $folder))
+    }
     if ($Mutation -eq 'DestinationPin') {
         Replace-Once 'new SetupPayload.PinnedDirectories(destination, requireTrusted: true, forMutation: true)' 'new SetupPayload.PinnedDirectories(destination, requireTrusted: true)'
     }

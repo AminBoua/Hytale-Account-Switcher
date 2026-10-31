@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $repository = Split-Path $PSScriptRoot
 # Instrument only the fixture copy at the final handle-relative open; production has no race hooks.
 $source = Get-Content -LiteralPath (Join-Path $repository 'ShortcutFile.cs') -Raw
-$source = $source.Replace('var file = OpenRelative(parent, parts[parts.Length - 1], false, create);', 'if (ShortcutRaceProbe.BeforeLeaf != null) ShortcutRaceProbe.BeforeLeaf(path); var file = OpenRelative(parent, parts[parts.Length - 1], false, create);')
+$source = $source.Replace('var file = OpenRelative(parent, parts[parts.Length - 1], false, create, readOnly);', 'if (ShortcutRaceProbe.BeforeLeaf != null) ShortcutRaceProbe.BeforeLeaf(path); var file = OpenRelative(parent, parts[parts.Length - 1], false, create, readOnly);')
 $source += @'
 public static class ShortcutRaceProbe
 {
@@ -67,6 +67,15 @@ try {
         $lease = [ShortcutFile]::new($Path, $Create.IsPresent)
         try { if ($script:afterOpen) { & $script:afterOpen $Path $Create $lease }; return $lease } catch { $lease.Dispose(); throw }
     }
+    OfficialLink
+    $readOnly = [ShortcutFile]::new($path, $false, $true)
+    try {
+        Check ($readOnly.Exists -and $readOnly.Read().Length -gt 0) 'preflight can read through the validated shortcut handle'
+        Reject { $readOnly.Write([byte[]]@(1,2,3)) } 'read-only preflight handles cannot write'
+        Reject { [IO.File]::WriteAllText($path, 'racing edit') } 'read-only preflight pins exclude writers'
+        Reject { [IO.File]::Move($path, $path + '.moved') } 'read-only preflight pins exclude replacement'
+    } finally { $readOnly.Dispose() }
+    Reject { [ShortcutFile]::new((Join-Path $folder 'missing.lnk'), $true, $true) } 'read-only preflight cannot create a shortcut'
     foreach ($operation in @('Install','Repair','Remove')) {
         OfficialLink
         if ($operation -eq 'Remove') { Update-Shortcut $path Install ($records | Select-Object -First 1) }
@@ -99,6 +108,7 @@ try {
             New-Item -ItemType Junction -Path $folder -Target $outside | Out-Null
         }
         Reject { Update-Shortcut $path $operation ($records | Select-Object -First 1) } "$operation rejects junction planted between discovery and acquisition"
+        Reject { [ShortcutFile]::new($path, $false, $true) } 'read-only preflight rejects a linked ancestor'
         Check ((Get-FileHash -LiteralPath $victim).Hash -eq $sentinel) "$operation cannot write through pre-acquisition junction"
         [IO.Directory]::Delete($folder); [IO.Directory]::Move($folder + '-moved', $folder)
     }
@@ -132,6 +142,7 @@ try {
     [IO.Directory]::CreateDirectory($folder) | Out-Null
     New-Item -ItemType HardLink -Path $path -Target $victim | Out-Null
     Reject { Update-Shortcut $path Install $null } 'hard-linked shortcut rejected before any write'
+    Reject { [ShortcutFile]::new($path, $false, $true) } 'read-only preflight rejects a hard-linked backup'
     Check ((Get-FileHash -LiteralPath $victim).Hash -eq $sentinel) 'hard-link victim untouched'
     [IO.File]::Delete($path)
     OfficialLink; Update-Shortcut $path Install $record
