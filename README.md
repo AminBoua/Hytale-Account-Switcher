@@ -19,6 +19,8 @@ You need **Windows x64**, the official Hytale Launcher installed at the path bel
 
 Open setup normally. Its UAC request starts a hidden **Windows PowerShell** bootstrap, which prepares a protected runtime directory before starting the installer worker. No separate runtime installation is required. Do not use **Run as administrator** on the downloaded executable.
 
+Before requesting administrator approval, setup checks the current user's and common Desktop and Start Menu locations for an eligible existing shortcut. With none, it asks you to reinstall the official launcher and leaves addon files, Windows Apps registration, repair tasks and shortcuts unchanged. Shortcut eligibility and journal recovery use the same discovery rules as installation; setup does not create a replacement shortcut.
+
 ```text
 C:\Program Files\Hypixel Studios\Hytale Launcher\hytale-launcher.exe
 ```
@@ -122,6 +124,8 @@ Choose the checks-only command or the packaging command for your task; packaging
 - `dist\security\<run>\` — check report and logs.
 
 The safe suite covers C# storage/session/bridge behavior, mocked frontend behavior, installer and shortcut fixtures, substitute PowerShell module rejection, race checks, and evidence-gate validation. It does not use live Hytale accounts, request elevation, or prove live launcher compatibility. Its build step clears package sources, so missing local SDK/targeting prerequisites must be installed first. A direct `dotnet build` only compiles and does not substitute for the gate.
+
+`Checks/InstallerScriptChecks.ps1` covers missing and unrelated shortcuts, each common/user shortcut location alone, read-only upgrade backups, and ordinary fixture installation/removal with disposable files, an HKCU registry entry and mocked repair tasks. `Checks/SetupChecks.cs` checks the hidden, unelevated preflight process configuration. `Checks/SetupUpgradeRegressionChecks.ps1` exercises the real setup parent with elevation intercepted, checking prerequisite failures before legacy cleanup and UAC and cleanup of temporary staging.
 
 GitHub Actions runs the safe suite and regression controls under a disposable standard Windows user. Its administrator bootstrap only prepares that test account; it does not establish UAC or cross-user security validation. Packaging also extracts the notices from the runtime packs actually used by the build and fails if a required pack license is missing.
 

@@ -178,6 +178,11 @@ internal static class SetupChecks
                         start.WorkingDirectory == stage && start.ArgumentList.Contains(Path.Combine(stage, "Install.ps1")) &&
                         start.Environment["PSModulePath"] == Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "Modules"),
                         "PowerShell runs hidden with staged scripts and system modules, without runas");
+                    var preflight = Setup.ShortcutPreflightStart(stage, root, root);
+                    check(!preflight.UseShellExecute && preflight.Verb == "" && preflight.CreateNoWindow &&
+                        preflight.RedirectStandardError && preflight.ArgumentList.Contains("-PreflightOnly") &&
+                        !preflight.ArgumentList.Contains("-UserOnly") && preflight.ArgumentList.Contains(Path.Combine(stage, "Install.ps1")),
+                        "shortcut preflight uses the embedded installer unelevated and hidden, preserving errors for setup");
                     using var child = Process.Start(start)!;
                     await child.WaitForExitAsync();
                     check(child.ExitCode == 0 && File.ReadAllText(Path.Combine(root, "installed.bin")) == "synthetic installer image" &&

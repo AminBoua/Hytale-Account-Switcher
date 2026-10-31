@@ -4,15 +4,16 @@ param(
     [string]$CommonProgramsDirectory = [Environment]::GetFolderPath('CommonPrograms'),
     [string]$CommonDesktopDirectory = [Environment]::GetFolderPath('CommonDesktopDirectory'),
     [switch]$UserOnly,
+    [switch]$PreflightOnly,
     [string]$UserSid = '',
     [string]$RegistryPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HytaleAccounts'
 )
 $ErrorActionPreference = 'Stop'
+$journalLock = $null
 try {
 . (Join-Path $PSScriptRoot 'InstallerSafety.ps1')
 $helper = Join-Path $PSScriptRoot 'HytaleAccounts.exe'
 if (!(Test-Path -LiteralPath $helper)) { $helper = Join-Path $PSScriptRoot 'dist\build\HytaleAccounts.exe' }
-if (!(Test-Path -LiteralPath $helper)) { throw 'Build first with Build-Installer.ps1.' }
 $official = Join-Path $env:ProgramFiles 'Hypixel Studios\Hytale Launcher\hytale-launcher.exe'
 $destination = Join-Path (Split-Path $official) '.hytale-accounts-addon'
 $installed = Join-Path $destination 'HytaleAccounts.exe'
@@ -24,6 +25,11 @@ $repairRoots = $scanRoots
 $ownerSid = $UserSid
 if ($UserOnly -and [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Per-user shortcut integration must run without elevation.' }
 foreach ($path in @($helper, $destination) + $roots) { Assert-RegularPath $path }
+$shell = New-Object -ComObject WScript.Shell
+# Use the same discovery before UAC and again before the machine phase can mutate anything.
+if ($PreflightOnly -or !$UserOnly) { Assert-LauncherShortcut }
+if ($PreflightOnly) { return }
+if (!(Test-Path -LiteralPath $helper)) { throw 'Build first with Build-Installer.ps1.' }
 # A per-user journal must be restored by the Windows account that owns it.
 $machineManifest = Join-Path $destination 'shortcuts.json'
 if (Test-Path -LiteralPath $machineManifest) {
@@ -62,7 +68,6 @@ if (Test-Path -LiteralPath $manifestPath) {
     foreach ($record in $records) { Assert-ShortcutRecord $record $journal.Roots }
     $roots = @(@($journal.Roots) + $scanRoots | Select-Object -Unique)
 }
-$shell = New-Object -ComObject WScript.Shell
 if (!$UserOnly) {
 $payload = @()
 $retained = @()
@@ -157,18 +162,8 @@ $properties = @{
 foreach ($name in $properties.Keys) { New-ItemProperty -LiteralPath $RegistryPath -Name $name -Value $properties[$name] -PropertyType String -Force | Out-Null }
 }
 # Keep every existing launcher's name and location, including official system-wide shortcuts.
-foreach ($folder in $scanRoots) {
-    if (Test-Path -LiteralPath $folder) {
-        foreach ($file in Get-ChildItem -LiteralPath $folder -Filter '*.lnk' -Recurse) {
-            Assert-RegularPath $file.FullName
-            $record = @($records | Where-Object Path -eq $file.FullName)
-            if ($record.Count) { Update-Shortcut $file.FullName Install ($record | Select-Object -First 1); continue }
-            $link = $shell.CreateShortcut($file.FullName)
-            if ($link.TargetPath -in @($official, $installed) -and !$link.Arguments) {
-                Update-Shortcut $file.FullName Install $null
-            }
-        }
-    }
+foreach ($candidate in Get-InstallShortcuts $scanRoots $records) {
+    Update-Shortcut $candidate.Path Install $candidate.Record
 }
 Save-ShortcutJournal
 if ($UserOnly) {

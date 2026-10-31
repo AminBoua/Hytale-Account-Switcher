@@ -57,6 +57,17 @@ public static class Setup
     internal static ProcessStartInfo LauncherStart(string destination) =>
         new(Path.Combine(destination, "HytaleAccounts.exe")) { UseShellExecute = false, CreateNoWindow = true };
 
+    internal static ProcessStartInfo ShortcutPreflightStart(string package, string programs, string desktop)
+    {
+        var start = InstallStart(package, programs, desktop);
+        start.ArgumentList.Add("-PreflightOnly");
+        start.RedirectStandardError = true;
+        return start;
+    }
+
+    private static Stream Resource(string name) =>
+        Assembly.GetExecutingAssembly().GetManifestResourceStream("HytaleAccounts." + name) ?? throw new IOException("Setup resource is missing: " + name);
+
     internal static async Task RunElevated(string[] args)
     {
         if (args.Length != 4 || args[0] != ElevatedMode || !IsAdministrator)
@@ -86,7 +97,7 @@ public static class Setup
             }
         }
         using var package = SetupPayload.Extract(Path.Combine(programs, "HytaleAccounts-setup-" + Guid.NewGuid().ToString("N")), source,
-            name => Assembly.GetExecutingAssembly().GetManifestResourceStream("HytaleAccounts." + name) ?? throw new IOException("Setup resource is missing: " + name),
+            Resource,
             SetupPayload.Permissions());
         using var install = Process.Start(InstallStart(package.DirectoryPath, args[1], args[2], args[3])) ?? throw new IOException("Could not start setup.");
         await install.WaitForExitAsync();
@@ -184,6 +195,15 @@ public static class Setup
         using var source = SetupPayload.OpenSource(Environment.ProcessPath!);
         if (!await IntegrationSafety.VerifyExecutable(IntegrationSafety.OfficialPath))
             throw new IOException(IntegrationSafety.CompatibilityMessage(IntegrationSafety.OfficialPath));
+        // Reuse the embedded installer read-only, before legacy cleanup or any request for elevation.
+        var user = WindowsIdentity.GetCurrent().User!;
+        var acl = new DirectorySecurity(); acl.SetOwner(user); acl.SetAccessRuleProtection(true, false);
+        acl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+        using (var preflight = SetupPayload.Extract(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "HytaleAccounts-preflight-" + Guid.NewGuid().ToString("N")), source, Resource, acl))
+            await IntegrateUser(ShortcutPreflightStart(preflight.DirectoryPath, Environment.GetFolderPath(Environment.SpecialFolder.Programs),
+                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)));
         // Remove the previous per-user package without elevating user-writable legacy code.
         var legacy = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HytaleAccounts", "NativeLauncher", "HytaleAccounts.exe");
         NativeStores.RegularPath(legacy);

@@ -203,6 +203,61 @@ try {
     foreach ($file in $protected) { New-Item -ItemType Directory -Path (Split-Path $file) -Force | Out-Null; Set-Content -LiteralPath $file -Value 'opaque preserved bytes' }
     $hashes = @{}; foreach ($file in $protected) { $hashes[$file] = (Get-FileHash -LiteralPath $file).Hash }
     $shell = New-Object -ComObject WScript.Shell
+    $missingShortcut = 'No Hytale launcher shortcut was found. Reinstall the official launcher first.'
+    foreach ($scenario in @('no shortcuts','unrelated shortcuts only')) {
+        $unrelated = @()
+        if ($scenario -eq 'unrelated shortcuts only') {
+            foreach ($folder in @($programs,$desktop,$commonPrograms,$commonDesktop)) {
+                New-Item -ItemType Directory -Path $folder -Force | Out-Null
+                foreach ($name in @('Hytale Launcher','launcher with arguments','official uninstaller')) {
+                    $path = Join-Path $folder ($name + '.lnk')
+                    $link = $shell.CreateShortcut($path)
+                    $link.TargetPath = if ($name -eq 'launcher with arguments') { $official } else { Join-Path $root 'other.exe' }
+                    if ($name -eq 'launcher with arguments') { $link.Arguments = '--uninstall' }
+                    $link.Save(); $unrelated += $path
+                }
+            }
+        }
+        foreach ($preflight in @($true,$false)) {
+            $snapshot = Get-InstallFixtureSnapshot
+            $failure = $null
+            try { & (Join-Path $package 'Install.ps1') @options -PreflightOnly:$preflight } catch { $failure = $_ }
+            Check ($failure -and $failure.Exception.Message -eq $missingShortcut) "$scenario rejected (preflight: $preflight) with the existing actionable error"
+            $after = Get-InstallFixtureSnapshot
+            Check ($after.Files -ceq $snapshot.Files -and $after.Registry -ceq $snapshot.Registry -and $after.Tasks -ceq $snapshot.Tasks) "$scenario leaves files, shortcuts, registry and mocked tasks unchanged"
+            Check (!(Test-Path -LiteralPath $destination) -and !(Test-Path -LiteralPath $registry) -and !$global:HytaleFixtureTasks.Count) "$scenario creates no addon payload, Apps entry or repair task"
+            Check ((Get-Content -LiteralPath (Join-Path $package 'install-error.txt') -Raw).Contains($missingShortcut)) "$scenario retains setup's error diagnostic"
+        }
+        foreach ($path in $unrelated) { [IO.File]::Delete($path) }
+    }
+    # Each common/user location alone must suffice, independent of the shortcut's name.
+    foreach ($folder in @($commonPrograms,$commonDesktop,$programs,$desktop)) {
+        $path = Join-Path $folder 'ordinary renamed launcher.lnk'
+        $link = $shell.CreateShortcut($path); $link.TargetPath = $official; $link.Save()
+        $original = (Get-FileHash -LiteralPath $path).Hash
+        $snapshot = Get-InstallFixtureSnapshot
+        & (Join-Path $package 'Install.ps1') @options -PreflightOnly
+        $after = Get-InstallFixtureSnapshot
+        Check ($after.Files -ceq $snapshot.Files -and $after.Registry -ceq $snapshot.Registry -and $after.Tasks -ceq $snapshot.Tasks) "preflight accepts only $folder without mutation"
+        & (Join-Path $package 'Install.ps1') @options
+        & (Join-Path $package 'Install.ps1') @options -UserOnly
+        Check ($shell.CreateShortcut($path).TargetPath -eq (Join-Path $destination 'HytaleAccounts.exe') -and (Test-Path -LiteralPath $registry) -and $global:HytaleFixtureTasks.Count -eq 2) "ordinary fixture installation succeeds with only $folder"
+        $stateDirectory = if ($folder -in @($commonPrograms,$commonDesktop)) { $destination } else { Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration' }
+        $journal = Get-Content -LiteralPath (Join-Path $stateDirectory 'shortcuts.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $backup = Join-Path $stateDirectory $journal.Shortcuts[0].Backup
+        $originalAcl = Get-Acl -LiteralPath $backup
+        $readOnlyAcl = Get-Acl -LiteralPath $backup
+        $readOnlyAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.WindowsIdentity]::GetCurrent().User, 'Write,Delete', 'Deny'))
+        try {
+            Set-Acl -LiteralPath $backup -AclObject $readOnlyAcl
+            & (Join-Path $package 'Install.ps1') @options -PreflightOnly
+            Check ((Get-FileHash -LiteralPath $backup).Hash -eq $original) 'upgrade preflight reads protected restoration backups without requiring write access'
+        } finally { Set-Acl -LiteralPath $backup -AclObject $originalAcl }
+        & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
+        Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
+        Check ((Get-FileHash -LiteralPath $path).Hash -eq $original -and !(Test-Path -LiteralPath $destination) -and !(Test-Path -LiteralPath $registry) -and !$global:HytaleFixtureTasks.Count) "single-location fixture restores its shortcut and removes fixture installation state"
+        [IO.File]::Delete($path)
+    }
     $shortcutPath = Join-Path $programs ('Hytale Launch' + [char]0xE9 + 'r.lnk')
     $previous = $shell.CreateShortcut($shortcutPath); $previous.TargetPath = $official
     $previous.Hotkey = 'CTRL+ALT+H'; $previous.WindowStyle = 7; $previous.Description = 'Original Hytale shortcut'; $previous.Save()
