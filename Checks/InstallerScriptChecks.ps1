@@ -6,6 +6,7 @@ $registry = 'HKCU:\Software\HytaleAccounts-Check-' + $id
 $repository = Split-Path $PSScriptRoot
 $oldLocal = $env:LOCALAPPDATA
 $oldPrograms = $env:ProgramFiles
+$oldModules = $env:PSModulePath
 # Exercise the real task action/trigger/settings without registering a system task during fixtures.
 Import-Module ScheduledTasks
 $global:HytaleFixtureTasks = @{}
@@ -812,6 +813,7 @@ try {
     if (Test-Path -LiteralPath $registry) { Remove-Item -LiteralPath $registry }
     $env:LOCALAPPDATA = $oldLocal
     $env:ProgramFiles = $oldPrograms
+    $env:PSModulePath = $oldModules
     if (Test-Path -LiteralPath $root) { Remove-Fixture $root }
     Remove-Variable HytaleFixtureTasks -Scope Global -ErrorAction SilentlyContinue
 }
