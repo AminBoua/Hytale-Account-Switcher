@@ -118,6 +118,16 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
             }
             return
         }
+        if ($Operation -eq 'Repair' -and !$Record) {
+            $identity = $file.Identity
+            $matches = @($records | Where-Object { $_.FileId -and $_.FileId -eq $identity })
+            if ($matches.Count -gt 1) { return }
+            if ($matches.Count -eq 1) {
+                # A renamed official link keeps its restoration record and native identity.
+                $Record = $matches[0]
+                $Record.Path = $Path
+            }
+        }
         if (!$Record) {
             $Record = [pscustomobject]@{ Path = $Path; Backup = ('shortcut-' + [Guid]::NewGuid().ToString('N') + '.lnk'); Arguments = '' }
             $script:records += $Record

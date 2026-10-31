@@ -24,4 +24,15 @@ try {
             Update-Shortcut $record.Path Repair $record
         }
     }
+    foreach ($folder in $repairRoots) {
+        Assert-RegularPath $folder
+        if (Test-Path -LiteralPath $folder) {
+            foreach ($file in Get-ChildItem -LiteralPath $folder -Filter '*.lnk' -File -Recurse) {
+                if ($file.FullName -notin $records.Path) {
+                    Assert-ShortcutRecord ([pscustomobject]@{ Path = $file.FullName; Arguments = '' }) $roots
+                    Update-Shortcut $file.FullName Repair $null
+                }
+            }
+        }
+    }
 } finally { $journalLock.Dispose() }

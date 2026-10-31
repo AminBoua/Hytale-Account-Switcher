@@ -288,6 +288,32 @@ try {
         }
         Check ((Get-FileHash -LiteralPath $backupPath).Hash -eq $backupHash -and (Get-Item -LiteralPath $backupPath).LastWriteTimeUtc -eq $backupWritten) "$operation partial-write recovery preserves the original backup"
     }
+    $path = Join-Path $folder 'Discovered-Repair.lnk'
+    OfficialLink; Update-Shortcut $path Install $null
+    $record = $records | Where-Object Path -eq $path
+    $renamed = Join-Path $folder 'Renamed-Repair.lnk'
+    [IO.File]::Move($path, $renamed)
+    $link = $shell.CreateShortcut($renamed); $link.TargetPath = $official; $link.Save()
+    $script:beforeOpen = {
+        param($opened,$create)
+        if ($opened -ne $renamed) { return }
+        $script:beforeOpen = $null
+        $link = $shell.CreateShortcut($renamed); $link.Description = 'User edit before repair acquisition'; $link.Save()
+    }
+    $script:afterOpen = {
+        param($opened,$create,$lease)
+        if ($opened -ne $renamed) { return }
+        $script:discoveredOriginalHash = Get-ShortcutHash ($lease.Read())
+        Reject { [IO.File]::Move($renamed, $renamed + '.moved') } 'discovered repair holds the file used to match its recorded identity'
+        Reject { [IO.File]::WriteAllText($renamed, 'racing edit') } 'discovered repair holds the inspected bytes through journaling and write'
+    }
+    Update-Shortcut $renamed Repair $null
+    $script:afterOpen = $null
+    Check ($record.Path -eq $renamed -and @($records | Where-Object FileId -eq $record.FileId).Count -eq 1) 'discovered repair relocates one identity record without duplicating ownership'
+    Check ((Get-ShortcutHash (Read-ShortcutBytes (Join-Path $state $record.Backup))) -eq $script:discoveredOriginalHash) 'discovered repair backs up the held official bytes including pre-acquisition user edits'
+    Check ($shell.CreateShortcut($renamed).TargetPath -eq $installed) 'discovered repair updates the renamed official shortcut through its held file'
+    Update-Shortcut $renamed Remove $record
+    Check ((Get-ShortcutHash (Read-ShortcutBytes $renamed)) -eq $script:discoveredOriginalHash) 'discovered repair uninstalls to the exact official bytes and user edits'
     # Exercise the production cleanup after real shortcut writes have produced several recovery records.
     $backups = @($records | Where-Object Backup | ForEach-Object Backup)
     Check ($backups.Count -gt 1) 'cleanup fixture has multiple recorded backups'
