@@ -27,7 +27,7 @@ public static class SetupUpgradeChecks
             var bytes = File.ReadAllText(Path.Combine(repository, name));
             if (name == "Install.ps1")
             {
-                const string version = "DisplayVersion = '0.1.4'";
+                const string version = "DisplayVersion = '0.1.5'";
                 if (!bytes.Contains(version)) throw new Exception("Lifecycle DisplayVersion fixture boundary changed.");
                 bytes = bytes.Replace(version, "DisplayVersion = '0.1." + payloadVersion + "'");
                 bytes = bytes.Replace("[Environment]::GetFolderPath('CommonPrograms')", Quote(commonPrograms))
@@ -117,6 +117,10 @@ public static class SetupUpgradeChecks
         var sentinels = new[] { "Accounts/one/account.dat", "Accounts/one/.keys/key", "install/game", "UserData/world", "credentials.dpapi" }
             .Select(name => Path.Combine(LocalApplicationData, "Hytale", name)).ToArray();
         foreach (var path in sentinels) { Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, "opaque sentinel"); }
+        var sentinelAcls = Directory.EnumerateFileSystemEntries(Path.Combine(LocalApplicationData, "Hytale"), "*", SearchOption.AllDirectories)
+            .Append(Path.Combine(LocalApplicationData, "Hytale")).ToDictionary(path => path, Descriptor);
+        static string Descriptor(string path) => (Directory.Exists(path) ? (FileSystemSecurity)new DirectoryInfo(path).GetAccessControl()
+            : new FileInfo(path).GetAccessControl()).GetSecurityDescriptorSddlForm(AccessControlSections.All);
         static string Quote(string value) => "'" + value.Replace("'", "''") + "'";
         var links = new[] { Path.Combine(commonPrograms, "Hytale.lnk"), Path.Combine(userPrograms, "Hytale.lnk") };
         var create = Setup.InstallStart(root, userPrograms, userDesktop);
@@ -149,7 +153,8 @@ public static class SetupUpgradeChecks
                 if (!File.ReadAllBytes(path).SequenceEqual(bytes)) throw new Exception("Lifecycle changed recovery bytes: " + path);
             if (File.ReadAllText(OfficialPath) != "official fixture bytes" ||
                 new FileInfo(OfficialPath).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All) != officialAcl ||
-                sentinels.Any(path => File.ReadAllText(path) != "opaque sentinel")) throw new Exception("Lifecycle changed official launcher or sentinel data.");
+                sentinels.Any(path => File.ReadAllText(path) != "opaque sentinel") ||
+                sentinelAcls.Any(item => Descriptor(item.Key) != item.Value)) throw new Exception("Lifecycle changed official launcher or sentinel bytes/ACLs.");
             using var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName);
             if ((string?)entry?.GetValue("InstallLocation") != destination ||
                 (string?)entry.GetValue("UninstallString") != "\"" + Path.Combine(destination, "HytaleAccounts.exe") + "\" --uninstall")
@@ -162,6 +167,19 @@ public static class SetupUpgradeChecks
         var recovery = states.SelectMany(path => Directory.EnumerateFiles(path).Where(file => Path.GetFileName(file) == "shortcuts.json" || Path.GetFileName(file).StartsWith("shortcut-")))
             .ToDictionary(path => path, File.ReadAllBytes);
         foreach (var path in links) recovery.Add(path, File.ReadAllBytes(path));
+        var recoveryAcls = recovery.Keys.ToDictionary(path => path, Descriptor);
+        void CheckRecoveryAcls()
+        {
+            foreach (var (path, acl) in recoveryAcls)
+                if (Descriptor(path) != acl) throw new Exception("Lifecycle changed exact recovery ACL: " + path);
+        }
+        string Registration()
+        {
+            using var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName)!;
+            return string.Join("\n", entry.GetValueNames().Order(StringComparer.Ordinal).Select(name =>
+                name + "=" + entry.GetValueKind(name) + ":" + entry.GetValue(name)));
+        }
+        var oldRegistration = Registration();
         for (var index = 0; index < states.Length; index++)
             if (!Directory.EnumerateFiles(states[index], "shortcut-*.lnk").Any(path => File.ReadAllBytes(path).SequenceEqual(originals[index])))
                 throw new Exception("Lifecycle did not retain original shortcut backup bytes.");
@@ -197,8 +215,10 @@ public static class SetupUpgradeChecks
         using (var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName))
             if ((string?)entry!.GetValue("DisplayVersion") != "0.1.1") throw new Exception("Locked upgrade changed the registered version.");
         Console.WriteLine("PASS real setup locked destination preserves old payload and recovery state");
+        CheckRecoveryAcls();
+        if (Registration() != oldRegistration) throw new Exception("Locked upgrade changed Windows Apps values or types.");
         try { await Install(); }
-        finally { CheckPreserved(recovery); }
+        finally { CheckPreserved(recovery); CheckRecoveryAcls(); }
         foreach (var name in payload)
         {
             var installed = File.ReadAllBytes(Path.Combine(destination, name));
@@ -207,8 +227,11 @@ public static class SetupUpgradeChecks
         using (var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName))
             if ((string?)entry!.GetValue("DisplayVersion") != "0.1.2") throw new Exception("Upgrade did not register the newer version.");
         Console.WriteLine("PASS real setup retry upgrades every payload with both existing journals and destination pin retained");
+        var upgradedRegistration = Registration();
         await Install();
         CheckPreserved(recovery);
+        CheckRecoveryAcls();
+        if (Registration() != upgradedRegistration) throw new Exception("Same-package reinstall changed Windows Apps values or types.");
         using (var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName))
             if ((string?)entry!.GetValue("DisplayVersion") != "0.1.2") throw new Exception("Upgrade/reinstall did not register the newer version.");
         if (Directory.EnumerateFiles(destination, ".upgrade-*").Any() || Directory.EnumerateDirectories(Programs, "HytaleAccounts-setup-*").Any())

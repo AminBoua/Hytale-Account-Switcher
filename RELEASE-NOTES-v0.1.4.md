@@ -1,5 +1,7 @@
 # v0.1.4 — unpublished upgrade candidate
 
+Superseded locally by the pending [v0.1.5 notes](RELEASE-NOTES-v0.1.5.md). Retain this as historical context; do not publish these notes or the old candidate as the next patch.
+
 **Publication blocked: a genuine older-installed-version to packaged-candidate upgrade in a disposable Windows environment has not been validated. Not security-validated.**
 
 - Integrate all three upgrade repair branches. The reported `Replace` / "Unable to remove the file to be replaced" failure is reproduced by the released restrictive directory pin; the existing production repair permits journal publication while retaining directory replacement protection.

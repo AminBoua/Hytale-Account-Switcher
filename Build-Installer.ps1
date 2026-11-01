@@ -29,6 +29,7 @@ try {
     $inspection = & dotnet run --project Checks/Checks.csproj -c Release --no-build --no-restore -- --runtime-package dist/HytaleAccounts-Setup.exe dist/HytaleAccounts-Setup.zip $PSScriptRoot
     if ($LASTEXITCODE) { throw 'Release runtime/package inspection failed.' }
     $inspection | Set-Content -LiteralPath dist/RUNTIME-PACKAGE.json -Encoding UTF8
+    if ($RegressionControls) { & ./Checks/RuntimePackageRegressionChecks.ps1 }
     $sums = (@('HytaleAccounts-Setup.exe','HytaleAccounts-Setup.zip') + $sidecars) | ForEach-Object {
         (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot "dist/$_") -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $_
     }

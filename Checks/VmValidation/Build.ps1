@@ -14,9 +14,9 @@ foreach ($name in @('Checks.exe','Checks.dll','Checks.deps.json','Checks.runtime
 foreach ($name in @('Guard.ps1','Run.ps1','RepairProbe.ps1','Runtime.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $Destination }
 foreach ($name in @('SecurityEvidence.ps1','RuntimeEvidence.ps1')) { Copy-Item -LiteralPath (Join-Path $repository "Checks/$name") -Destination $Destination }
 Copy-Item -LiteralPath (Join-Path $repository 'Launcher/ElevatedRuntime.ps1') -Destination $Destination
-dotnet publish (Join-Path $PSScriptRoot 'RuntimeProbe/RuntimeProbe.csproj') -c Release -o (Join-Path $PSScriptRoot 'bin/runtime-probe') --nologo --configfile (Join-Path $PSScriptRoot 'NuGet.Config') -p:NuGetAudit=false
+# Publish directly into the fresh package so repeated builds cannot reuse an incomplete sidecar directory.
+dotnet publish (Join-Path $PSScriptRoot 'RuntimeProbe/RuntimeProbe.csproj') -c Release -o $Destination --nologo --configfile (Join-Path $PSScriptRoot 'NuGet.Config') -p:NuGetAudit=false -p:DebugType=None -p:DebugSymbols=false
 if ($LASTEXITCODE) { throw 'Harmless runtime probe publish failed.' }
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'bin/runtime-probe') -File | Where-Object { $_.Name -eq 'RuntimeProbe.exe' -or $_.Extension -eq '.dll' }) { Copy-Item -LiteralPath $file.FullName -Destination $Destination }
 foreach ($name in @('InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1')) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $Destination }
 if ((Get-SecuritySource $repository).Fingerprint -ne $source.Fingerprint) { throw 'Source changed during VM package build.' }
 @{ Schema=1; Kind='vm-validation-package'; HostUuid = (Get-CimInstance Win32_ComputerSystemProduct).UUID; BuiltUtc = [DateTime]::UtcNow.ToString('o'); Source=$source; BuildEnvironment=$environment;
