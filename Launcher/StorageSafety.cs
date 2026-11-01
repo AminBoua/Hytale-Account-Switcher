@@ -32,8 +32,9 @@ internal static class StorageSafety
         // Windows profile ancestors may allow new siblings, but never replacement of an existing child.
         if (ancestor && security is DirectorySecurity) mutation &= ~6u;
         var denied = new Dictionary<string, uint>();
-        foreach (var entry in descriptor.DiscretionaryAcl)
+        for (var index = 0; index < descriptor.DiscretionaryAcl.Count; index++)
         {
+            var entry = descriptor.DiscretionaryAcl[index];
             if ((entry.AceFlags & AceFlags.InheritOnly) != 0) continue;
             if (entry is not CommonAce ace || ace.IsCallback || ace.AceQualifier is not (AceQualifier.AccessAllowed or AceQualifier.AccessDenied))
                 throw new IOException($"Unsupported access rule on '{path}'; operation stopped and files preserved.");
@@ -47,7 +48,8 @@ internal static class StorageSafety
             // Evaluate each trustee separately: a deny for one group cannot protect an allow for another.
             var effective = rights & ~(denied.GetValueOrDefault(sid) | denied.GetValueOrDefault("S-1-1-0"));
             if ((effective & mutation) != 0)
-                throw new IOException($"Unsafe mutation permissions on '{path}'; operation stopped and files preserved.");
+                throw new IOException($"Unsafe mutation permissions on '{path}'; operation stopped and files preserved. " +
+                    $"ACE {index} ({ace.AceFlags}), mask 0x{(uint)ace.AccessMask:X8}, effective mutation 0x{effective & mutation:X8}.");
         }
     }
 

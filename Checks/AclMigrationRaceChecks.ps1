@@ -21,6 +21,7 @@ try {
     }
     # Hooks exist only in this temporary copy; the shipped launcher has no test callbacks.
     if ($StorageSafety) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'EffectiveAccessChecks.cs') -Destination $checks
         if ($Storage -or $PinsOnly -or $Mutation -notin @('None','Policy','PrivateReplacement')) { throw 'Invalid storage policy mutation options.' }
         'StorageSafetyChecks.Run((ok, message) => { if (!ok) throw new Exception(message); Console.WriteLine("PASS " + message); });' |
             Set-Content -LiteralPath (Join-Path $checks 'Program.cs')

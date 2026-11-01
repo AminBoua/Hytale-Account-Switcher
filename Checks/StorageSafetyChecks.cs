@@ -50,6 +50,48 @@ internal static class StorageSafetyChecks
         Policy(trusted + "(A;;0x40;;;BU)", false, "ancestor delete-child is never exempted", ancestor: true);
         Policy(trusted + "(A;;0x100;;;BU)", false, "ancestor reparse mutation is never exempted", ancestor: true);
 
+        // Reproduce the reported ACL shape with synthetic identities, never a live descriptor.
+        var mutationRights = new[] { FileSystemRights.WriteData, FileSystemRights.AppendData,
+            FileSystemRights.WriteExtendedAttributes, FileSystemRights.WriteAttributes, FileSystemRights.Delete,
+            FileSystemRights.DeleteSubdirectoriesAndFiles, FileSystemRights.ChangePermissions, FileSystemRights.TakeOwnership };
+        DirectorySecurity Profile(bool unsafeUsers, string control = "AI", string flags = "OICI", string deny = "", string group = "SY")
+        {
+            var acl = new DirectorySecurity();
+            acl.SetSecurityDescriptorSddlForm($"O:BAG:{group}D:{control}" + deny +
+                $"(A;{flags};{(unsafeUsers ? "FA" : "FRFX")};;;BU)" +
+                $"(A;OICIID;FRFX;;;{Stranger.Value})(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;{User.Value})");
+            return acl;
+        }
+        foreach (var control in new[] { "AI", "PAI" })
+        foreach (var flags in new[] { "OICI", "OICIID" })
+        foreach (var unsafeUsers in new[] { false, true })
+        {
+            var acl = Profile(unsafeUsers, control, flags);
+            var descriptor = new RawSecurityDescriptor(acl.GetSecurityDescriptorBinaryForm(), 0);
+            check(descriptor.Owner!.Value == "S-1-5-32-544" && descriptor.Group!.Value == "S-1-5-18" &&
+                acl.AreAccessRulesProtected == control.Contains('P') &&
+                descriptor.DiscretionaryAcl![0].AceFlags.HasFlag(AceFlags.Inherited) == flags.EndsWith("ID"),
+                "profile reproduction retains owner, group, protection and ACE inheritance");
+            if (unsafeUsers)
+            {
+                var error = Reject(() => StorageSafety.Require(acl, "synthetic profile"), "profile Users full control is rejected");
+                check(error.Message.Contains("ACE 0") && error.Message.Contains("mask 0x001F01FF") &&
+                    error.Message.Contains("effective mutation 0x000D0156") &&
+                    !error.Message.Contains(User.Value) && !error.Message.Contains(Stranger.Value),
+                    "rejection identifies the ACE and masks without private principal identities");
+            }
+            else { StorageSafety.Require(acl, "synthetic profile"); check(true, "legitimate read-only Users profile accepted"); }
+            check(mutationRights.All(right => EffectiveAccessChecks.Allowed(acl.GetSecurityDescriptorBinaryForm(), Stranger, (uint)right) == unsafeUsers),
+                "Windows Authz confirms every unrelated-user mutation right for the profile variant");
+        }
+        var deniedProfile = Profile(true, deny: "(D;;FA;;;BU)");
+        StorageSafety.Require(deniedProfile, "synthetic denied profile");
+        check(mutationRights.All(right => !EffectiveAccessChecks.Allowed(deniedProfile.GetSecurityDescriptorBinaryForm(), Stranger, (uint)right)),
+            "preceding Users deny removes effective mutation despite a full-control allow");
+        StorageSafety.Require(Profile(true, flags: "OICIIO"), "synthetic inherit-only profile");
+        Reject(() => StorageSafety.Require(Profile(true, group: "BU"), "synthetic group profile"),
+            "primary group is not ownership and does not make a Users grant trusted");
+
         var root = SecurityFixture.Create("storage-safety-");
         void Broad(string path, FileSystemRights rights)
         {
@@ -71,6 +113,22 @@ internal static class StorageSafetyChecks
         const string secret = "synthetic-sensitive-bytes-not-for-errors";
         try
         {
+            var profile = Path.Combine(root, "profile-reproduction"); Directory.CreateDirectory(profile);
+            var profileAcl = Profile(true);
+            // Apply only the DACL: the disposable directory keeps its real fixture owner.
+            var access = new DirectorySecurity();
+            access.SetSecurityDescriptorBinaryForm(profileAcl.GetSecurityDescriptorBinaryForm(), AccessControlSections.Access);
+            new DirectoryInfo(profile).SetAccessControl(access);
+            var beforeProfile = Dacl(profile);
+            Reject(() => _ = new NativeStores(profile), "reported Users grant blocks initialization in a disposable directory");
+            check(Dacl(profile) == beforeProfile && !Directory.EnumerateFileSystemEntries(profile).Any(),
+                "rejected initialization neither migrates ACLs nor creates addon storage");
+            var usersRead = new DirectorySecurity();
+            usersRead.SetSecurityDescriptorBinaryForm(Profile(false).GetSecurityDescriptorBinaryForm(), AccessControlSections.Access);
+            new DirectoryInfo(profile).SetAccessControl(usersRead);
+            var safeProfile = Dacl(profile);
+            _ = new NativeStores(profile);
+            check(Dacl(profile) == safeProfile, "legitimate profile initializes without changing its parent ACL");
             var native = Path.Combine(root, "native"); Directory.CreateDirectory(native);
             var stores = new NativeStores(native);
             var pending = stores.CreatePending();
