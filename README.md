@@ -107,10 +107,17 @@ The Hytale data root comes from the official `GameInstallPath` registry setting,
 | Switching is blocked | Close the game and let any pending login or transition finish. A signed-out or expired session may need **Add account** again. |
 | A launcher update breaks integration | Allow a minute for shortcut repair. If integration still fails, install an addon release compatible with that launcher. Do not replace an updated launcher with an older backup or bypass signature checks. |
 | A file is locked or a path is rejected | Close the conflicting program and retry. Preserve the named files; do not delete session data or loosen folder permissions to bypass a check. |
+| Startup rejects `%APPDATA%\Hytale` with ACE 0, mask `0x001F01FF`, effective mutation `0x000D0150` | An explicit `BUILTIN\Users` Full Control grant lets other local users mutate this shared storage ancestor. The safety check correctly rejects it; read-only Users access is accepted. Preserve the data and use the separate manual permission-repair workflow below. |
 | Uninstall cannot restore shortcuts | Run removal from the Windows account that installed the addon. Keep the shortcut restoration records intact. |
 | Duplicate shortcut restoration identity | Installation, repair and removal stop before changing the journal or installed files. Keep `shortcuts.json` and every backup in the affected restoration directory; have the records reconciled before retrying. Even identical backups are retained rather than selecting a record by order or timestamp. |
 
 For help, use [GitHub Discussions](https://github.com/AminBoua/Hytale-Account-Switcher/discussions) with your Windows version, addon release, official launcher version, exact error, and steps to reproduce. Include only a reviewed, relevant excerpt from `hytale-accounts.log`. For suspected vulnerabilities, follow [SECURITY.md](SECURITY.md) before sharing details.
+
+### Manual Hytale permission repair
+
+Permission repair is separate from launcher startup and installation; it must be invoked manually. After final integration supplies `Repair-HytalePermissions.ps1` and `Checks/HytalePermissionRepairChecks.ps1`, inspect the repair script and its usage before running it. First use its preview workflow and review the proposed changes for the rejected Hytale directory. Apply only through the script's explicit application workflow after reviewing that preview. Exact command arguments must be verified against the integrated script.
+
+Keep Hytale session files, keys, saved accounts and game data intact. Do not use recursive permission resets or broaden access to bypass validation. The repair checks use disposable fixtures; do not point them at live Hytale data.
 
 ## Build from source
 

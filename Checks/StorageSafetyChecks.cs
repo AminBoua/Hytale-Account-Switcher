@@ -84,6 +84,12 @@ internal static class StorageSafetyChecks
             check(mutationRights.All(right => EffectiveAccessChecks.Allowed(acl.GetSecurityDescriptorBinaryForm(), Stranger, (uint)right) == unsafeUsers),
                 "Windows Authz confirms every unrelated-user mutation right for the profile variant");
         }
+        var ancestorError = Reject(() => StorageSafety.Require(Profile(true), "synthetic profile ancestor", ancestor: true),
+            "explicit Users full control is rejected in ancestor mode");
+        check(ancestorError.Message.Contains("ACE 0 (ObjectInherit, ContainerInherit), mask 0x001F01FF, effective mutation 0x000D0150."),
+            "ancestor rejection reports the exact startup ACE, flags and mutation mask");
+        StorageSafety.Require(Profile(false), "synthetic profile ancestor", ancestor: true);
+        check(true, "equivalent explicit read-only Users rule is accepted in ancestor mode");
         var deniedProfile = Profile(true, deny: "(D;;FA;;;BU)");
         StorageSafety.Require(deniedProfile, "synthetic denied profile");
         check(mutationRights.All(right => !EffectiveAccessChecks.Allowed(deniedProfile.GetSecurityDescriptorBinaryForm(), Stranger, (uint)right)),
