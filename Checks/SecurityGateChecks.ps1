@@ -10,6 +10,13 @@ function Seal {
     $summary.Evidence = @(Get-RequiredVmEvidence $run | ForEach-Object { @{Name=$_.Replace('\','_');Hash=(Get-FileHash -LiteralPath (Join-Path $root $_.Replace('\','_'))).Hash} })
     Write-Fixture 'evidence\summary.json' $summary
 }
+
+function Rebind-Runtime {
+    $readyHash=(Get-FileHash -LiteralPath (Join-Path $root ("channels_"+$admin+"_runtime-ready-same-user.json"))).Hash
+    foreach ($relative in @("channels\$admin\runtime-same-user.json","channels\$other\runtime-attack-same-user.json","channels\$admin\runtime-owner-attack-same-user.json")) {
+        $row=Read-Fixture $relative; $row.ReadyHash=$readyHash; Write-Fixture $relative $row
+    }
+}
 try {
     $repo = Join-Path $root 'source-fixture'
     $null = New-Item -ItemType Directory -Path (Join-Path $repo 'Launcher') -Force
@@ -143,7 +150,7 @@ try {
     Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') 'empty VM evidence is unverified'
     # Fabricated schema fixtures ONLY, never exported as a real VM validation report.
     $admin='S-1-5-21-1-2-3-1001'; $user='S-1-5-21-1-2-3-1002'; $other='S-1-5-21-1-2-3-1003'
-    $run=@{Id=('a'*32);AdminSid=$admin;UserSid=$user;AttackerSid=$other;VmUuid='fixture-guest';HostUuid='fixture-host';ComputerName='SCHEMA-FIXTURE';Source=$source;BuildEnvironment=$environment}
+    $run=@{StartedUtc=[DateTime]::UtcNow.AddMinutes(-10).ToString('o');ExpiresUtc=[DateTime]::UtcNow.AddHours(1).ToString('o');Id=('a'*32);AdminSid=$admin;UserSid=$user;AttackerSid=$other;VmUuid='fixture-guest';HostUuid='fixture-host';ComputerName='SCHEMA-FIXTURE';Source=$source;BuildEnvironment=$environment}
     Write-Fixture 'run.json' $run
     $full=@{Sid=$admin;Administrator=$true;ElevationType=2}
     $sddl='O:BAG:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)'
@@ -168,12 +175,104 @@ try {
         Write-Fixture "evidence\task-$role-completion.json" @{Success=$true;LastTaskResult=0;Identity=$identity;TaskName="ModLauncherSecurityVM-$($run.Id)-$role"}
         '<Task>synthetic schema fixture</Task>' | Set-Content -LiteralPath (Join-Path $root "evidence_task-$role.xml")
     }
-    $summary=@{Schema=1;Kind='actual-vm';Success=$true;RunId=$run.Id;Source=$source;Utc=[DateTime]::UtcNow.ToString('o');Environment=@{WindowsBuild='fixture';Architecture='AMD64';DotnetRuntime='fixture'}}
+    $summary=@{Schema=2;Kind='actual-vm';Success=$true;RunId=$run.Id;Source=$source;Utc=[DateTime]::UtcNow.ToString('o');Environment=@{WindowsBuild='fixture';Architecture='AMD64';DotnetRuntime='fixture'}}
+
+    # Old staging/task-only evidence cannot stand in for native runtime observations.
+    $summary.Evidence = @(Get-RequiredVmEvidence $run | Where-Object { $_ -notmatch 'runtime-' } | ForEach-Object { @{Name=$_.Replace('\','_');Hash=(Get-FileHash -LiteralPath (Join-Path $root $_.Replace('\','_'))).Hash} })
+    Write-Fixture 'evidence\summary.json' $summary
+    Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') 'earlier evidence without runtime matrix rejected despite current fingerprint'
+    foreach ($mode in @('ordinary','same-user','alternate-admin')) {
+        $elevated = $mode -ne 'ordinary'
+        $initiator = if ($mode -eq 'same-user') {$admin} else {$user}
+        $worker = if ($elevated) {$admin} else {$user}
+        $cache = "C:\Program Files\VM\runtime-$mode"
+        $acl = if ($elevated) {$sddl} else {"O:$user"+"G:BAD:P(A;OICI;FA;;;$user)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"}
+        $readyName = "channels\$worker\runtime-ready-$mode.json"
+        $observed = [DateTime]::UtcNow.AddMinutes(-2).ToString('o')
+        Write-Fixture $readyName @{Contract='runtime-bootstrap-v1';RunId=$run.Id;Mode=$mode;SourceFingerprint=$source.Fingerprint;Utc=$observed;
+            Identity=@{Sid=$worker;Administrator=$elevated;ElevationType=$(if ($elevated) {2} else {1});Pid=123};
+            Cache=@{Path=$cache;Sddl=$acl};Directories=@();Files=@(@{Path="$cache\coreclr.dll";Sddl=$acl;Hash=('D'*64)});
+            Modules=@("$cache\coreclr.dll");BeforeApplication=@("$cache\coreclr.dll")}
+        $readyHash=(Get-FileHash -LiteralPath (Join-Path $root $readyName.Replace('\','_'))).Hash
+        Write-Fixture "channels\$initiator\runtime-$mode.json" @{Contract='runtime-bootstrap-v1';RunId=$run.Id;Mode=$mode;SourceFingerprint=$source.Fingerprint;Success=$true;
+            Identity=@{Sid=$initiator;Administrator=$false;ElevationType=$(if ($mode -eq 'same-user') {3} else {1});Pid=122};
+            StartedUtc=[DateTime]::UtcNow.AddMinutes(-3).ToString('o');CompletedUtc=[DateTime]::UtcNow.AddMinutes(-1).ToString('o');
+            ReadyHash=$readyHash;WorkerPid=123;ExitCode=23;CacheRemoved=$true;StartFailureCacheRemoved=$true;PoisonPreserved=$true;ProfilePreserved=$true}
+        foreach ($actor in @('unrelated') + @($(if ($elevated) {'owner'}))) {
+            if (!$actor) {continue}
+            $actorSid=if ($actor -eq 'owner') {$admin} else {$other}
+            $name=if ($actor -eq 'owner') {'runtime-owner-attack'} else {'runtime-attack'}
+            Write-Fixture "channels\$actorSid\$name-$mode.json" @{RunId=$run.Id;Mode=$mode;Success=$true;Identity=@{Sid=$actorSid;Administrator=$false;ElevationType=$(if ($actor -eq 'owner') {3} else {1});Pid=124};
+                WorkerPid=123;ReadyHash=$readyHash;Utc=$observed;PositiveControl=$true;
+                Operations=@(@('write','replace','delete-leaf','rename-directory','insert-file','delete-directory','file-write-dac','directory-write-dac') | ForEach-Object {@{Operation=$_;Denied=$true;WindowsError=5}})}
+        }
+    }
     Seal
+    $baseline = @{}
+    foreach ($relative in @(Get-RequiredVmEvidence $run | Where-Object {$_ -match 'runtime-'})) {
+        $name=$relative.Replace('\','_'); $path=Join-Path $root $name
+        $baseline[$relative]=[IO.File]::ReadAllText($path)
+        Remove-Item -LiteralPath $path
+        Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') "missing runtime record rejected: $relative"
+        [IO.File]::WriteAllText($path,$baseline[$relative],[Text.UTF8Encoding]::new($true))
+        Add-Content -LiteralPath $path -Value 'tamper'
+        Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') "tampered runtime record rejected: $relative"
+        [IO.File]::WriteAllText($path,$baseline[$relative],[Text.UTF8Encoding]::new($true))
+    }
+    foreach ($mutation in @('contract','source','run','worker-token','loaded-path','no-modules','no-files','acl','owner','before','cleanup','failure-cleanup','profile','poison','exit','pid','hash','time','failed','attack-token','attack-control','attack-operation','attack-time','owner-dac','no-directories','no-native-hash','native-parent','trusted-access','unknown-operation')) {
+        $relative="channels\$admin\runtime-ready-same-user.json"
+        if ($mutation -in @('cleanup','failure-cleanup','profile','poison','exit','pid','hash','time','failed')) {$relative="channels\$admin\runtime-same-user.json"}
+        if ($mutation.StartsWith('attack-') -or $mutation -eq 'unknown-operation') {$relative="channels\$other\runtime-attack-same-user.json"}
+        if ($mutation -eq 'owner-dac') {$relative="channels\$admin\runtime-owner-attack-same-user.json"}
+        $row=Read-Fixture $relative
+        switch ($mutation) {
+            'contract' {$row.Contract='earlier'}
+            'source' {$row.SourceFingerprint='old'}
+            'run' {$row.RunId='old'}
+            'worker-token' {$row.Identity.ElevationType=3}
+            'loaded-path' {$row.Modules=@('C:\untrusted\coreclr.dll')}
+            'no-modules' {$row.Modules=@()}
+            'no-files' {$row.Files=@()}
+            'acl' {$row.Files[0].Sddl='O:BAG:BAD:(A;;FA;;;WD)'}
+            'owner' {$row.Files[0].Sddl="O:$admin"+"G:BAD:(A;;FA;;;BA)(A;;FA;;;SY)"}
+            'before' {$row.BeforeApplication=@('C:\untrusted\coreclr.dll')}
+            'cleanup' {$row.CacheRemoved=$false}
+            'failure-cleanup' {$row.StartFailureCacheRemoved=$false}
+            'profile' {$row.ProfilePreserved=$false}
+            'poison' {$row.PoisonPreserved=$false}
+            'exit' {$row.ExitCode=0}
+            'pid' {$row.WorkerPid=999}
+            'hash' {$row.ReadyHash=('F'*64)}
+            'time' {$row.StartedUtc='2000-01-01T00:00:00Z'}
+            'failed' {$row.Success=$false}
+            'attack-token' {$row.Identity.Sid=$user}
+            'attack-control' {$row.PositiveControl=$false}
+            'attack-operation' {$row.Operations[0].Denied=$false}
+            'attack-time' {$row.Utc='2000-01-01T00:00:00Z'}
+            'no-directories' { $row.PSObject.Properties.Remove('Directories') }
+            'no-native-hash' { $row.Files[0].Hash='' }
+            'native-parent' { $row.Files[0].Path += '\nested\coreclr.dll'; $row.BeforeApplication=@($row.Files[0].Path); $row.Modules=@($row.Files[0].Path) }
+            'trusted-access' { $row.Files[0].Sddl='O:BAG:BAD:P(A;;FR;;;SY)(A;;FR;;;BA)' }
+            'unknown-operation' { $row.Operations[0].WindowsError=2 }
+            'owner-dac' {$row.Operations=@($row.Operations | Where-Object Operation -ne 'file-write-dac')}
+        }
+        Write-Fixture $relative $row
+        if ($relative -like '*runtime-ready-same-user.json') { Rebind-Runtime }
+        Seal
+        Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') "inconsistent runtime $mutation rejected even after rehash"
+        [IO.File]::WriteAllText((Join-Path $root $relative.Replace('\','_')),$baseline[$relative],[Text.UTF8Encoding]::new($true))
+        Rebind-Runtime
+        Seal
+    }
+    Set-StrictMode -Version Latest
     $result=Test-VmEvidence $root $source $environment
+    Set-StrictMode -Off
     Check ($result.Status -eq 'passed') ('complete fabricated schema accepted (NOT a VM result): '+$result.Reason)
     Check ((Test-VmEvidence $root @{Fingerprint=('C'*64)} $environment).Status -eq 'unverified') 'changed security source invalidates VM evidence'
     Check ((Test-VmEvidence $root $source @{DotnetSdk='changed'}).Status -eq 'unverified') 'changed SDK invalidates VM evidence'
+    $summary.Schema=1; Seal
+    Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') 'legacy schema rejected even with runtime records and fresh fingerprint'
+    $summary.Schema=2
     $summary.Kind='simulation'; Seal
     Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') 'simulated evidence cannot validate a release'
     $summary.Kind='actual-vm'; $summary.Success=$false; Seal

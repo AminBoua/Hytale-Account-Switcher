@@ -51,7 +51,7 @@ if ($Action -eq 'Initialize') {
     foreach ($user in $users) { New-FixtureDirectory (Join-Path (Join-Path $Root 'channels') $user.SID.Value) $user.SID.Value }
     New-FixtureDirectory (Join-Path $Root 'limited-repair') $users[1].SID.Value
     foreach ($path in @((Join-Path $Root 'victim.txt'),(Join-Path $Root 'victims\sentinel.txt'))) { [IO.File]::WriteAllText($path, 'VM VICTIM SENTINEL') }
-    $run = @{ Id=$id; VmUuid=$VmUuid; HostUuid=$package.HostUuid; ComputerName=$env:COMPUTERNAME; ExpiresUtc=[DateTime]::UtcNow.AddHours(8).ToString('o');
+    $run = @{ Id=$id; VmUuid=$VmUuid; HostUuid=$package.HostUuid; ComputerName=$env:COMPUTERNAME; StartedUtc=[DateTime]::UtcNow.ToString('o'); ExpiresUtc=[DateTime]::UtcNow.AddHours(8).ToString('o');
         Consent='DISPOSABLE VM ONLY; SNAPSHOT MAY BE DESTROYED'; AdminSid=$users[0].SID.Value; UserSid=$users[1].SID.Value; AttackerSid=$users[2].SID.Value; Files=$package.Files;
         Source=$package.Source; BuildEnvironment=$package.BuildEnvironment }
     $run | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Root 'run.json') -Encoding UTF8
@@ -122,10 +122,21 @@ if ($Action -eq 'Verify') {
         $path = Join-Path $Root $_; Assert-PlainPath $path
         @{Name=$_.Replace('\','_');Hash=(Get-FileHash -LiteralPath $path).Hash}
     })
-    @{ Schema=1; Kind='actual-vm'; Success=$true; Scope='Actual VM tokens, UAC and tasks; OTS foreign-owned source expected to fail closed';
+    @{ Schema=2; Kind='actual-vm'; Success=$true; Scope='Actual VM tokens, UAC and tasks; OTS foreign-owned source expected to fail closed';
         Utc=[DateTime]::UtcNow.ToString('o'); RunId=$run.Id; Source=$run.Source; Evidence=$evidence;
         Environment=@{WindowsBuild=$os.BuildNumber;WindowsVersion=$os.Version;OS=$os.Caption;Architecture=$env:PROCESSOR_ARCHITECTURE;DotnetRuntime=$identity.DotnetRuntime} } |
         ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Root 'evidence\summary.json') -Encoding UTF8
+    $validation = Join-Path $Root 'schema-validation'
+    New-FixtureDirectory $validation
+    foreach ($relative in @(@(Get-RequiredVmEvidence $run) + 'evidence\summary.json')) {
+        $file = Join-Path $Root $relative; Assert-PlainPath $file
+        Copy-Item -LiteralPath $file -Destination (Join-Path $validation $relative.Replace('\','_'))
+    }
+    $status = Test-VmEvidence $validation $run.Source $run.BuildEnvironment
+    if ($status.Status -ne 'passed') {
+        Remove-Item -LiteralPath (Join-Path $Root 'evidence\summary.json')
+        throw ('Runtime/full evidence contract failed: ' + $status.Reason)
+    }
     Write-Output 'PASS evidence complete. OTS source rejection is recorded separately from successful staging.'
 }
 if ($Action -eq 'Cleanup') {
@@ -146,6 +157,7 @@ if ($Action -eq 'Cleanup') {
             "channels\$($run.AttackerSid)\source-$mode.json","channels\$($run.AttackerSid)\stage-$mode.json","evidence\failed-elevated-$mode.json",
             "channels\$sid\failed-begin-$mode.json","channels\$($run.AttackerSid)\failed-attack-$mode.json")
     }
+    $evidence = @($evidence + @(Get-RequiredVmEvidence $run) | Select-Object -Unique)
     foreach ($relative in $evidence) {
         $file = Join-Path $Root $relative
         if (Test-Path -LiteralPath $file) { Assert-PlainPath $file; Copy-Item -LiteralPath $file -Destination (Join-Path $export $relative.Replace('\','_')) }

@@ -30,3 +30,17 @@ Results:
 Not established: actual UAC consent/credential prompts, different-user kernel file access, elevated/SYSTEM staging, real scheduled-task execution, guest cleanup under attack, or OTS source compatibility. There are no actual VM result JSON files or task XML artifacts to cite. The runbook states expected results and requires complete evidence before `Verify` can report success.
 
 The host was not elevated; no host accounts, registry entries or tasks were created, and no real credentials, Hytale data or installed addon were accessed. Scripts and runtime fixtures still require their first actual guest execution; host compilation is not a substitute.
+
+## Runtime evidence gap checks - 2026-11-01
+
+This worktree's runtime-bootstrap evidence change was checked unelevated, without executing the disposable-VM matrix. Host commands:
+
+- powershell.exe -NoProfile -ExecutionPolicy Bypass -File Checks/SecurityGateChecks.ps1
+- powershell.exe -NoProfile -ExecutionPolicy Bypass -File Checks/VmValidation/Validate.ps1
+- powershell.exe -NoProfile -ExecutionPolicy Bypass -File Checks/SecurityRunnerRegressionChecks.ps1
+- powershell.exe -NoProfile -ExecutionPolicy Bypass -File Checks/RuntimeExtractionChecks.ps1
+- powershell.exe -NoProfile -ExecutionPolicy Bypass -File Checks/RuntimeExtractionChecks.ps1 -Mutation CacheEnvironment
+
+Positive suites passed. The mutation exited nonzero at the expected protected-native-extraction assertion. Schema acceptance is a fabricated parser test only; missing records, hash tampering, semantic tampering after rehash, stale runtime bindings, wrong identities/times/paths/ACLs, failed cleanup/controls and legacy schemas were rejected. Valid fabricated evidence was also checked with guest-style strict mode. Runner fixtures retained SecurityValidated=false without actual evidence. The host validator compiled the harmless probe, verified package inputs/hashes and established both compiled-runner and runtime-collector host refusal.
+
+No UAC, privileged runtime startup, second-user enforcement, tasks or disposable-VM execution occurred. The ordinary direct-apphost row intentionally lacks successful startup-failure cleanup at this base and cannot yield a passing real-world contract. Align and retest with the eventual ordinary packaging design. Loaded-worker probes are bounded observations, not exhaustive extraction-time race or interruption testing. No release artifact or actual VM evidence was produced.
