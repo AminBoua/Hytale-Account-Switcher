@@ -88,6 +88,7 @@ public static class Setup
         using var installation = new SetupPayload.PinnedDirectories(launcherDirectory, requireTrusted: true);
         var destination = Path.Combine(launcherDirectory, ".hytale-accounts-addon");
         NativeStores.RegularPath(destination);
+        // Journal File.Replace needs directory write sharing; a read-sharing pin causes Win32 error 1175 on upgrades.
         using var existing = Directory.Exists(destination) ? new SetupPayload.PinnedDirectories(destination, requireTrusted: true, forMutation: true) : null;
         if (existing != null)
         {
