@@ -13,15 +13,33 @@ public static class SetupUpgradeChecks
     internal static string LocalApplicationData = "", DesktopDirectory = "";
     internal static bool Administrator = true;
     private static bool preflight;
+    private static bool lifecycle;
+    private static int payloadVersion = 1;
     private static string commonPrograms = "", commonDesktop = "", programFiles = "";
     private static readonly string registryName = "Software\\HytaleAccounts-SetupPreflight-" + Guid.NewGuid().ToString("N");
     private static string repository = "", root = "";
     internal static DirectorySecurity Permissions() => new DirectoryInfo(root).GetAccessControl();
     internal static Stream Resource(string name)
     {
+        static string Quote(string value) => "'" + value.Replace("'", "''") + "'";
+        if (lifecycle)
+        {
+            var bytes = File.ReadAllText(Path.Combine(repository, name));
+            if (name == "Install.ps1")
+            {
+                const string version = "DisplayVersion = '0.1.3'";
+                if (!bytes.Contains(version)) throw new Exception("Lifecycle DisplayVersion fixture boundary changed.");
+                bytes = bytes.Replace(version, "DisplayVersion = '0.1." + payloadVersion + "'");
+                bytes = bytes.Replace("[Environment]::GetFolderPath('CommonPrograms')", Quote(commonPrograms))
+                    .Replace("[Environment]::GetFolderPath('CommonDesktopDirectory')", Quote(commonDesktop))
+                    .Replace("'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\HytaleAccounts'", Quote("HKCU:\\" + registryName))
+                    .Replace("$ErrorActionPreference = 'Stop'", "$ErrorActionPreference = 'Stop'\n$env:ProgramFiles = " + Quote(programFiles) +
+                        "\n$env:LOCALAPPDATA = " + Quote(LocalApplicationData) + "\n" + FixtureBoundaries);
+            }
+            return new MemoryStream(Encoding.UTF8.GetBytes(bytes + (name.EndsWith(".cs") ? "\n//" : "\n#") + " fixture payload " + payloadVersion));
+        }
         if (name != "Install.ps1") return File.OpenRead(Path.Combine(repository, name));
         if (!preflight) return new MemoryStream(Encoding.UTF8.GetBytes(Installer));
-        static string Quote(string value) => "'" + value.Replace("'", "''") + "'";
         var script = File.ReadAllText(Path.Combine(repository, name))
             .Replace("[Environment]::GetFolderPath('CommonPrograms')", Quote(commonPrograms))
             .Replace("[Environment]::GetFolderPath('CommonDesktopDirectory')", Quote(commonDesktop))
@@ -64,6 +82,7 @@ public static class SetupUpgradeChecks
                 throw new Exception("Worker left staging behind.");
             Console.WriteLine("PASS setup worker retains its destination pin across existing/missing payload and journal publication, then cleans staging");
             await CheckPreflight();
+            await CheckLifecycle();
         }
         finally
         {
@@ -74,6 +93,142 @@ public static class SetupUpgradeChecks
             Directory.Delete(root, recursive: true);
         }
     }
+
+    private static async Task CheckLifecycle()
+    {
+        lifecycle = true;
+        Administrator = true;
+        programFiles = Programs = Path.Combine(root, "lifecycle-program-files");
+        OfficialPath = Path.Combine(Programs, "Hypixel Studios", "Hytale Launcher", "hytale-launcher.exe");
+        LocalApplicationData = Path.Combine(root, "lifecycle-local");
+        var userPrograms = Path.Combine(root, "lifecycle-user-programs");
+        var userDesktop = Path.Combine(root, "lifecycle-user-desktop");
+        commonPrograms = Path.Combine(root, "lifecycle-common-programs");
+        commonDesktop = Path.Combine(root, "lifecycle-common-desktop");
+        foreach (var directory in new[] { Path.GetDirectoryName(OfficialPath)!, LocalApplicationData, userPrograms, userDesktop, commonPrograms, commonDesktop })
+            Directory.CreateDirectory(directory);
+        File.WriteAllText(OfficialPath, "official fixture bytes");
+        var officialAcl = new FileInfo(OfficialPath).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All);
+        var sentinels = new[] { "Accounts/one/account.dat", "Accounts/one/.keys/key", "install/game", "UserData/world", "credentials.dpapi" }
+            .Select(name => Path.Combine(LocalApplicationData, "Hytale", name)).ToArray();
+        foreach (var path in sentinels) { Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, "opaque sentinel"); }
+        static string Quote(string value) => "'" + value.Replace("'", "''") + "'";
+        var links = new[] { Path.Combine(commonPrograms, "Hytale.lnk"), Path.Combine(userPrograms, "Hytale.lnk") };
+        var create = Setup.InstallStart(root, userPrograms, userDesktop);
+        create.ArgumentList.Clear();
+        foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-Command" }) create.ArgumentList.Add(arg);
+        create.ArgumentList.Add("$s = New-Object -ComObject WScript.Shell; " + string.Join("; ", links.Select(path =>
+            "$l = $s.CreateShortcut(" + Quote(path) + "); $l.TargetPath = " + Quote(OfficialPath) + "; $l.Save()")));
+        using (var child = Process.Start(create)!) { await child.WaitForExitAsync(); if (child.ExitCode != 0) throw new Exception("Lifecycle shortcut creation failed."); }
+        var originals = links.Select(File.ReadAllBytes).ToArray();
+        var destination = Path.Combine(Path.GetDirectoryName(OfficialPath)!, ".hytale-accounts-addon");
+        var args = new[] { Setup.ElevatedMode, userPrograms, userDesktop, WindowsIdentity.GetCurrent().User!.Value };
+        async Task Install()
+        {
+            // RunElevated retains all production source, installation and destination pins across the real PS 5.1 child.
+            await Setup.RunElevated(args);
+            var start = Setup.InstallStart(destination, userPrograms, userDesktop);
+            start.ArgumentList.Add("-UserOnly");
+            using var child = Process.Start(start)!;
+            await child.WaitForExitAsync();
+            if (child.ExitCode != 0) throw new Exception("Lifecycle user integration failed.");
+        }
+        void WritePayload()
+        {
+            File.WriteAllText(Executable, "non-executed helper version " + payloadVersion);
+            foreach (var name in SetupPayload.RuntimeFiles) File.WriteAllText(Path.Combine(root, name), "runtime version " + payloadVersion + ": " + name);
+        }
+        void CheckPreserved(Dictionary<string, byte[]> recovery)
+        {
+            foreach (var (path, bytes) in recovery)
+                if (!File.ReadAllBytes(path).SequenceEqual(bytes)) throw new Exception("Lifecycle changed recovery bytes: " + path);
+            if (File.ReadAllText(OfficialPath) != "official fixture bytes" ||
+                new FileInfo(OfficialPath).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All) != officialAcl ||
+                sentinels.Any(path => File.ReadAllText(path) != "opaque sentinel")) throw new Exception("Lifecycle changed official launcher or sentinel data.");
+            using var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName);
+            if ((string?)entry?.GetValue("InstallLocation") != destination ||
+                (string?)entry.GetValue("UninstallString") != "\"" + Path.Combine(destination, "HytaleAccounts.exe") + "\" --uninstall")
+                throw new Exception("Lifecycle lost Windows Apps removal registration.");
+        }
+        WritePayload();
+        await Install();
+        var states = new[] { destination, Path.Combine(LocalApplicationData, "HytaleAccounts", "ShortcutIntegration") };
+        if (states.Any(path => !File.Exists(Path.Combine(path, "shortcuts.json")))) throw new Exception("Lifecycle requires both existing journals.");
+        var recovery = states.SelectMany(path => Directory.EnumerateFiles(path).Where(file => Path.GetFileName(file) == "shortcuts.json" || Path.GetFileName(file).StartsWith("shortcut-")))
+            .ToDictionary(path => path, File.ReadAllBytes);
+        foreach (var path in links) recovery.Add(path, File.ReadAllBytes(path));
+        for (var index = 0; index < states.Length; index++)
+            if (!Directory.EnumerateFiles(states[index], "shortcut-*.lnk").Any(path => File.ReadAllBytes(path).SequenceEqual(originals[index])))
+                throw new Exception("Lifecycle did not retain original shortcut backup bytes.");
+        CheckPreserved(recovery);
+        using (var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName))
+            if ((string?)entry!.GetValue("DisplayVersion") != "0.1.1") throw new Exception("Fresh setup did not register its version.");
+        Console.WriteLine("PASS real setup fresh installation creates both journals, exact shortcut backups and Windows Apps registration");
+        payloadVersion++;
+        WritePayload();
+        var payload = SetupPayload.Scripts.Concat(SetupPayload.RuntimeFiles).Append("HytaleAccounts.exe").ToArray();
+        var oldPayload = payload.ToDictionary(name => name, name => File.ReadAllBytes(Path.Combine(destination, name)));
+        var payloadAcls = payload.ToDictionary(name => name, name => new FileInfo(Path.Combine(destination, name)).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All));
+        byte[] ExpectedPayload(string name)
+        {
+            using var source = SetupPayload.Scripts.Contains(name) ? Resource(name) : File.OpenRead(name == "HytaleAccounts.exe" ? Executable : Path.Combine(root, name));
+            using var expected = new MemoryStream(); source.CopyTo(expected); return expected.ToArray();
+        }
+        foreach (var name in payload)
+            if (oldPayload[name].SequenceEqual(ExpectedPayload(name))) throw new Exception("Lifecycle requires genuinely different upgrade bytes: " + name);
+        // An exclusive reader is a real obstruction; setup must reject before publishing anything.
+        using (var locked = File.Open(Path.Combine(destination, "Repair-Integration.ps1"), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            try { await Setup.RunElevated(args); throw new Exception("Lifecycle accepted locked destination."); }
+            catch (IOException ex) when (ex.InnerException is Win32Exception { NativeErrorCode: 32 }) { }
+        }
+        foreach (var (name, bytes) in oldPayload)
+            if (!File.ReadAllBytes(Path.Combine(destination, name)).SequenceEqual(bytes)) throw new Exception("Locked upgrade changed " + name);
+        CheckPreserved(recovery);
+        using (var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName))
+            if ((string?)entry!.GetValue("DisplayVersion") != "0.1.1") throw new Exception("Locked upgrade changed the registered version.");
+        Console.WriteLine("PASS real setup locked destination preserves old payload and recovery state");
+        try { await Install(); }
+        finally { CheckPreserved(recovery); }
+        foreach (var name in payload)
+        {
+            var installed = File.ReadAllBytes(Path.Combine(destination, name));
+            if (!installed.SequenceEqual(ExpectedPayload(name))) throw new Exception("Upgrade did not publish complete bytes: " + name);
+        }
+        using (var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName))
+            if ((string?)entry!.GetValue("DisplayVersion") != "0.1.2") throw new Exception("Upgrade did not register the newer version.");
+        Console.WriteLine("PASS real setup retry upgrades every payload with both existing journals and destination pin retained");
+        await Install();
+        CheckPreserved(recovery);
+        using (var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName))
+            if ((string?)entry!.GetValue("DisplayVersion") != "0.1.2") throw new Exception("Upgrade/reinstall did not register the newer version.");
+        if (Directory.EnumerateFiles(destination, ".upgrade-*").Any() || Directory.EnumerateDirectories(Programs, "HytaleAccounts-setup-*").Any())
+            throw new Exception("Lifecycle left transaction or setup staging files.");
+        foreach (var name in payload)
+        {
+            if (!File.ReadAllBytes(Path.Combine(destination, name)).SequenceEqual(ExpectedPayload(name)))
+                throw new Exception("Lifecycle reinstall changed payload bytes: " + name);
+        }
+        Console.WriteLine("PASS real setup same-version reinstall preserves payload bytes, recovery state, Apps registration and cleans staging");
+        foreach (var name in payload)
+        {
+            var actualAcl = new FileInfo(Path.Combine(destination, name)).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All);
+            if (actualAcl != payloadAcls[name])
+                throw new Exception("Lifecycle upgrade/reinstall changed payload ACL: " + name + "; expected " + payloadAcls[name] + "; actual " + actualAcl);
+        }
+        Console.WriteLine("PASS real setup upgrade/reinstall preserves exact payload security descriptors");
+    }
+
+    private const string FixtureBoundaries = """
+        if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1 -or $PSVersionTable.PSEdition -ne 'Desktop') { throw 'Fixture requires Windows PowerShell 5.1.' }
+        Import-Module ScheduledTasks
+        function Get-CimInstance { param($ClassName,$Filter) }
+        function Get-ScheduledTask { param($TaskName,$ErrorAction) }
+        function Register-ScheduledTask {
+            param($TaskName,$Action,$Trigger,$Settings,$User,$RunLevel,$Principal,[switch]$Force)
+            if (!$Settings.Hidden -or $Action.Arguments -notlike '*-WindowStyle Hidden*') { throw 'Visible fixture repair task.' }
+        }
+        """;
 
     private static async Task CheckPreflight()
     {
