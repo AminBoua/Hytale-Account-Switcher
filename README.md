@@ -115,7 +115,21 @@ For help, use [GitHub Discussions](https://github.com/AminBoua/Hytale-Account-Sw
 
 ### Manual Hytale permission repair
 
-Permission repair is separate from launcher startup and installation; it must be invoked manually. After final integration supplies `Repair-HytalePermissions.ps1` and `Checks/HytalePermissionRepairChecks.ps1`, inspect the repair script and its usage before running it. First use its preview workflow and review the proposed changes for the rejected Hytale directory. Apply only through the script's explicit application workflow after reviewing that preview. Exact command arguments must be verified against the integrated script.
+Permission repair is separate from launcher startup and installation. From this checkout, use Windows PowerShell 5.1 to preview the current Windows user's `%APPDATA%\Hytale` root:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Repair-HytalePermissions.ps1
+```
+
+The script accepts exactly one explicit `BUILTIN\Users` OI/CI Full Control grant (or its already repaired read/execute form). It removes only mutation rights from that grant, preserves other rules and ownership, and does not propagate changes to existing descendants. It rejects unsupported targets, owners, ACLs and reparse paths. Descendants remain unvalidated.
+
+After reviewing a supported preview, close Hytale and explicitly apply with a new backup filename outside Hytale. If Windows denies permission, run the same command elevated as the same Windows user; the script does not elevate itself.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Repair-HytalePermissions.ps1 -Apply -BackupPath "$env:APPDATA\Hytale-permissions-before.bin"
+```
+
+The original root descriptor is saved and verified before applying. Keep that backup; the script's help documents non-propagating recovery. Run fixture checks separately with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Checks\HytalePermissionRepairChecks.ps1`.
 
 Keep Hytale session files, keys, saved accounts and game data intact. Do not use recursive permission resets or broaden access to bypass validation. The repair checks use disposable fixtures; do not point them at live Hytale data.
 
