@@ -1,9 +1,9 @@
-# v0.1.4 — pending combined validation
+# v0.1.4 — unpublished upgrade candidate
 
-**Unreleased experimental candidate; not security-validated. Do not publish these notes as a completed fix until combined validation is recorded.**
+**Publication blocked: a genuine older-installed-version to packaged-candidate upgrade in a disposable Windows environment has not been validated. Not security-validated.**
 
-- Prepare the next upgrade package for the reported `Replace` / "Unable to remove the file to be replaced" failure. The installer replacement fix is owned by a separate task and is not implemented or validated by this packaging branch.
+- Integrate all three upgrade repair branches. The reported `Replace` / "Unable to remove the file to be replaced" failure is reproduced by the released restrictive directory pin; the existing production repair permits journal publication while retaining directory replacement protection.
 - Align setup and Windows Apps version metadata at 0.1.4. Inspect the actual built resources, versions, complete runtime sidecars and ZIP bytes before release.
 - Download the complete **HytaleAccounts-Setup.zip** and **SHA256SUMS.txt** from the same release, verify the ZIP, extract all files together, close Hytale/launcher, and run setup normally from the same Windows account used for installation. Install over the existing addon; retain accounts, native keys, game data and all shortcut restoration records. Continue using the existing shortcut/search and Windows Apps removal entry.
 
-Combined installer/regression results, exact release source, artifact hashes, actual VM status and live upgrade/account acceptance are **pending**. Replace this paragraph with factual results for the final integrated artifact before publication; retain any outstanding limitations and the experimental warning. The installer is unsigned. See SECURITY-RELEASE.md for mandatory gates and known elevation limitations.
+The focused real-worker lifecycle passes fresh installation, lock rejection/retry, changed-payload upgrade and same-version reinstall in a synthetic fixture. Full safe checks, mutation controls and fresh packaging are run separately and recorded in their generated reports; none substitutes for packaged upgrade acceptance. See INTEGRATION-UPGRADE.md for source and evidence locations. No real UAC, cross-user VM enforcement, packaged upgrade, Windows Settings acceptance or live login/switch/logout/Play validation is established. The installer is unsigned. Do not publish until the required packaged upgrade gate is satisfied; retain experimental prerelease status until the remaining policy gates pass.
