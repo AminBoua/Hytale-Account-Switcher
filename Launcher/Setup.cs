@@ -184,7 +184,7 @@ public static class Setup
         var destination = Path.Combine(Path.GetDirectoryName(IntegrationSafety.OfficialPath)!, ".hytale-accounts-addon");
         if (uninstall)
         {
-            if (IsAdministrator) throw new IOException("Remove the addon normally from Windows Settings so your shortcuts are restored as your Windows user.");
+            if (IsAdministrator) { UninstallHandoff.Start(destination); return 0; }
             await Remove(destination, IntegrateUser, start =>
             {
                 using var removal = Process.Start(start) ?? throw new IOException("Could not start uninstall.");
