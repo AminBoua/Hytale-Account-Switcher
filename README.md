@@ -74,6 +74,10 @@ Close the game before adding, switching, or logging out of an account. Failed or
 
 From the **same Windows account that installed it**, close Hytale and open **Windows Settings → Apps → Hytale Accounts addon → Uninstall**. Approve the UAC prompt when requested.
 
+An elevated Settings entry hands removal back to the same user's unelevated desktop before restoring user shortcuts. If that user context cannot be confirmed (including another administrator's credentials), removal stops and retains recovery files. Cancelling the removal UAC prompt restores shortcut integration so you can retry.
+
+For an existing **0.1.5** installation with the older uninstaller, first install a newly built package containing this fix over the addon, from the same Windows account. Setup replaces the installed helper used by the existing Apps entry. The version number alone does not identify the fix; downloading the old 0.1.5 package again will not update it.
+
 Removal restores shortcuts still owned by the addon and removes its repair tasks and installed helper files. **Hytale, saved account snapshots, encryption keys, and game data are retained.** There is no separate uninstall shortcut. Uninstalling the addon does not log out your Hytale accounts. Use the uninstaller: manually deleting the addon folder leaves shortcut integration behind.
 
 ## Local data and privacy

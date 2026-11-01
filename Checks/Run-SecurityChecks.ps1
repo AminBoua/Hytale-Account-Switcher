@@ -17,7 +17,7 @@ $steps = @(
     @{Name='frontend';Exe='node';Arguments=@('Checks/NativeLoginChecks.cjs')},
     @{Name='upgrade-journal';Exe='powershell.exe';Arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','Checks/UpgradeJournalReplacementChecks.ps1')}
 )
-foreach ($entry in @(@('native-startup','Checks/NativeStartupRegressionChecks.ps1'),@('powershell-modules','Checks/PowerShellModuleRegressionChecks.ps1'),@('installer-fixtures','Checks/InstallerScriptChecks.ps1'),@('uninstall-finalization','Checks/UninstallFinalizationScriptChecks.ps1'),@('setup-upgrade','Checks/SetupUpgradeRegressionChecks.ps1'),@('shortcut-races','Checks/ShortcutRaceChecks.ps1'),
+foreach ($entry in @(@('settings-uninstall-entry','Checks/SettingsUninstallEntryChecks.ps1'),@('native-startup','Checks/NativeStartupRegressionChecks.ps1'),@('powershell-modules','Checks/PowerShellModuleRegressionChecks.ps1'),@('installer-fixtures','Checks/InstallerScriptChecks.ps1'),@('uninstall-finalization','Checks/UninstallFinalizationScriptChecks.ps1'),@('setup-upgrade','Checks/SetupUpgradeRegressionChecks.ps1'),@('shortcut-races','Checks/ShortcutRaceChecks.ps1'),
     @('acl-races','Checks/AclMigrationRaceChecks.ps1'),@('storage-races','Checks/AclMigrationRaceChecks.ps1','-Storage'),
     @('vm-harness-host-only','Checks/VmValidation/Validate.ps1'),@('evidence-gate','Checks/SecurityGateChecks.ps1'),
     @('evidence-runner','Checks/SecurityRunnerRegressionChecks.ps1'),

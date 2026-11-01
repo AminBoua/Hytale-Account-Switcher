@@ -11,6 +11,7 @@ try {
         'private static bool IsAdministrator => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);' = 'private static bool IsAdministrator => SettingsEntryProbe.Elevated;'
         'var destination = Path.Combine(Path.GetDirectoryName(IntegrationSafety.OfficialPath)!, ".hytale-accounts-addon");' = 'var destination = SettingsEntryProbe.Destination;'
         'await Remove(destination, IntegrateUser, start =>' = 'await SettingsEntryProbe.Remove(destination, IntegrateUser, start =>'
+        'UninstallHandoff.Start(destination)' = 'SettingsEntryProbe.Handoff(destination)'
     }
     foreach ($boundary in $boundaries.Keys) {
         if ([regex]::Matches($source, [regex]::Escape($boundary)).Count -ne 1) { throw "Entry fixture seam changed: $boundary" }
@@ -28,7 +29,7 @@ try {
   <ItemGroup><ProjectReference Include="$project" /></ItemGroup>
 </Project>
 "@ | Set-Content (Join-Path $fixture 'Checks.csproj')
-    dotnet build (Join-Path $fixture 'Checks.csproj') -c Release --nologo -p:NuGetAudit=false
+    dotnet build (Join-Path $fixture 'Checks.csproj') -c Release --nologo --configfile (Join-Path $PSScriptRoot 'VmValidation\NuGet.Config') -p:NuGetAudit=false
     if ($LASTEXITCODE) { throw 'Entry fixture build failed.' }
     dotnet (Join-Path $fixture 'bin\Release\net10.0-windows\Checks.dll')
     $result = $LASTEXITCODE

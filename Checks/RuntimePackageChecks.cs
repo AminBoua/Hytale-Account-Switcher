@@ -64,8 +64,11 @@ internal static class RuntimePackageChecks
             var published = name.EndsWith(".dll", StringComparison.Ordinal) ? Path.Combine(directory, "build", name) : Path.Combine(directory, name);
             Require(File.ReadAllBytes(Path.Combine(directory, name)).AsSpan().SequenceEqual(File.ReadAllBytes(published)), "Runtime sidecar differs from publish output: " + name);
         }
-        using var pe = new PEReader(new MemoryStream(Content("HytaleAccounts.dll"), writable: false));
+        var assembly = Content("HytaleAccounts.dll");
+        Require(assembly.AsSpan().SequenceEqual(File.ReadAllBytes(Path.Combine(repository, "Launcher", "obj", "Release", "net10.0-windows", "win-x64", "HytaleAccounts.dll"))), "Packaged helper differs from current published assembly.");
+        using var pe = new PEReader(new MemoryStream(assembly, writable: false));
         var metadata = pe.GetMetadataReader();
+        Require(metadata.TypeDefinitions.Any(handle => metadata.GetString(metadata.GetTypeDefinition(handle).Name) == "UninstallHandoff"), "Packaged Settings uninstall handoff missing.");
         var version = XDocument.Load(Path.Combine(repository, "Launcher", "Launcher.csproj")).Descendants("Version").Single().Value;
         Require(metadata.GetAssemblyDefinition().Version == Version.Parse(version + ".0"), "Packaged assembly version differs from project.");
         var fileVersion = FileVersionInfo.GetVersionInfo(executable);

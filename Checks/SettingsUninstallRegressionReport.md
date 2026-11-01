@@ -1,5 +1,44 @@
 # Settings uninstall regression coverage
 
+## Integration on main (2026-11-01)
+
+Both task branches are merged. The entry fixture now intercepts the actual
+`UninstallHandoff.Start` boundary, simulates re-entry under an unelevated context,
+and requires exactly one handoff and one removal. An unavailable handoff must
+throw before any removal. The fixture never launches the native token handoff;
+it does not prove the SID/token checks below. It is included in the safe build
+gate. No production test seam was needed.
+
+Production uses only the elevated caller's linked limited token and requires
+matching caller, linked-token and desktop SIDs, matching nonzero sessions, a
+limited elevation type, no administrator role, and the machine journal's owner
+SID. It pins trusted installed payload files and ancestors before hidden launch,
+and creates the child's environment from the selected user's token. There is no
+fallback to another user's token or elevated per-user restoration.
+
+The package inspector requires the bundled managed assembly to match the current
+published intermediate assembly and contain `UninstallHandoff`, in addition to
+the existing script, runtime, version and ZIP byte checks.
+
+Actual Windows Settings entry, linked-token acquisition, normal profile loading,
+UAC cancellation and alternate-administrator scenarios remain manually
+unverified. The disposable-VM procedure below remains required; synthetic
+fixtures do not establish actual UAC/security validation. No real uninstall or
+account-data mutation is authorized or performed.
+
+Integration validation: `Build-Installer.ps1 -RegressionControls` passed all
+36 safe/negative-control checks (report
+`dist/security/20261101-153533-5c6da148d2eb4746bea0f3be273160dd/report.json`).
+Package inspection passed; the package regression fixture initially lacked the
+newly required compiled assembly. The fixture now copies that assembly and
+checks that a mismatched assembly is rejected. Final packaging reruns the safe
+gate with this fixture correction; its matching report and artifact hashes are
+recorded in `dist/SECURITY-STATUS.json`, `dist/RUNTIME-PACKAGE.json` and
+`dist/SHA256SUMS.txt`. These generated artifacts are local and ignored by Git.
+
+The remaining sections record the original test-branch baseline before
+integration; their RED result and proposed future seam are historical.
+
 Base: `main` at `3ab8eb7`. Worktree branch: `test/settings-uninstall`.
 Only Checks sources are changed. No production fix is included.
 

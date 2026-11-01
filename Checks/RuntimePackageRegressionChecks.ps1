@@ -26,8 +26,19 @@ try {
     foreach ($name in @('Launcher.csproj','ElevatedRuntime.ps1','NativeDropdown.js')) {
         Copy-Item -LiteralPath (Join-Path $repository "Launcher/$name") -Destination (Join-Path $fixture 'Launcher')
     }
+    $assembly = 'Launcher/obj/Release/net10.0-windows/win-x64/HytaleAccounts.dll'
+    $null = New-Item -ItemType Directory -Path (Split-Path (Join-Path $fixture $assembly)) -Force
+    Copy-Item -LiteralPath (Join-Path $repository $assembly) -Destination (Join-Path $fixture $assembly)
     $archive = Join-Path $package 'HytaleAccounts-Setup.zip'
     Inspect $fixture $archive
+    $compiled = Join-Path $fixture $assembly
+    $original = [IO.File]::ReadAllBytes($compiled)
+    try {
+        $changed = [byte[]]$original.Clone()
+        $changed[0] = $changed[0] -bxor 1
+        [IO.File]::WriteAllBytes($compiled, $changed)
+        Inspect $fixture $archive 'Packaged helper differs from current published assembly.'
+    } finally { [IO.File]::WriteAllBytes($compiled, $original) }
     foreach ($case in @(
         @('Launcher/Launcher.csproj','<Version>[^<]+</Version>','<Version>99.0.0</Version>','Packaged assembly version differs from project.'),
         @('Install.ps1',"DisplayVersion = '[^']+'","DisplayVersion = '99.0.0'",'Windows Apps version differs from project.'),
