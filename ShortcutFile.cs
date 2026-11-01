@@ -47,6 +47,12 @@ public sealed class ShortcutFile : IDisposable
             try { RequireRegular(file, false); stream = new FileStream(file, readOnly ? FileAccess.Read : FileAccess.ReadWrite); }
             catch { file.Dispose(); throw; }
         }
+        catch (Win32Exception error)
+        {
+            Dispose();
+            throw new IOException("Could not open installer/shortcut path '" + path + "' (Windows error " + error.NativeErrorCode + "): " +
+                error.Message + ". Files preserved; resolve the obstruction and retry.", error);
+        }
         catch { Dispose(); throw; }
     }
     private static SafeFileHandle OpenRelative(SafeFileHandle parent, string name, bool directory, bool create, bool readOnly = false)

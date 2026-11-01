@@ -197,6 +197,55 @@ public static class SetupUpgradeChecks
         using (var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName))
             if ((string?)entry!.GetValue("DisplayVersion") != "0.1.1") throw new Exception("Locked upgrade changed the registered version.");
         Console.WriteLine("PASS real setup locked destination preserves old payload and recovery state");
+        var lockedPath = Path.Combine(destination, "Repair-Integration.ps1");
+        async Task CheckConstructorConflict(string owner)
+        {
+            try { await Setup.RunElevated(args); throw new Exception("Setup accepted a read-pinned payload."); }
+            catch (IOException ex) when (ex.Message.StartsWith("Installation failed.") && ex.Message.Contains("\".ctor\" with \"2\" argument(s)"))
+            {
+                if (!ex.Message.Contains(lockedPath) || !ex.Message.Contains("Windows error 32") ||
+                    !ex.Message.Contains("Win32Exception") || !ex.Message.Contains("Open-ShortcutFile") || !ex.Message.Contains("Install.ps1") ||
+                    !ex.Message.Contains("Installer PowerShell PID "))
+                    throw new Exception("Constructor failure lost its path, native cause or installer caller: " + ex.Message, ex);
+            }
+            foreach (var (name, bytes) in oldPayload)
+            {
+                if (!File.ReadAllBytes(Path.Combine(destination, name)).SequenceEqual(bytes) ||
+                    new FileInfo(Path.Combine(destination, name)).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All) != payloadAcls[name])
+                    throw new Exception("Constructor obstruction changed payload bytes or ACL: " + name);
+            }
+            CheckPreserved(recovery);
+            using var entry = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(registryName);
+            if ((string?)entry!.GetValue("DisplayVersion") != "0.1.1" || Directory.EnumerateFiles(destination, ".upgrade-*").Any() ||
+                Directory.EnumerateDirectories(Programs, "HytaleAccounts-setup-*").Any())
+                throw new Exception("Constructor obstruction changed registration or leaked staging.");
+            Console.WriteLine("PASS real worker constructor conflict with " + owner + " identifies path/native cause/caller and preserves installation");
+        }
+        // Seed a setup-owned source pin deliberately; do not mislabel this control as a naturally occurring leak.
+        using (var reader = SetupPayload.OpenSource(lockedPath))
+            await CheckConstructorConflict("seeded setup source reader PID " + Environment.ProcessId);
+        var obstruction = Setup.InstallStart(root, userPrograms, userDesktop);
+        obstruction.ArgumentList.Clear();
+        foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-Command" }) obstruction.ArgumentList.Add(arg);
+        obstruction.ArgumentList.Add("$ErrorActionPreference = 'Stop'; $f = [IO.File]::Open(" + Quote(lockedPath) +
+            ", 'Open', 'Read', 'Read'); try { [Console]::WriteLine('locked'); $null = [Console]::ReadLine() } finally { $f.Dispose() }");
+        obstruction.RedirectStandardInput = true;
+        obstruction.RedirectStandardOutput = true;
+        using (var holder = Process.Start(obstruction)!)
+        {
+            try
+            {
+                if (await holder.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15)) != "locked")
+                    throw new Exception("External obstruction did not acquire its fixture handle.");
+                await CheckConstructorConflict("external PowerShell reader PID " + holder.Id);
+            }
+            finally
+            {
+                holder.StandardInput.Close();
+                await holder.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            }
+            if (holder.ExitCode != 0) throw new Exception("External obstruction fixture failed.");
+        }
         try { await Install(); }
         finally { CheckPreserved(recovery); }
         foreach (var name in payload)

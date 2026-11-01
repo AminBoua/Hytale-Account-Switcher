@@ -184,7 +184,7 @@ Write-Output 'Installed. Official launcher bytes and permissions preserved.'
     if ($UserOnly) { throw }
     $errorPath = Join-Path $PSScriptRoot 'install-error.txt'
     Assert-RegularPath $errorPath
-    [IO.File]::WriteAllText($errorPath, $_.ToString())
+    [IO.File]::WriteAllText($errorPath, ("Installer PowerShell PID $PID" + [Environment]::NewLine + $_.Exception.ToString() + [Environment]::NewLine + $_.ScriptStackTrace))
     throw
 }
 
