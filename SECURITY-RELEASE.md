@@ -4,9 +4,12 @@
 
 ## Routine builds
 
-Run unelevated on Windows x64 with Git, .NET 10 SDK, Node.js and Windows PowerShell 5.1:
+Run unelevated from the repository root on Windows x64 with Git, .NET 10 SDK, Node.js 22 (as used in CI) and Windows PowerShell 5.1:
 
 ```powershell
+# Prepare this user's package cache; this step needs access to nuget.org.
+dotnet restore .\Checks\RuntimeExtraction\RuntimeExtraction.csproj --source https://api.nuget.org/v3/index.json -p:NuGetAudit=false
+
 # Safe checks only; no installer packaging, elevation, live accounts or external services.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Build-Installer.ps1 -ChecksOnly
 
@@ -17,7 +20,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Build-Installer.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Build-Installer.ps1 -ChecksOnly -RegressionControls
 ```
 
+The prerequisite restore downloads runtime packs and single-file build tools for the current self-contained `win-x64` WPF probe. Use the same Windows user, selected SDK and package cache for restore and checks; repeat preparation after an SDK change or when using a fresh cache. The offline build and extraction fixtures use `Checks/VmValidation/NuGet.Config`, which clears package sources. `NU1101` means a required package is unavailable locally: rerun the restore above with package access, require success, then retry the build entry point. Keep those checks fail-closed; do not enable online fallback, bypass checks or elevate to recover.
+
 `Build-Installer.ps1` is the repository's build/release entry point. All its paths run the safe gate first. A direct `dotnet build` is compilation only and supplies no security validation. There is no skip-checks build option. Safe checks refuse an elevated token; never elevate to fix a failure.
+
+When integrating runtime packaging changes, recheck the prerequisite `dotnet restore` command above and both `Build-Installer.ps1 -ChecksOnly` and `Build-Installer.ps1` against the combined source using a fresh disposable package cache. These instructions describe the current probe and packaging, not another branch's implementation.
 
 ## Native runtime and elevation startup
 

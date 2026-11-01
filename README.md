@@ -101,11 +101,14 @@ For help, use [GitHub Discussions](https://github.com/AminBoua/Hytale-Account-Sw
 
 ## Build from source
 
-Use Windows x64 with **Git**, the **.NET 10 SDK**, **Node.js**, and **Windows PowerShell 5.1** available. Run the following from a normal, unelevated terminal:
+Use Windows x64 with **Git**, the **.NET 10 SDK**, **Node.js 22** (as used in CI), and **Windows PowerShell 5.1** available. Run the following from a normal, unelevated terminal:
 
 ```powershell
 git clone https://github.com/AminBoua/Hytale-Account-Switcher.git
 cd Hytale-Account-Switcher
+
+# Prepare this user's package cache before running the offline checks.
+dotnet restore .\Checks\RuntimeExtraction\RuntimeExtraction.csproj --source https://api.nuget.org/v3/index.json -p:NuGetAudit=false
 
 # Run the safe checks without packaging an installer.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Installer.ps1 -ChecksOnly
@@ -123,7 +126,9 @@ Choose the checks-only command or the packaging command for your task; packaging
 - `dist\SECURITY-STATUS.json` — artifact hash and validation status.
 - `dist\security\<run>\` — check report and logs.
 
-The safe suite covers C# storage/session/bridge behavior, mocked frontend behavior, installer and shortcut fixtures, substitute PowerShell module rejection, race checks, and evidence-gate validation. It does not use live Hytale accounts, request elevation, or prove live launcher compatibility. Its build step clears package sources, so missing local SDK/targeting prerequisites must be installed first. A direct `dotnet build` only compiles and does not substitute for the gate.
+Initial preparation needs access to nuget.org to download the self-contained `win-x64` WPF probe's runtime packs and single-file build tools. Use the same Windows user, selected SDK and package cache for restore and checks; repeat preparation after an SDK change or when using a fresh cache. The offline checks clear package sources and fail closed if a prerequisite is missing. For `NU1101` (package not found), rerun the restore command above with package access, confirm it succeeds, then retry `Build-Installer.ps1`. Do not elevate, add online fallback to the checks, or weaken them.
+
+The safe suite covers C# storage/session/bridge behavior, mocked frontend behavior, installer and shortcut fixtures, substitute PowerShell module rejection, race checks, and evidence-gate validation. It does not use live Hytale accounts, request elevation, or prove live launcher compatibility. A direct `dotnet build` only compiles and does not substitute for the gate.
 
 `Checks/InstallerScriptChecks.ps1` covers missing and unrelated shortcuts, each common/user shortcut location alone, read-only upgrade backups, and ordinary fixture installation/removal with disposable files, an HKCU registry entry and mocked repair tasks. `Checks/SetupChecks.cs` checks the hidden, unelevated preflight process configuration. `Checks/SetupUpgradeRegressionChecks.ps1` exercises the real setup parent with elevation intercepted, checking prerequisite failures before legacy cleanup and UAC and cleanup of temporary staging.
 
