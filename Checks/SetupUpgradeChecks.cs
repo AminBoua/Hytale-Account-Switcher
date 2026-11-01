@@ -27,7 +27,7 @@ public static class SetupUpgradeChecks
             var bytes = File.ReadAllText(Path.Combine(repository, name));
             if (name == "Install.ps1")
             {
-                const string version = "DisplayVersion = '0.1.3'";
+                const string version = "DisplayVersion = '0.1.4'";
                 if (!bytes.Contains(version)) throw new Exception("Lifecycle DisplayVersion fixture boundary changed.");
                 bytes = bytes.Replace(version, "DisplayVersion = '0.1." + payloadVersion + "'");
                 bytes = bytes.Replace("[Environment]::GetFolderPath('CommonPrograms')", Quote(commonPrograms))
@@ -168,7 +168,19 @@ public static class SetupUpgradeChecks
         WritePayload();
         var payload = SetupPayload.Scripts.Concat(SetupPayload.RuntimeFiles).Append("HytaleAccounts.exe").ToArray();
         var oldPayload = payload.ToDictionary(name => name, name => File.ReadAllBytes(Path.Combine(destination, name)));
-        var payloadAcls = payload.ToDictionary(name => name, name => new FileInfo(Path.Combine(destination, name)).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All));
+        var protectedFile = new FileInfo(Path.Combine(destination, "Repair-Integration.ps1"));
+        var protectedAcl = protectedFile.GetAccessControl();
+        protectedAcl.SetAccessRuleProtection(true, true);
+        protectedFile.SetAccessControl(protectedAcl);
+        var payloadAcls = payload.ToDictionary(name => name, name =>
+        {
+            var acl = new FileInfo(Path.Combine(destination, name)).GetAccessControl();
+            var descriptor = new RawSecurityDescriptor(acl.GetSecurityDescriptorBinaryForm(), 0);
+            // ReplaceFile converts an inherited legacy DACL to Windows' automatic-inheritance model.
+            if (!acl.AreAccessRulesProtected)
+                descriptor.SetFlags(descriptor.ControlFlags | ControlFlags.DiscretionaryAclAutoInherited);
+            return descriptor.GetSddlForm(AccessControlSections.All);
+        });
         byte[] ExpectedPayload(string name)
         {
             using var source = SetupPayload.Scripts.Contains(name) ? Resource(name) : File.OpenRead(name == "HytaleAccounts.exe" ? Executable : Path.Combine(root, name));

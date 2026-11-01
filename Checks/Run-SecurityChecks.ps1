@@ -14,7 +14,8 @@ $steps = @(
     @{Name='build';Exe='dotnet';Arguments=@('build','Checks/Checks.csproj','-c','Release','--nologo','--configfile','Checks/VmValidation/NuGet.Config','-p:NuGetAudit=false')},
     @{Name='csharp-safe';Exe='dotnet';Arguments=@('run','--project','Checks/Checks.csproj','-c','Release','--no-build','--no-restore','--','--safe')},
     @{Name='update-ordering';Exe='dotnet';Arguments=@('run','--project','Checks/UpdateOrdering/UpdateOrdering.csproj','-c','Release','-p:NuGetAudit=false')},
-    @{Name='frontend';Exe='node';Arguments=@('Checks/NativeLoginChecks.cjs')}
+    @{Name='frontend';Exe='node';Arguments=@('Checks/NativeLoginChecks.cjs')},
+    @{Name='upgrade-journal';Exe='powershell.exe';Arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','Checks/UpgradeJournalReplacementChecks.ps1')}
 )
 foreach ($entry in @(@('native-startup','Checks/NativeStartupRegressionChecks.ps1'),@('powershell-modules','Checks/PowerShellModuleRegressionChecks.ps1'),@('installer-fixtures','Checks/InstallerScriptChecks.ps1'),@('uninstall-finalization','Checks/UninstallFinalizationScriptChecks.ps1'),@('setup-upgrade','Checks/SetupUpgradeRegressionChecks.ps1'),@('shortcut-races','Checks/ShortcutRaceChecks.ps1'),
     @('acl-races','Checks/AclMigrationRaceChecks.ps1'),@('storage-races','Checks/AclMigrationRaceChecks.ps1','-Storage'),
