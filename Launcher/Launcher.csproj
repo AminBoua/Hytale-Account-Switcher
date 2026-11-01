@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>HytaleAccounts</AssemblyName>
-    <Version>0.1.4</Version>
+    <Version>0.1.5</Version>
     <!-- WPF native files ship beside apphost: ordinary startup must never extract into a cache. -->
     <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>

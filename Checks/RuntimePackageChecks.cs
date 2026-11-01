@@ -74,7 +74,7 @@ internal static class RuntimePackageChecks
         var installVersion = Regex.Match(File.ReadAllText(Path.Combine(repository, "Install.ps1")), @"DisplayVersion = '([^']+)'");
         Require(installVersion.Success && installVersion.Groups[1].Value == version, "Windows Apps version differs from project.");
         var section = pe.GetSectionData(pe.PEHeaders.CorHeader!.ResourcesDirectory.RelativeVirtualAddress);
-        var resources = new List<string>();
+        var resources = new Dictionary<string, string>();
         foreach (var handle in metadata.ManifestResources)
         {
             var resource = metadata.GetManifestResource(handle);
@@ -87,12 +87,12 @@ internal static class RuntimePackageChecks
             var content = blob.ReadBytes(blob.ReadInt32());
             var source = file is "ElevatedRuntime.ps1" or "NativeDropdown.js" ? Path.Combine(repository, "Launcher", file) : Path.Combine(repository, file);
             Require(content.AsSpan().SequenceEqual(File.ReadAllBytes(source)), "Packaged resource differs from checked source: " + name);
-            resources.Add(name);
+            resources.Add(name, Convert.ToHexString(SHA256.HashData(content)));
         }
-        Require(resources.Contains("HytaleAccounts.ElevatedRuntime.ps1") && resources.Contains("HytaleAccounts.NativeDropdown.js") && resources.Count == 8, "Installer bootstrap/scripts missing.");
+        Require(resources.ContainsKey("HytaleAccounts.ElevatedRuntime.ps1") && resources.ContainsKey("HytaleAccounts.NativeDropdown.js") && resources.Count == 8, "Installer bootstrap/scripts missing.");
         using var zip = ZipFile.OpenRead(archive);
         var names = new[] { "HytaleAccounts-Setup.exe" }.Concat(sidecars).ToArray();
-        Require(zip.Entries.Count == names.Length && zip.Entries.All(entry => names.Contains(entry.FullName)), "Unexpected release ZIP contents.");
+        Require(zip.Entries.Select(entry => entry.FullName).Order().SequenceEqual(names.Order()), "Unexpected release ZIP contents.");
         foreach (var name in names)
         {
             using var zipped = zip.GetEntry(name)!.Open();
@@ -100,7 +100,10 @@ internal static class RuntimePackageChecks
             Require(SHA256.HashData(zipped).AsSpan().SequenceEqual(SHA256.HashData(original)), "Release ZIP bytes differ: " + name);
         }
         Console.WriteLine(JsonSerializer.Serialize(new { Kind = "static-package-inspection", ExecutedInstaller = false,
-            SHA256 = Convert.ToHexString(SHA256.HashData(bytes)), Version = version, BundleId = bundleId, Frameworks = frameworks, NativeLibraries = native, Resources = resources,
+            SHA256 = Convert.ToHexString(SHA256.HashData(bytes)), Version = version, fileVersion.FileVersion, fileVersion.ProductVersion,
+            ArchiveSHA256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(archive))),
+            RuntimeFiles = sidecars.ToDictionary(name => name, name => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(directory, name))))),
+            BundleId = bundleId, Frameworks = frameworks, NativeLibraries = native, Resources = resources,
             OrdinaryStartup = "No native or unknown bundle entries; WPF native libraries load beside apphost without extraction",
             Elevation = "System Windows PowerShell still creates a fresh protected runtime cache before starting apphost", ZipEntries = names }));
     }

@@ -1,5 +1,7 @@
 # Addon upgrade package investigation and final release procedure
 
+Historical v0.1.4 investigation. The next candidate is v0.1.5; use [SETUP-RELEASE-REGRESSIONS.md](SETUP-RELEASE-REGRESSIONS.md) for current provenance and build/acceptance commands. Do not run the historical v0.1.4 publication commands below.
+
 Investigation date: 2026-11-01 (Europe/Amsterdam). Packaging branch: `fix/addon-upgrade-package`, sibling worktree `Mod-hytale-launcher-upgrade-package`. Starting local `main`: `eb3bf60eb463eb6c8070bdc6101a919719eca682`. The original checkout was not edited. No remote writes or live installation were performed.
 
 ## Published bytes versus local source

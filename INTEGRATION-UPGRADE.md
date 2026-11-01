@@ -1,5 +1,7 @@
 # Upgrade integration and release blocker
 
+Historical v0.1.4 integration record. [SETUP-RELEASE-REGRESSIONS.md](SETUP-RELEASE-REGRESSIONS.md) records the next v0.1.5 candidate and current release gates; no v0.1.4 download was published.
+
 Integrated on 2026-11-01 (Europe/Amsterdam), starting from `eb3bf60eb463eb6c8070bdc6101a919719eca682`. All three repair tasks had completed, and all eight original worktrees were clean before integration. Fetching origin found no newer main or remote development branches. Merge commits preserve `31928b4` (replacement investigation), `71b0271` (worker lifecycle), and `ab95824` (0.1.4 packaging). All four older development branch tips were already ancestors of main. The existing `release-0.1.1-update-fixes` stash remains untouched.
 
 Initial integration code/check revision: `8cd6877`. Integration aligns the lifecycle fixture with version 0.1.4 and adds the standalone journal reproduction to the mandatory safe gate. The first GitHub run exposed a Windows Server 2025 fixture inheritance difference. The worker lifecycle now initializes its launcher directory using the same protected automatic-inheritance setup already used by `InstallerScriptChecks.ps1`. The original exact owner/group/DACL descriptor comparison is retained without flag normalization, and an additional protected payload DACL must also remain exact. The corrected focused lifecycle passes locally; final full local and GitHub results are recorded separately. No production account behavior or ACL grant is changed.
