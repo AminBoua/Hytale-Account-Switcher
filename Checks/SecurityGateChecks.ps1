@@ -186,25 +186,30 @@ try {
         $initiator = if ($mode -eq 'same-user') {$admin} else {$user}
         $worker = if ($elevated) {$admin} else {$user}
         $cache = "C:\Program Files\VM\runtime-$mode"
-        $acl = if ($elevated) {$sddl} else {"O:$user"+"G:BAD:P(A;OICI;FA;;;$user)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"}
+        $acl = $sddl
+        $libraries = 'C:\Program Files\VM\bin'
+        $nativeNames = @('D3DCompiler_47_cor3.dll','PenImc_cor3.dll','PresentationNative_cor3.dll','vcruntime140_cor3.dll','wpfgfx_cor3.dll')
+        $run.Files = @($nativeNames | ForEach-Object { @{Name=$_;Hash=('D'*64)} })
+        Write-Fixture 'run.json' $run
         $readyName = "channels\$worker\runtime-ready-$mode.json"
         $observed = [DateTime]::UtcNow.AddMinutes(-2).ToString('o')
-        Write-Fixture $readyName @{Contract='runtime-bootstrap-v1';RunId=$run.Id;Mode=$mode;SourceFingerprint=$source.Fingerprint;Utc=$observed;
+        Write-Fixture $readyName @{Contract='runtime-sidecars-v2';RunId=$run.Id;Mode=$mode;SourceFingerprint=$source.Fingerprint;Utc=$observed;
             Identity=@{Sid=$worker;Administrator=$elevated;ElevationType=$(if ($elevated) {2} else {1});Pid=123};
-            Cache=@{Path=$cache;Sddl=$acl};Directories=@();Files=@(@{Path="$cache\coreclr.dll";Sddl=$acl;Hash=('D'*64)});
-            Modules=@("$cache\coreclr.dll");BeforeApplication=@("$cache\coreclr.dll")}
+            Cache=@{Path=$cache;Sddl=$acl};LibraryRoot=@{Path=$libraries;Sddl=$acl};Directories=@();Files=@($nativeNames | ForEach-Object { @{Path="$libraries\$_";Sddl=$acl;Hash=('D'*64)} });
+            Modules=@("$libraries\PresentationNative_cor3.dll");BeforeApplication=@()}
         $readyHash=(Get-FileHash -LiteralPath (Join-Path $root $readyName.Replace('\','_'))).Hash
-        Write-Fixture "channels\$initiator\runtime-$mode.json" @{Contract='runtime-bootstrap-v1';RunId=$run.Id;Mode=$mode;SourceFingerprint=$source.Fingerprint;Success=$true;
+        Write-Fixture "channels\$initiator\runtime-$mode.json" @{Contract='runtime-sidecars-v2';RunId=$run.Id;Mode=$mode;SourceFingerprint=$source.Fingerprint;Success=$true;
             Identity=@{Sid=$initiator;Administrator=$false;ElevationType=$(if ($mode -eq 'same-user') {3} else {1});Pid=122};
             StartedUtc=[DateTime]::UtcNow.AddMinutes(-3).ToString('o');CompletedUtc=[DateTime]::UtcNow.AddMinutes(-1).ToString('o');
-            ReadyHash=$readyHash;WorkerPid=123;ExitCode=23;CacheRemoved=$true;StartFailureCacheRemoved=$true;PoisonPreserved=$true;ProfilePreserved=$true}
+            ReadyHash=$readyHash;WorkerPid=123;ExitCode=23;CacheRemoved=$true;StartFailureCacheRemoved=$true;LibrariesPreserved=$true;PoisonPreserved=$true;ProfilePreserved=$true}
         foreach ($actor in @('unrelated') + @($(if ($elevated) {'owner'}))) {
             if (!$actor) {continue}
             $actorSid=if ($actor -eq 'owner') {$admin} else {$other}
             $name=if ($actor -eq 'owner') {'runtime-owner-attack'} else {'runtime-attack'}
             Write-Fixture "channels\$actorSid\$name-$mode.json" @{RunId=$run.Id;Mode=$mode;Success=$true;Identity=@{Sid=$actorSid;Administrator=$false;ElevationType=$(if ($actor -eq 'owner') {3} else {1});Pid=124};
                 WorkerPid=123;ReadyHash=$readyHash;Utc=$observed;PositiveControl=$true;
-                Operations=@(@('write','replace','delete-leaf','rename-directory','insert-file','delete-directory','file-write-dac','directory-write-dac') | ForEach-Object {@{Operation=$_;Denied=$true;WindowsError=5}})}
+                Operations=@(@('write','replace','delete-leaf','rename-directory','insert-file','delete-directory','file-write-dac','directory-write-dac') | ForEach-Object {@{Operation=$_;Denied=$true;WindowsError=5}});
+                CacheOperations=@(@('rename-directory','insert-file','delete-directory','directory-write-dac') | ForEach-Object {@{Operation=$_;Denied=$true;WindowsError=5}})}
         }
     }
     Seal
@@ -219,11 +224,12 @@ try {
         Check ((Test-VmEvidence $root $source $environment).Status -eq 'unverified') "tampered runtime record rejected: $relative"
         [IO.File]::WriteAllText($path,$baseline[$relative],[Text.UTF8Encoding]::new($true))
     }
-    foreach ($mutation in @('contract','source','run','worker-token','loaded-path','no-modules','no-files','acl','owner','before','cleanup','failure-cleanup','profile','poison','exit','pid','hash','time','failed','attack-token','attack-control','attack-operation','attack-time','owner-dac','no-directories','no-native-hash','native-parent','trusted-access','unknown-operation')) {
+    foreach ($mutation in @('contract','source','run','worker-token','loaded-path','no-modules','no-files','acl','owner','before','cleanup','failure-cleanup','profile','poison','exit','pid','hash','time','failed','attack-token','attack-control','attack-operation','attack-time','owner-dac','no-directories','no-native-hash','native-parent','trusted-access','unknown-operation','cache-operation','libraries-changed','package-hash','library-root')) {
         $relative="channels\$admin\runtime-ready-same-user.json"
-        if ($mutation -in @('cleanup','failure-cleanup','profile','poison','exit','pid','hash','time','failed')) {$relative="channels\$admin\runtime-same-user.json"}
+        if ($mutation -in @('cleanup','failure-cleanup','profile','poison','exit','pid','hash','time','failed','libraries-changed')) {$relative="channels\$admin\runtime-same-user.json"}
         if ($mutation.StartsWith('attack-') -or $mutation -eq 'unknown-operation') {$relative="channels\$other\runtime-attack-same-user.json"}
         if ($mutation -eq 'owner-dac') {$relative="channels\$admin\runtime-owner-attack-same-user.json"}
+        if ($mutation -eq 'cache-operation') {$relative="channels\$other\runtime-attack-same-user.json"}
         $row=Read-Fixture $relative
         switch ($mutation) {
             'contract' {$row.Contract='earlier'}
@@ -255,6 +261,10 @@ try {
             'trusted-access' { $row.Files[0].Sddl='O:BAG:BAD:P(A;;FR;;;SY)(A;;FR;;;BA)' }
             'unknown-operation' { $row.Operations[0].WindowsError=2 }
             'owner-dac' {$row.Operations=@($row.Operations | Where-Object Operation -ne 'file-write-dac')}
+            'cache-operation' {$row.CacheOperations=@()}
+            'libraries-changed' {$row.LibrariesPreserved=$false}
+            'package-hash' {$row.Files[0].Hash=('E'*64)}
+            'library-root' {$row.LibraryRoot.Sddl="O:$user"+"G:BAD:P(A;;FA;;;$user)"}
         }
         Write-Fixture $relative $row
         if ($relative -like '*runtime-ready-same-user.json') { Rebind-Runtime }

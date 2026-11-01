@@ -53,7 +53,7 @@ try {
         if ((Get-FileHash -LiteralPath (Join-Path $fixture $entry.Name)).Hash -ne $entry.Hash) { throw "Package mismatch: $($entry.Name)" }
     }
     if (Test-Path -LiteralPath (Join-Path $fixture 'HytaleAccounts.exe')) { throw 'Real addon executable was packaged.' }
-    foreach ($name in @('Runtime.ps1','RuntimeEvidence.ps1','ElevatedRuntime.ps1','RuntimeProbe.exe')) {
+    foreach ($name in @('Runtime.ps1','RuntimeEvidence.ps1','ElevatedRuntime.ps1','RuntimeProbe.exe','D3DCompiler_47_cor3.dll','PenImc_cor3.dll','PresentationNative_cor3.dll','vcruntime140_cor3.dll','wpfgfx_cor3.dll')) {
         if (@($package.Files | Where-Object Name -eq $name).Count -ne 1) { throw "Missing runtime evidence package input: $name" }
     }
     Write-Output 'PASS runtime evidence collector, contract, production bootstrap and harmless single-file probe are hashed package inputs'

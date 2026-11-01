@@ -37,15 +37,10 @@ if ($Action -in @('Attack','OwnerAttack')) {
     Check ($identity.Sid -eq $(if ($owner) {$run.AdminSid} else {$run.AttackerSid}) -and !$identity.Administrator -and $identity.ElevationType -eq $(if ($owner) {3} else {1})) 'Wrong independent runtime actor token.'
     Wait-File $ready
     $observation = Get-Content -LiteralPath $ready -Raw | ConvertFrom-Json
-    $allowed = if ($elevated) { Join-Path $Root "runtime-cache-$Mode" } else { Join-Path $observation.Profile.TEMP '.net\RuntimeProbe' }
-    if ($elevated) { Check ($observation.Cache.Path -eq $allowed) 'Runtime target escaped designated cache.' }
-    else {
-        Check ($observation.Profile.USERPROFILE -match '^C:\\Users\\MLSV-User-[a-f0-9]{6}$' -and
-            $allowed.StartsWith($observation.Profile.USERPROFILE+'\',[StringComparison]::OrdinalIgnoreCase) -and
-            $observation.Cache.Path.StartsWith($allowed+'\',[StringComparison]::OrdinalIgnoreCase)) 'Ordinary probe target escaped disposable profile.'
-    }
+    $allowed = Join-Path $Root "runtime-cache-$Mode"
+    Check ($observation.Cache.Path -eq $allowed -and $observation.LibraryRoot.Path -eq (Join-Path $Root 'bin')) 'Runtime target escaped designated package/cache.'
     Check ([IO.Path]::GetFullPath($observation.Cache.Path) -eq $observation.Cache.Path) 'Non-canonical runtime cache target.'
-    Check (@($observation.Files).Count -gt 0 -and $observation.Files[0].Path.StartsWith($observation.Cache.Path+'\',[StringComparison]::OrdinalIgnoreCase)) 'Runtime leaf escaped cache.'
+    Check (@($observation.Files).Count -gt 0 -and $observation.Files[0].Path.StartsWith($observation.LibraryRoot.Path+'\',[StringComparison]::OrdinalIgnoreCase)) 'Runtime leaf escaped package.'
     Check ([IO.Path]::GetFullPath($observation.Files[0].Path) -eq $observation.Files[0].Path) 'Non-canonical runtime file target.'
     $hash = (Get-FileHash -LiteralPath $ready).Hash
     $control = Join-Path $Root "channels\$($identity.Sid)\runtime-control-$Mode"
@@ -54,9 +49,10 @@ if ($Action -in @('Attack','OwnerAttack')) {
     $leaf = Join-Path $control 'probe.dll'
     [IO.File]::WriteAllText($leaf,'FAKE DLL')
     # Exercise the same mutation operations successfully before testing protected targets.
-    function Mutate($Directory, $File, $Denied) {
+    function Mutate($Directory, $File, $Denied, $DirectoryOnly = $false) {
         $rows = @()
         foreach ($operation in @('write','replace','file-write-dac','directory-write-dac','insert-file','delete-leaf','rename-directory','delete-directory')) {
+            if ($DirectoryOnly -and $operation -in @('write','replace','file-write-dac','delete-leaf')) { continue }
             $errorCode = 0
             try {
                 switch ($operation) {
@@ -97,8 +93,9 @@ if ($Action -in @('Attack','OwnerAttack')) {
     # Recreate the private replacement scratch directory removed by the positive control.
     New-Item -ItemType Directory -Path $control | Out-Null
     try {
-        $rows = @(Mutate $observation.Cache.Path $observation.Files[0].Path $true)
-        Write-New $(if ($owner) {$ownerAttack} else {$otherAttack}) @{Success=$true;RunId=$run.Id;Mode=$Mode;Identity=$identity;Utc=(Now);WorkerPid=$observation.Identity.Pid;ReadyHash=$hash;PositiveControl=$true;Operations=$rows}
+        $rows = @(Mutate $observation.LibraryRoot.Path $observation.Files[0].Path $true)
+        $cacheRows = @(); if ($elevated) { $cacheRows = @(Mutate $observation.Cache.Path $null $true $true) }
+        Write-New $(if ($owner) {$ownerAttack} else {$otherAttack}) @{Success=$true;RunId=$run.Id;Mode=$Mode;Identity=$identity;Utc=(Now);WorkerPid=$observation.Identity.Pid;ReadyHash=$hash;PositiveControl=$true;Operations=$rows;CacheOperations=$cacheRows}
     } finally { if (Test-Path -LiteralPath $control) { [IO.Directory]::Delete($control,$true) } }
     exit 0
 }
@@ -128,6 +125,9 @@ $probe = Join-Path $PSScriptRoot 'RuntimeProbe.exe'
 $profile = @{}; foreach ($name in @('APPDATA','LOCALAPPDATA','USERPROFILE','TEMP','TMP')) { $profile[$name] = [Environment]::GetEnvironmentVariable($name) }
 $arguments = @($ready,$run.Id,$Mode,$run.Source.Fingerprint,$stop)
 $cache = Join-Path $Root "runtime-cache-$Mode"
+Check (!(Test-Path -LiteralPath $cache)) 'Refusing pre-existing runtime cache.'
+$librariesBefore = @($run.Files | Where-Object Name -like '*_cor3.dll')
+Check ($librariesBefore.Count -eq 5) 'Incomplete native sidecar package.'
 $poison = Join-Path $channel "runtime-poison-$Mode"
 Check (!(Test-Path -LiteralPath $poison)) 'Existing poison fixture.'
 New-Item -ItemType Directory -Path $poison | Out-Null
@@ -141,22 +141,21 @@ if ($elevated) {
     try { $null = Invoke-ProtectedRuntime $cache (Join-Path $PSScriptRoot 'nonexistent-probe.exe') @() } catch { $startupFailed = $true }
     $failureRemoved = $startupFailed -and !(Test-Path -LiteralPath $cache)
 } else {
-    # This base's ordinary entry is a direct single-file apphost. Do not pretend it has a protected bootstrap.
-    Check (!$env:DOTNET_BUNDLE_EXTRACT_BASE_DIR) 'Ordinary baseline requires the normal default extraction environment.'
-    $ordinaryRoot = Join-Path $env:TEMP '.net\RuntimeProbe'
-    Check (!(Test-Path -LiteralPath $ordinaryRoot)) 'Refusing a warm/pre-existing ordinary probe cache.'
+    # Only the harmless child gets an absent cache path, to observe zero extraction.
     $start = [Diagnostics.ProcessStartInfo]::new($probe)
     $start.UseShellExecute=$false; $start.CreateNoWindow=$true
+    $start.EnvironmentVariables['DOTNET_BUNDLE_EXTRACT_BASE_DIR'] = $cache
     $start.Arguments = ($arguments | ForEach-Object { '"' + $_ + '"' }) -join ' '
     $child = [Diagnostics.Process]::Start($start)
     try { Check ($child.WaitForExit(300000)) 'Ordinary runtime timeout.'; $exitCode=$child.ExitCode } finally { $child.Dispose() }
-    # Delete only this previously absent, harmless probe's default cache, never the .net parent.
-    Assert-PlainPath $ordinaryRoot
-    [IO.Directory]::Delete($ordinaryRoot,$true)
-    $removed = !(Test-Path -LiteralPath $ordinaryRoot)
-    $failureRemoved = $false # No ordinary bootstrap exists at this base; integration must supply and exercise it.
+    $removed = !(Test-Path -LiteralPath $cache)
+    $start.FileName = Join-Path $PSScriptRoot 'nonexistent-probe.exe'
+    $startupFailed = $false
+    try { $null = [Diagnostics.Process]::Start($start) } catch { $startupFailed = $true }
+    $failureRemoved = $startupFailed -and !(Test-Path -LiteralPath $cache)
 }
 $observation = Get-Content -LiteralPath $ready -Raw | ConvertFrom-Json
 $preserved = $true
 foreach ($name in $profile.Keys) { if ($observation.Profile.$name -cne $profile[$name]) { $preserved=$false } }
-Write-New $outcome @{Contract='runtime-bootstrap-v1';RunId=$run.Id;Mode=$Mode;SourceFingerprint=$run.Source.Fingerprint;Success=($exitCode -eq 23);WorkerPid=$observation.Identity.Pid;ReadyHash=(Get-FileHash -LiteralPath $ready).Hash;ExitCode=$exitCode;CacheRemoved=$removed;StartFailureCacheRemoved=$failureRemoved;PoisonPreserved=(@(Get-ChildItem -LiteralPath $poison).Count -eq 1 -and [IO.File]::ReadAllText((Join-Path $poison 'sentinel')) -ceq 'FAKE POISON');ProfilePreserved=$preserved}
+$librariesPreserved = @($librariesBefore | Where-Object { (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot $_.Name)).Hash -ne $_.Hash }).Count -eq 0
+Write-New $outcome @{Contract='runtime-sidecars-v2';RunId=$run.Id;Mode=$Mode;SourceFingerprint=$run.Source.Fingerprint;Success=($exitCode -eq 23);WorkerPid=$observation.Identity.Pid;ReadyHash=(Get-FileHash -LiteralPath $ready).Hash;ExitCode=$exitCode;CacheRemoved=$removed;StartFailureCacheRemoved=$failureRemoved;LibrariesPreserved=$librariesPreserved;PoisonPreserved=(@(Get-ChildItem -LiteralPath $poison).Count -eq 1 -and [IO.File]::ReadAllText((Join-Path $poison 'sentinel')) -ceq 'FAKE POISON');ProfilePreserved=$preserved}
