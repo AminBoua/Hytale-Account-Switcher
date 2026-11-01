@@ -62,7 +62,7 @@ internal static class EffectiveAccessChecks
             "Windows Authz simulated owner retains full control of " + name);
     }
 
-    private static bool Allowed(byte[] descriptor, SecurityIdentifier user, uint rights)
+    internal static bool Allowed(byte[] descriptor, SecurityIdentifier user, uint rights)
     {
         IntPtr manager = IntPtr.Zero, context = IntPtr.Zero, grouped = IntPtr.Zero;
         var allocations = new List<IntPtr>();
