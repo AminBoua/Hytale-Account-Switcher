@@ -12,6 +12,7 @@ $journalLock = Open-ShortcutJournal $state
 try {
     $journal = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $script:records = @($journal.Shortcuts)
+    Assert-ShortcutIdentities $records
     $roots = @($journal.Roots)
     $repairRoots = if ($journal.RepairRoots) { @($journal.RepairRoots) } else { $roots }
     $ownerSid = $journal.UserSid

@@ -66,6 +66,7 @@ if (Test-Path -LiteralPath $manifestPath) {
     $journal = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $script:records = @($journal.Shortcuts)
     foreach ($record in $records) { Assert-ShortcutRecord $record $journal.Roots }
+    Assert-ShortcutIdentities $records
     $roots = @(@($journal.Roots) + $scanRoots | Select-Object -Unique)
 }
 if (!$UserOnly) {

@@ -44,6 +44,11 @@ function Assert-ShortcutRecord($Record, $Roots, [switch]$ReadOnly) {
     if (!$allowed -or [IO.Path]::GetExtension($path) -ne '.lnk' -or $Record.Arguments -notin @('','--uninstall') -or ($Record.Backup -and $Record.Backup -notmatch '^shortcut-[a-f0-9]{32}\.lnk$')) { throw 'Invalid shortcut restoration journal; files preserved.' }
     if ($Record.Backup) { $null = Read-ShortcutBytes (Join-Path $state $Record.Backup) -ReadOnly:$ReadOnly }
 }
+function Assert-ShortcutIdentities($Records) {
+    if (@($Records | Where-Object FileId | Group-Object FileId | Where-Object Count -gt 1).Count) {
+        throw 'Duplicate shortcut restoration identity; resolve the journal before retrying. All backups and installed files preserved.'
+    }
+}
 function Get-InstallShortcuts([string[]]$Roots, $Records = @()) {
     foreach ($folder in $Roots) {
         Assert-RegularPath $folder
@@ -74,6 +79,7 @@ function Assert-LauncherShortcut {
             if ($journal.UserSid -and $journal.UserSid -ne $callerSid) { throw 'Remove the addon from the Windows account that installed it before installing for another user.' }
             $records = @($journal.Shortcuts)
             foreach ($record in $records) { Assert-ShortcutRecord $record $journal.Roots -ReadOnly }
+            Assert-ShortcutIdentities $records
         }
         $found += @(Get-InstallShortcuts $scope.Roots $records)
     }
@@ -103,6 +109,7 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
                 # Legacy discovery requires unique unchanged bytes; a different recorded identity is a replacement.
                 if ($matches.Count -ne 1 -or $matches[0].FileId) { return }
             }
+            Assert-ShortcutIdentities $matches
             if ($matches.Count -ne 1) { return }
             $Record = $matches[0]
         }
@@ -143,6 +150,7 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
             # Adopt a legacy machine journal into the user's unelevated journal without losing its original backup.
             if ($Operation -eq 'Install' -and !$Record -and $link.TargetPath -eq $installed -and !$link.Arguments -and $UserOnly -and (Test-Path -LiteralPath (Join-Path $destination 'shortcuts.json'))) {
                 $legacy = Get-Content -LiteralPath (Join-Path $destination 'shortcuts.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+                Assert-ShortcutIdentities $legacy.Shortcuts
                 $old = @($legacy.Shortcuts | Where-Object Path -eq $Path)
                 if ($old.Count -eq 1 -and $old[0].Backup -match '^shortcut-[a-f0-9]{32}\.lnk$') {
                     $backup = 'shortcut-' + [Guid]::NewGuid().ToString('N') + '.lnk'
@@ -153,10 +161,10 @@ function Update-Shortcut([string]$Path, [ValidateSet('Install','Repair','Remove'
             }
             return
         }
-        if ($Operation -eq 'Repair' -and !$Record) {
+        if (!$Record) {
             $identity = $file.Identity
             $matches = @($records | Where-Object { $_.FileId -and $_.FileId -eq $identity })
-            if ($matches.Count -gt 1) { return }
+            Assert-ShortcutIdentities $matches
             if ($matches.Count -eq 1) {
                 # A renamed official link keeps its restoration record and native identity.
                 $Record = $matches[0]

@@ -924,6 +924,106 @@ try {
     foreach ($case in $restorationCases) {
         foreach ($path in @($case.Path,$case.Current) | Select-Object -Unique) { if (Test-Path -LiteralPath $path) { [IO.File]::Delete($path) } }
     }
+    # Upgrade a renamed native file, then rename it again before real fixture removal.
+    foreach ($repairFirst in @($false,$true)) {
+        $upgradeCases = @()
+        foreach ($folder in @($programs,$commonPrograms)) {
+            $path = Join-Path $folder 'upgrade-original.lnk'
+            $link = $shell.CreateShortcut($path); $link.TargetPath = $official; $link.Description = 'Original upgrade shortcut'; $link.Save()
+            $upgradeCases += [pscustomobject]@{ Path=$path; Current=(Join-Path $folder 'upgrade-renamed.lnk'); User=($folder -eq $programs) }
+        }
+        & (Join-Path $package 'Install.ps1') @options
+        & (Join-Path $package 'Install.ps1') @options -UserOnly
+        foreach ($case in $upgradeCases) {
+            [IO.File]::Move($case.Path, $case.Current)
+            $link = $shell.CreateShortcut($case.Current); $link.TargetPath = $official; $link.Description = 'User edit before upgrade'; $link.Save()
+            $case | Add-Member NoteProperty OriginalHash (Get-FileHash -LiteralPath $case.Current).Hash
+        }
+        if ($repairFirst) {
+            & (Join-Path $destination 'Repair-Integration.ps1')
+            & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly
+        }
+        foreach ($upgrade in 1..3) {
+            & (Join-Path $package 'Install.ps1') @options
+            & (Join-Path $package 'Install.ps1') @options -UserOnly
+            foreach ($case in $upgradeCases) {
+                $fixtureState = if ($case.User) { $userState } else { $destination }
+                $journal = Get-Content -LiteralPath (Join-Path $fixtureState 'shortcuts.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+                $owned = @($journal.Shortcuts | Where-Object { $_.Path -in @($case.Path,$case.Current) })
+                Check ($owned.Count -eq 1 -and $owned[0].Path -eq $case.Current) "upgrade $upgrade reuses the renamed identity (repair first: $repairFirst; user: $($case.User))"
+                Check ((Get-FileHash -LiteralPath (Join-Path $fixtureState $owned[0].Backup)).Hash -eq $case.OriginalHash) 'repeated upgrades retain exact held official restoration bytes'
+                Check ($shell.CreateShortcut($case.Current).TargetPath -eq (Join-Path $destination 'HytaleAccounts.exe')) 'upgrade integrates the existing shortcut'
+            }
+        }
+        foreach ($case in $upgradeCases) {
+            $final = Join-Path (Split-Path $case.Current) 'upgrade-final.lnk'
+            [IO.File]::Move($case.Current, $final); $case.Current = $final
+            $link = $shell.CreateShortcut($final); $link.Description = 'User edit after upgrade'; $link.Save()
+            # A replacement at the obsolete path must not inherit the renamed file's ownership.
+            $link = $shell.CreateShortcut($case.Path); $link.TargetPath = Join-Path $root 'foreign.exe'; $link.Save()
+            $case | Add-Member NoteProperty ForeignHash (Get-FileHash -LiteralPath $case.Path).Hash
+        }
+        & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
+        Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
+        foreach ($case in $upgradeCases) {
+            $link = $shell.CreateShortcut($case.Current)
+            Check ($link.TargetPath -eq $official -and $link.Description -eq 'User edit after upgrade') 'upgrade removal restores the twice-renamed shortcut and retains metadata edits'
+            Check ((Get-FileHash -LiteralPath $case.Path).Hash -eq $case.ForeignHash) 'upgrade removal preserves unrelated replacements'
+            [IO.File]::Delete($case.Path); [IO.File]::Delete($case.Current)
+        }
+        Check (!(Test-Path -LiteralPath $destination) -and !$global:HytaleFixtureTasks.Count) 'upgrade uninstall removes the helper only after restoration'
+    }
+    # Old versions could journal one native identity twice. Never guess which original to restore.
+    foreach ($user in @($false,$true)) {
+        foreach ($conflicting in @($false,$true)) {
+            $folder = if ($user) { $programs } else { $commonPrograms }
+            $path = Join-Path $folder 'duplicate-original.lnk'
+            $link = $shell.CreateShortcut($path); $link.TargetPath = $official; $link.Save()
+            & (Join-Path $package 'Install.ps1') @options
+            & (Join-Path $package 'Install.ps1') @options -UserOnly
+            $fixtureState = if ($user) { $userState } else { $destination }
+            $manifest = Join-Path $fixtureState 'shortcuts.json'
+            $valid = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8
+            $journal = $valid | ConvertFrom-Json
+            $original = $journal.Shortcuts | Where-Object Path -eq $path
+            $duplicate = $original | ConvertTo-Json | ConvertFrom-Json
+            $duplicate.Path = Join-Path $folder 'duplicate-intermediate.lnk'
+            $duplicate.Backup = 'shortcut-' + [Guid]::NewGuid().ToString('N') + '.lnk'
+            $extraBackup = Join-Path $fixtureState $duplicate.Backup
+            Copy-Item -LiteralPath (Join-Path $fixtureState $original.Backup) -Destination $extraBackup
+            if ($conflicting) {
+                $link = $shell.CreateShortcut($extraBackup); $link.Description = 'Different restoration original'; $link.Save()
+            }
+            $journal.Shortcuts = @($journal.Shortcuts) + @($duplicate)
+            ConvertTo-Json -InputObject $journal -Depth 4 | Set-Content -LiteralPath $manifest -Encoding UTF8
+            $current = Join-Path $folder 'duplicate-final.lnk'; [IO.File]::Move($path, $current)
+            foreach ($operation in @('Preflight','Install','Repair','Remove')) {
+                $snapshot = Get-InstallFixtureSnapshot
+                $failure = $null
+                try {
+                    switch ($operation) {
+                        'Preflight' { & (Join-Path $package 'Install.ps1') @options -PreflightOnly }
+                        'Install' { & (Join-Path $package 'Install.ps1') @options -UserOnly:$user }
+                        'Repair' { & (Join-Path $destination 'Repair-Integration.ps1') -UserOnly:$user }
+                        'Remove' {
+                            if ($user) { & (Join-Path $package 'Uninstall.ps1') @options -UserOnly }
+                            else { Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options }
+                        }
+                    }
+                } catch { $failure = $_ }
+                Check ($failure -and $failure.Exception.Message -like '*Duplicate shortcut restoration identity*') "$operation rejects an existing duplicate identity (conflicting originals: $conflicting; user: $user)"
+                $after = Get-InstallFixtureSnapshot
+                Check ($after.Files -ceq $snapshot.Files -and $after.Registry -ceq $snapshot.Registry -and $after.Tasks -ceq $snapshot.Tasks) 'duplicate refusal preserves all shortcuts, backups, journals, payloads, registry and mocked tasks'
+            }
+            # Only the fixture resolves its synthetic corruption; production must retain both originals.
+            Set-Content -LiteralPath $manifest -Value $valid -Encoding UTF8
+            [IO.File]::Delete($extraBackup)
+            & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
+            Invoke-FixtureUninstall (Join-Path $package 'Uninstall.ps1') @options
+            Check ($shell.CreateShortcut($current).TargetPath -eq $official) 'resolved fixture journal still restores the renamed native file'
+            [IO.File]::Delete($current)
+        }
+    }
     $link = Join-Path $root 'linked'
     New-Item -ItemType Junction -Path $link -Target $env:LOCALAPPDATA | Out-Null
     $rejected = $false
