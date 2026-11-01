@@ -107,6 +107,11 @@ public static class SetupUpgradeChecks
         commonDesktop = Path.Combine(root, "lifecycle-common-desktop");
         foreach (var directory in new[] { Path.GetDirectoryName(OfficialPath)!, LocalApplicationData, userPrograms, userDesktop, commonPrograms, commonDesktop })
             Directory.CreateDirectory(directory);
+        // Match InstallerScriptChecks: initialize automatic inheritance before creating fixture payloads.
+        var launcherDirectory = new DirectoryInfo(Path.GetDirectoryName(OfficialPath)!);
+        var launcherPermissions = launcherDirectory.GetAccessControl();
+        launcherPermissions.SetAccessRuleProtection(true, true);
+        launcherDirectory.SetAccessControl(launcherPermissions);
         File.WriteAllText(OfficialPath, "official fixture bytes");
         var officialAcl = new FileInfo(OfficialPath).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All);
         var sentinels = new[] { "Accounts/one/account.dat", "Accounts/one/.keys/key", "install/game", "UserData/world", "credentials.dpapi" }
@@ -172,15 +177,7 @@ public static class SetupUpgradeChecks
         var protectedAcl = protectedFile.GetAccessControl();
         protectedAcl.SetAccessRuleProtection(true, true);
         protectedFile.SetAccessControl(protectedAcl);
-        var payloadAcls = payload.ToDictionary(name => name, name =>
-        {
-            var acl = new FileInfo(Path.Combine(destination, name)).GetAccessControl();
-            var descriptor = new RawSecurityDescriptor(acl.GetSecurityDescriptorBinaryForm(), 0);
-            // ReplaceFile converts an inherited legacy DACL to Windows' automatic-inheritance model.
-            if (!acl.AreAccessRulesProtected)
-                descriptor.SetFlags(descriptor.ControlFlags | ControlFlags.DiscretionaryAclAutoInherited);
-            return descriptor.GetSddlForm(AccessControlSections.All);
-        });
+        var payloadAcls = payload.ToDictionary(name => name, name => new FileInfo(Path.Combine(destination, name)).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All));
         byte[] ExpectedPayload(string name)
         {
             using var source = SetupPayload.Scripts.Contains(name) ? Resource(name) : File.OpenRead(name == "HytaleAccounts.exe" ? Executable : Path.Combine(root, name));
