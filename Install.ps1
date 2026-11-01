@@ -157,7 +157,7 @@ try {
 Save-ShortcutJournal
 New-Item -Path $RegistryPath -Force | Out-Null
 $properties = @{
-    DisplayName = 'Hytale Accounts addon'; DisplayVersion = '0.1.3'; InstallLocation = $destination
+    DisplayName = 'Hytale Accounts addon'; DisplayVersion = '0.1.4'; InstallLocation = $destination
     UninstallString = '"' + $installed + '" --uninstall'; DisplayIcon = "$official,0"
 }
 foreach ($name in $properties.Keys) { New-ItemProperty -LiteralPath $RegistryPath -Name $name -Value $properties[$name] -PropertyType String -Force | Out-Null }

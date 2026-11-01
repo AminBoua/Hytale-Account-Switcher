@@ -47,6 +47,14 @@ Hidden repair tasks check existing shortcuts every minute for changes made by th
 
 **UAC with another administrator's credentials:** setup may reject a source file owned by a different Windows user. This is a known limitation; see [security validation](SECURITY-RELEASE.md#actual-vm-evidence-and-the-release-claim).
 
+## Upgrade an existing addon
+
+From the same Windows account that installed the addon, close Hytale and its launcher, verify and extract the **complete ZIP** for the intended release into a separate download folder, then run its setup normally and approve UAC. Install over the existing addon; keep using the existing Hytale Launcher shortcut/search entry and Windows Settings → Apps removal entry.
+
+Keep `.hytale-accounts-addon`, its `shortcuts.json` and backups, `%LOCALAPPDATA%\HytaleAccounts\ShortcutIntegration`, and all Hytale account/game data intact. These hold shortcut restoration records, saved accounts and native keys; do not delete the addon directory or uninstall as a routine upgrade step. Do not copy the new helper EXE into the installation manually. Setup updates the existing Apps registration and owned payload while retaining recovery records.
+
+If setup reports `Exception calling "Replace" with "3" argument(s): "Unable to remove the file to be replaced."`, close the game/launcher and any process holding the named file, retain recovery files, and report the release version and exact error if retry still fails. Re-downloading the same release does not obtain newer `main` code. **v0.1.4 is being prepared; its upgrade fix is pending integration and combined validation**, not available through the v0.1.3 download. See the [package investigation and release procedure](UPGRADE-RELEASE.md).
+
 ## Use
 
 On first launch, an existing official session is adopted after Hytale verifies it. Otherwise, sign in through Hytale's normal sign-in screen. The account dropdown and **Add account** appear once you are signed in.
@@ -120,10 +128,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Installer.ps1
 
 Choose the checks-only command or the packaging command for your task; packaging already runs the checks. It produces:
 
-- `dist\HytaleAccounts-Setup.zip` — installer plus addon license and runtime notices; building does not install it.
+- `dist\HytaleAccounts-Setup.zip` — installer, five native DLL sidecars, addon license and runtime notices; building does not install it.
 - `dist\HytaleAccounts-Setup.exe` — the same installer as in the ZIP; its five native DLL sidecars are required beside it.
 - `dist\LICENSE` and `dist\THIRD-PARTY-NOTICES.txt` — addon and exact bundled runtime license texts.
 - `dist\SHA256SUMS.txt` — checksums for the ZIP, installer, native sidecars and license files.
+- `dist\RUNTIME-PACKAGE.json` — inspection of actual embedded source, versions, native sidecars and ZIP bytes.
 - `dist\SECURITY-STATUS.json` — artifact hash and validation status.
 - `dist\security\<run>\` — check report and logs.
 
