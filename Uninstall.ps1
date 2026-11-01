@@ -42,6 +42,7 @@ try {
     $roots = @($journal.Roots)
     if (!$roots.Count) { throw 'Shortcut restoration journal is empty; files preserved.' }
     foreach ($record in $records) { Assert-ShortcutRecord $record $roots }
+    Assert-ShortcutIdentities $records
     if (!$UserOnly) {
     $repairTask = Get-ScheduledTask -TaskName 'HytaleAccounts-Repair' -ErrorAction SilentlyContinue
     if ($repairTask) {
