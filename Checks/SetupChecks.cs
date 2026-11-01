@@ -56,6 +56,7 @@ internal static class SetupChecks
         var stage = Path.Combine(root, "stage");
         var executable = Path.Combine(root, "download.exe");
         File.WriteAllText(executable, "synthetic installer image");
+        foreach (var name in SetupPayload.RuntimeFiles) File.WriteAllText(Path.Combine(root, name), "synthetic runtime " + name);
         const string script = "param([string]$ProgramsDirectory,[string]$DesktopDirectory)\n$ErrorActionPreference='Stop'\n" +
             "Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'HytaleAccounts.exe') -Destination (Join-Path $ProgramsDirectory 'installed.bin')\n" +
             "Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'InstallerSafety.ps1') -Destination (Join-Path $DesktopDirectory 'installed-script.bin')\n" +
@@ -149,7 +150,10 @@ internal static class SetupChecks
 
             using (var directories = new SetupPayload.PinnedDirectories(root, false))
             using (var source = SetupPayload.OpenSource(executable))
+            using (var runtime = new SetupPayload.RuntimeSources(root))
             {
+                foreach (var name in SetupPayload.RuntimeFiles)
+                    Reject(() => File.WriteAllText(Path.Combine(root, name), "substituted"), "runtime source overwrite blocked across elevation: " + name);
                 using (var directoryWriter = OpenDirectory(root, 0x40000000, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero))
                     check(directoryWriter.IsInvalid && Marshal.GetLastWin32Error() == 32,
                         "pinned directory denies write handles needed for in-place reparse conversion");
@@ -157,9 +161,9 @@ internal static class SetupChecks
                 Reject(() => File.Move(executable, executable + ".moved"), "source replacement blocked");
                 Reject(() => Directory.Move(root, root + "-moved"), "source ancestor rename blocked");
                 File.WriteAllText(Path.Combine(root, "Install.ps1"), "throw 'untrusted loose script'");
-                using (var package = SetupPayload.Extract(stage, source, Resource, fixtureAcl))
+                using (var package = SetupPayload.Extract(stage, source, Resource, fixtureAcl, runtime))
                 {
-                    foreach (var name in SetupPayload.Scripts.Concat(["HytaleAccounts.exe"]))
+                    foreach (var name in SetupPayload.Scripts.Concat(SetupPayload.RuntimeFiles).Concat(["HytaleAccounts.exe"]))
                     {
                         var payload = Path.Combine(stage, name);
                         Reject(() => File.WriteAllText(payload, "substituted"), "payload overwrite blocked: " + name);
@@ -203,6 +207,16 @@ internal static class SetupChecks
                 }
                 check(!Directory.Exists(stage), "staging and diagnostics cleaned after success");
             }
+            var sidecar = Path.Combine(root, SetupPayload.RuntimeFiles[0]);
+            var originalAcl = new FileInfo(sidecar).GetAccessControl();
+            var foreignAcl = new FileInfo(sidecar).GetAccessControl();
+            foreignAcl.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), FileSystemRights.Modify, AccessControlType.Allow));
+            new FileInfo(sidecar).SetAccessControl(foreignAcl);
+            Reject(() => { using var runtime = new SetupPayload.RuntimeSources(root); }, "foreign-writable runtime source rejected before elevation/staging");
+            new FileInfo(sidecar).SetAccessControl(originalAcl);
+            File.Delete(sidecar);
+            Reject(() => { using var runtime = new SetupPayload.RuntimeSources(root); }, "incomplete runtime package rejected");
+            File.WriteAllText(sidecar, "synthetic runtime restored");
             Directory.CreateDirectory(stage);
             File.WriteAllText(Path.Combine(stage, "foreign.txt"), "preserve");
             using (var source = SetupPayload.OpenSource(executable))

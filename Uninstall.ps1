@@ -77,7 +77,7 @@ try {
     if ($UserOnly) { if (!$KeepJournal) { Remove-ShortcutStateFiles }; return }
     if ($before) { Assert-LauncherSnapshot $official $before }
     # Only exact addon-owned files; accounts, encryption keys, worlds and Hytale remain untouched.
-    $files = @('Install.ps1','Repair-Integration.ps1','launcher-baseline.json','HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs')
+    $files = @('D3DCompiler_47_cor3.dll','PenImc_cor3.dll','PresentationNative_cor3.dll','vcruntime140_cor3.dll','wpfgfx_cor3.dll','LICENSE','THIRD-PARTY-NOTICES.txt','Install.ps1','Repair-Integration.ps1','launcher-baseline.json','HytaleAccounts.exe','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs')
     $retained = @()
     foreach ($file in Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*' -Force) {
         if ($file.Name -cmatch '^\.upgrade-[a-f0-9]{32}-(.+)\.(bak|new)$' -and $Matches[1] -cin $files) {

@@ -75,13 +75,13 @@ $backupPrefix = Join-Path $destination ('.upgrade-' + [Guid]::NewGuid().ToString
 $keepBackups = $false
 try {
     # Stage every source before acquiring destinations; setup holds its sources read-only.
-    $payloadNames = @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json','HytaleAccounts.exe')
+    $payloadNames = @('D3DCompiler_47_cor3.dll','PenImc_cor3.dll','PresentationNative_cor3.dll','vcruntime140_cor3.dll','wpfgfx_cor3.dll','LICENSE','THIRD-PARTY-NOTICES.txt','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json','HytaleAccounts.exe')
     foreach ($name in $payloadNames) {
         $path = Join-Path $destination $name
         Assert-RegularPath $path
         $bytes = if ($name -eq 'launcher-baseline.json') { ,([Text.Encoding]::UTF8.GetBytes(($before | ConvertTo-Json))) }
         else {
-            $source = if ($name -eq 'HytaleAccounts.exe') { $helper } else { Join-Path $PSScriptRoot $name }
+            $source = if ($name -eq 'HytaleAccounts.exe') { $helper } elseif ($name -in @('D3DCompiler_47_cor3.dll','PenImc_cor3.dll','PresentationNative_cor3.dll','vcruntime140_cor3.dll','wpfgfx_cor3.dll','LICENSE','THIRD-PARTY-NOTICES.txt')) { Join-Path (Split-Path $helper) $name } else { Join-Path $PSScriptRoot $name }
             Assert-RegularPath $source
             ,([IO.File]::ReadAllBytes($source))
         }

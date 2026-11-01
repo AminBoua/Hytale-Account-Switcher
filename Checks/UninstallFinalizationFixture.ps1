@@ -32,6 +32,9 @@ try {
             foreach ($path in @($package,$programs,$common,(Split-Path $official))) { [IO.Directory]::CreateDirectory($path) | Out-Null }
             [IO.File]::WriteAllText($official, 'non-executable official fixture')
             [IO.File]::WriteAllText((Join-Path $package 'HytaleAccounts.exe'), 'non-executable addon fixture')
+            foreach ($name in @('D3DCompiler_47_cor3.dll','PenImc_cor3.dll','PresentationNative_cor3.dll','vcruntime140_cor3.dll','wpfgfx_cor3.dll','LICENSE','THIRD-PARTY-NOTICES.txt')) {
+                [IO.File]::WriteAllText((Join-Path $package $name), 'non-executable runtime fixture')
+            }
             foreach ($name in @('Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1')) {
                 Copy-Item -LiteralPath (Join-Path $Repository $name) -Destination $package
             }

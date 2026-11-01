@@ -27,7 +27,8 @@ internal static class RuntimePackageChecks
         var count = reader.ReadInt32();
         Require(count > 0 && count < 10000, "Invalid bundle entry count.");
         var bundleId = reader.ReadString();
-        input.Position += 40; // deps/runtimeconfig offset+size and flags.
+        input.Position += 32; // deps/runtimeconfig offset+size.
+        Require(reader.ReadUInt64() == 0, "Bundle requests legacy extraction.");
         var entries = new Dictionary<string, (int Offset, int Size, byte Type)>(StringComparer.Ordinal);
         for (var i = 0; i < count; i++)
         {
@@ -50,7 +51,16 @@ internal static class RuntimePackageChecks
         Require(frameworks.Contains("Microsoft.NETCore.App") && frameworks.Contains("Microsoft.WindowsDesktop.App"), "Bundled runtime/WPF missing.");
         Require(entries.ContainsKey("System.Private.CoreLib.dll") && entries.ContainsKey("PresentationFramework.dll"), "Managed runtime/WPF missing.");
         var native = entries.Where(entry => entry.Value.Type == 2).Select(entry => entry.Key).Order().ToArray();
-        Require(native.Contains("PresentationNative_cor3.dll") && native.Contains("wpfgfx_cor3.dll"), "WPF native libraries are not bundled for extraction.");
+        Require(native.Length == 0 && entries.Values.All(entry => entry.Type is 1 or 3 or 4), "Ordinary startup bundle contains extraction entries.");
+        var sidecars = HytaleAccounts.SetupPayload.RuntimeFiles;
+        var directory = Path.GetDirectoryName(executable)!;
+        Require(Directory.GetFiles(Path.Combine(directory, "build"), "*.dll").Select(Path.GetFileName).Order()
+            .SequenceEqual(sidecars.Where(name => name.EndsWith(".dll", StringComparison.Ordinal)).Order()), "Published native sidecar set changed; update packaging and payload checks.");
+        foreach (var name in sidecars)
+        {
+            var published = name.EndsWith(".dll", StringComparison.Ordinal) ? Path.Combine(directory, "build", name) : Path.Combine(directory, name);
+            Require(File.ReadAllBytes(Path.Combine(directory, name)).AsSpan().SequenceEqual(File.ReadAllBytes(published)), "Runtime sidecar differs from publish output: " + name);
+        }
         using var pe = new PEReader(new MemoryStream(Content("HytaleAccounts.dll"), writable: false));
         var metadata = pe.GetMetadataReader();
         var section = pe.GetSectionData(pe.PEHeaders.CorHeader!.ResourcesDirectory.RelativeVirtualAddress);
@@ -70,9 +80,8 @@ internal static class RuntimePackageChecks
             resources.Add(name);
         }
         Require(resources.Contains("HytaleAccounts.ElevatedRuntime.ps1") && resources.Count == 7, "Installer bootstrap/scripts missing.");
-        var directory = Path.GetDirectoryName(executable)!;
         using var zip = ZipFile.OpenRead(archive);
-        var names = new[] { "HytaleAccounts-Setup.exe", "LICENSE", "THIRD-PARTY-NOTICES.txt" };
+        var names = new[] { "HytaleAccounts-Setup.exe" }.Concat(sidecars).ToArray();
         Require(zip.Entries.Count == names.Length && zip.Entries.All(entry => names.Contains(entry.FullName)), "Unexpected release ZIP contents.");
         foreach (var name in names)
         {
@@ -82,6 +91,7 @@ internal static class RuntimePackageChecks
         }
         Console.WriteLine(JsonSerializer.Serialize(new { Kind = "static-package-inspection", ExecutedInstaller = false,
             SHA256 = Convert.ToHexString(SHA256.HashData(bytes)), BundleId = bundleId, Frameworks = frameworks, NativeLibraries = native, Resources = resources,
-            Elevation = "System Windows PowerShell creates a fresh protected runtime cache before starting apphost", ZipEntries = names }));
+            OrdinaryStartup = "No native or unknown bundle entries; WPF native libraries load beside apphost without extraction",
+            Elevation = "System Windows PowerShell still creates a fresh protected runtime cache before starting apphost", ZipEntries = names }));
     }
 }

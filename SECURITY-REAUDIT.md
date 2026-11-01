@@ -164,3 +164,7 @@ Full command/argument arrays, per-file source hashes, check timings, exit codes 
 Whitespace validation passed.
 
 No actual UAC, SYSTEM task, second-user enforcement, live launcher/account test, real installation, packaging, signing or publication was performed. Authz and VM guard/evidence-schema fixtures remain simulations. Actual VM use still needs an authorized isolated guest; the earlier host discovery found none. The evidence format is unsigned and trusts the reviewed builder/guest operator, not a hostile administrator. The documented OTS source rejection, storage trust assumptions, bounded bridge behavior and untested platform/live-integration limits above remain in force. A passing safe gate must never be presented as proof those gaps are closed.
+
+## Ordinary runtime startup (2026-11-01)
+
+The distribution now publishes a self-contained managed bundle without native extraction entries. Five WPF native DLLs ship beside setup and the installed helper; both license files are retained in the installed payload. This closes the default/inherited extraction-cache route before managed startup. Setup pins sidecars across UAC and copies them through existing protected staging and transactional publication. The elevated bootstrap is unchanged. Disposable probes observe the unsafe inherited Modify ACL and replacement sidecar module paths; synthetic checks do not establish real cross-user enforcement. See SECURITY-RELEASE.md for package checks and the still-required separate VM runtime evidence.
