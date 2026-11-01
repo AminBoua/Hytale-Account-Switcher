@@ -46,6 +46,11 @@ try {
             & (Join-Path $package 'Install.ps1') @options
             & (Join-Path $package 'Install.ps1') @options -UserOnly
             [IO.File]::WriteAllText((Join-Path $destination 'foreign.txt'), 'unrelated addon-directory file')
+            foreach ($name in @('Hytale\account.dat','Hytale\UserData\worlds\fixture.dat','HytaleAccounts\Accounts\opaque.snapshot','HytaleAccounts\.keys\fixture.key')) {
+                $path = Join-Path $env:LOCALAPPDATA $name
+                [IO.Directory]::CreateDirectory((Split-Path $path)) | Out-Null
+                [IO.File]::WriteAllText($path, 'synthetic retained data: ' + $name)
+            }
         }
         Prepare { & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly -KeepJournal }
         Finalize { & (Join-Path $destination 'Uninstall.ps1') @options -UserOnly }

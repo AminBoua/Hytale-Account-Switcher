@@ -1,4 +1,5 @@
-param([string]$ChecksAssembly = (Join-Path $PSScriptRoot 'bin\Release\net10.0-windows\Checks.dll'))
+param([string]$ChecksAssembly = (Join-Path $PSScriptRoot 'bin\Release\net10.0-windows\Checks.dll'),
+    [ValidateSet('Locked','Cancelled','StartupFailure','NoConfirmation','WrongUser','Unavailable')][string[]]$Scenarios = @('Locked','Cancelled','StartupFailure','NoConfirmation','WrongUser','Unavailable'))
 $ErrorActionPreference = 'Stop'
 $repository = Split-Path $PSScriptRoot
 $driver = Join-Path $PSScriptRoot 'UninstallFinalizationFixture.ps1'
@@ -31,7 +32,7 @@ function Check-Recovery($Before) {
     Check ((Get-ItemProperty -LiteralPath $registry | ConvertTo-Json -Compress) -ceq $Before.Entry) 'finalization refusal retains the uninstall entry'
     Check ((@((Import-Clixml -LiteralPath (Join-Path $root 'tasks.xml')).Values | Sort-Object TaskName) | ConvertTo-Json -Depth 6 -Compress) -ceq $Before.Tasks) 'finalization refusal retains both repair tasks'
 }
-foreach ($scenario in @('Locked','Cancelled','StartupFailure','NoConfirmation')) {
+foreach ($scenario in $Scenarios) {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('uninstall-finalization-' + [Guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($root) | Out-Null
     $registry = 'HKCU:\Software\HytaleAccounts-Finalization-' + (Split-Path $root -Leaf)
@@ -39,6 +40,17 @@ foreach ($scenario in @('Locked','Cancelled','StartupFailure','NoConfirmation'))
     $userState = Join-Path $root 'local\HytaleAccounts\ShortcutIntegration'
     try {
         Invoke-Fixture Initialize
+        $data = @{}
+        foreach ($file in Get-ChildItem -LiteralPath (Join-Path $root 'local') -File -Recurse | Where-Object FullName -NotLike '*\ShortcutIntegration\*') {
+            $data[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName).Hash
+        }
+        $machineManifest = Join-Path $destination 'shortcuts.json'
+        $originalManifest = [IO.File]::ReadAllBytes($machineManifest)
+        if ($scenario -eq 'WrongUser') {
+            $journal = Get-Content -LiteralPath $machineManifest -Raw | ConvertFrom-Json
+            $journal.UserSid = 'S-1-5-21-111-222-333-444'
+            $journal | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $machineManifest -Encoding UTF8
+        }
         $before = Snapshot-Recovery
         & dotnet $ChecksAssembly --uninstall-finalization-child $root $repository $scenario
         Check ($LASTEXITCODE -eq 0) "$scenario exercises production Setup.Remove and production shortcut scripts"
@@ -86,6 +98,10 @@ foreach ($scenario in @('Locked','Cancelled','StartupFailure','NoConfirmation'))
             }
             Check-Recovery $before
         } finally { $confirmed.Dispose(); $received.Dispose() }
+        foreach ($path in $data.Keys) {
+            Check ((Test-Path -LiteralPath $path) -and (Get-FileHash -LiteralPath $path).Hash -eq $data[$path]) 'failed removal retains synthetic Hytale and account data bytes'
+        }
+        if ($scenario -eq 'WrongUser') { [IO.File]::WriteAllBytes($machineManifest, $originalManifest) }
         $workerResult = Join-Path $root 'Worker.result'
         if (Test-Path -LiteralPath $workerResult) { [IO.File]::Delete($workerResult) }
         & dotnet $ChecksAssembly --uninstall-finalization-child $root $repository Success
@@ -100,6 +116,9 @@ foreach ($scenario in @('Locked','Cancelled','StartupFailure','NoConfirmation'))
         foreach ($folder in @('programs','common')) {
             $path = Join-Path $root ($folder + '\Hytale Launcher.lnk')
             Check ((Get-FileHash -LiteralPath $path).Hash -eq (Get-FileHash -LiteralPath ($path + '.original')).Hash) 'successful uninstall restores exact user and common shortcut bytes'
+        }
+        foreach ($path in $data.Keys) {
+            Check ((Test-Path -LiteralPath $path) -and (Get-FileHash -LiteralPath $path).Hash -eq $data[$path]) 'successful removal retains synthetic Hytale worlds, account snapshot and key bytes'
         }
         Check ((Get-Content -LiteralPath (Join-Path $root 'program-files\Hypixel Studios\Hytale Launcher\hytale-launcher.exe') -Raw) -eq 'non-executable official fixture') 'official launcher fixture remains unchanged'
     } finally {

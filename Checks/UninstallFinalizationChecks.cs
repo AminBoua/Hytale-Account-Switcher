@@ -36,6 +36,7 @@ internal static class UninstallFinalizationChecks
                 var mode = start.ArgumentList.Contains("-KeepJournal") ? "Prepare" :
                     start.ArgumentList.Contains(Path.Combine(destination, "Install.ps1")) ? "Recover" : "Finalize";
                 phases.Add(mode);
+                if (scenario == "Unavailable") throw new IOException("Synthetic unavailable user-context executor");
                 await RunScript(mode);
             }, start =>
             {
@@ -52,14 +53,19 @@ internal static class UninstallFinalizationChecks
             });
             if (scenario != "Success") throw new Exception("Expected removal failure was ignored.");
         }
-        catch (Exception ex) when (scenario != "Success" && ex is IOException or Win32Exception)
+        catch (Exception ex) when (scenario != "Success" && ex is IOException or Win32Exception or AggregateException)
         {
             if (scenario == "Locked" && !File.ReadAllText(Path.Combine(root, "Finalize.result")).StartsWith("failure|32|"))
                 throw new Exception("Finalization did not encounter a real sharing violation.", ex);
+            if (scenario == "WrongUser" && (ex is not AggregateException ||
+                !ex.ToString().Contains("Windows account that installed it")))
+                throw new Exception("Wrong-user refusal did not come from the production journal owner check.", ex);
+            if (scenario == "Unavailable" && ex is not AggregateException)
+                throw new Exception("Unavailable user executor must report failed preparation and recovery.", ex);
             if (scenario == "Locked") Console.WriteLine("PASS final per-user restoration fails with native sharing violation 32");
         }
         finally { locked?.Dispose(); }
-        var expected = scenario is "Cancelled" or "StartupFailure" or "NoConfirmation"
+        var expected = scenario is "WrongUser" or "Unavailable" ? new[] { "Prepare", "Recover" } : scenario is "Cancelled" or "StartupFailure" or "NoConfirmation"
             ? new[] { "Prepare", "Start", "Recover" } : new[] { "Prepare", "Start", "Finalize" };
         if (!phases.SequenceEqual(expected)) throw new Exception("Unexpected production phases: " + string.Join(", ", phases));
         Console.WriteLine("PASS production removal orchestration: " + scenario + " (" + string.Join(" -> ", phases) + ")");
