@@ -1,5 +1,8 @@
 using System.Buffers.Binary;
 using System.IO;
+using System.Diagnostics;
+using System.Xml.Linq;
+using System.Text.RegularExpressions;
 using System.IO.Compression;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
@@ -63,6 +66,13 @@ internal static class RuntimePackageChecks
         }
         using var pe = new PEReader(new MemoryStream(Content("HytaleAccounts.dll"), writable: false));
         var metadata = pe.GetMetadataReader();
+        var version = XDocument.Load(Path.Combine(repository, "Launcher", "Launcher.csproj")).Descendants("Version").Single().Value;
+        Require(metadata.GetAssemblyDefinition().Version == Version.Parse(version + ".0"), "Packaged assembly version differs from project.");
+        var fileVersion = FileVersionInfo.GetVersionInfo(executable);
+        Require(fileVersion.FileVersion == version + ".0" && fileVersion.ProductVersion?.Split('+')[0] == version,
+            "Packaged file/product version differs from project.");
+        var installVersion = Regex.Match(File.ReadAllText(Path.Combine(repository, "Install.ps1")), @"DisplayVersion = '([^']+)'");
+        Require(installVersion.Success && installVersion.Groups[1].Value == version, "Windows Apps version differs from project.");
         var section = pe.GetSectionData(pe.PEHeaders.CorHeader!.ResourcesDirectory.RelativeVirtualAddress);
         var resources = new List<string>();
         foreach (var handle in metadata.ManifestResources)
@@ -71,15 +81,15 @@ internal static class RuntimePackageChecks
             var name = metadata.GetString(resource.Name);
             if (!name.StartsWith("HytaleAccounts.", StringComparison.Ordinal)) continue;
             var file = name["HytaleAccounts.".Length..];
-            if (!file.EndsWith(".ps1", StringComparison.Ordinal) && file != "ShortcutFile.cs") continue;
+            if (!file.EndsWith(".ps1", StringComparison.Ordinal) && file != "ShortcutFile.cs" && file != "NativeDropdown.js") continue;
             Require(resource.Implementation.IsNil, "Installer resource is external: " + name);
             var blob = section.GetReader(checked((int)resource.Offset), section.Length - checked((int)resource.Offset));
             var content = blob.ReadBytes(blob.ReadInt32());
-            var source = file == "ElevatedRuntime.ps1" ? Path.Combine(repository, "Launcher", file) : Path.Combine(repository, file);
+            var source = file is "ElevatedRuntime.ps1" or "NativeDropdown.js" ? Path.Combine(repository, "Launcher", file) : Path.Combine(repository, file);
             Require(content.AsSpan().SequenceEqual(File.ReadAllBytes(source)), "Packaged resource differs from checked source: " + name);
             resources.Add(name);
         }
-        Require(resources.Contains("HytaleAccounts.ElevatedRuntime.ps1") && resources.Count == 7, "Installer bootstrap/scripts missing.");
+        Require(resources.Contains("HytaleAccounts.ElevatedRuntime.ps1") && resources.Contains("HytaleAccounts.NativeDropdown.js") && resources.Count == 8, "Installer bootstrap/scripts missing.");
         using var zip = ZipFile.OpenRead(archive);
         var names = new[] { "HytaleAccounts-Setup.exe" }.Concat(sidecars).ToArray();
         Require(zip.Entries.Count == names.Length && zip.Entries.All(entry => names.Contains(entry.FullName)), "Unexpected release ZIP contents.");
@@ -90,7 +100,7 @@ internal static class RuntimePackageChecks
             Require(SHA256.HashData(zipped).AsSpan().SequenceEqual(SHA256.HashData(original)), "Release ZIP bytes differ: " + name);
         }
         Console.WriteLine(JsonSerializer.Serialize(new { Kind = "static-package-inspection", ExecutedInstaller = false,
-            SHA256 = Convert.ToHexString(SHA256.HashData(bytes)), BundleId = bundleId, Frameworks = frameworks, NativeLibraries = native, Resources = resources,
+            SHA256 = Convert.ToHexString(SHA256.HashData(bytes)), Version = version, BundleId = bundleId, Frameworks = frameworks, NativeLibraries = native, Resources = resources,
             OrdinaryStartup = "No native or unknown bundle entries; WPF native libraries load beside apphost without extraction",
             Elevation = "System Windows PowerShell still creates a fresh protected runtime cache before starting apphost", ZipEntries = names }));
     }

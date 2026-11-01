@@ -37,5 +37,6 @@ jobs:
             dist/HytaleAccounts-Setup.zip
             dist/SHA256SUMS.txt
             dist/SECURITY-STATUS.json
+            dist/RUNTIME-PACKAGE.json
           if-no-files-found: warn
           retention-days: 14

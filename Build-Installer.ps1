@@ -34,5 +34,5 @@ try {
     }
     [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'dist/SHA256SUMS.txt'), ($sums -join "`n") + "`n")
     if (!$security.SecurityValidated) { Write-Warning 'Build is NOT security-validated: actual VM validation is unverified.' }
-    Write-Output 'Ready: dist/HytaleAccounts-Setup.zip (installer and licenses)'
+    Write-Output 'Ready: dist/HytaleAccounts-Setup.zip (installer, native runtime sidecars and licenses)'
 } finally { Pop-Location }
