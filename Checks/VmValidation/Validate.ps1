@@ -53,10 +53,17 @@ try {
         if ((Get-FileHash -LiteralPath (Join-Path $fixture $entry.Name)).Hash -ne $entry.Hash) { throw "Package mismatch: $($entry.Name)" }
     }
     if (Test-Path -LiteralPath (Join-Path $fixture 'HytaleAccounts.exe')) { throw 'Real addon executable was packaged.' }
+    foreach ($name in @('Runtime.ps1','RuntimeEvidence.ps1','ElevatedRuntime.ps1','RuntimeProbe.exe')) {
+        if (@($package.Files | Where-Object Name -eq $name).Count -ne 1) { throw "Missing runtime evidence package input: $name" }
+    }
+    Write-Output 'PASS runtime evidence collector, contract, production bootstrap and harmless single-file probe are hashed package inputs'
     Write-Output 'PASS package hashes and validation-only executable'
     $process = Start-Process -FilePath (Join-Path $fixture 'Checks.exe') -ArgumentList @('identity','C:\Windows') -WindowStyle Hidden -Wait -PassThru `
         -RedirectStandardError (Join-Path $fixture 'guard-error.txt') -RedirectStandardOutput (Join-Path $fixture 'guard-output.txt')
     if ($process.ExitCode -eq 0 -or (Get-Content -LiteralPath (Join-Path $fixture 'guard-error.txt') -Raw) -notlike '*VM guard refused execution*Only the designated fixed VM fixture root is allowed*') { throw 'Compiled guard refusal was not established.' }
+    $process = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"' + (Join-Path $fixture 'Runtime.ps1') + '"'),'-Root','C:\Windows','-Mode','same-user','-Action','Worker') -WindowStyle Hidden -Wait -PassThru -RedirectStandardError (Join-Path $fixture 'runtime-refusal.txt')
+    if ($process.ExitCode -eq 0 -or (Get-Content -LiteralPath (Join-Path $fixture 'runtime-refusal.txt') -Raw) -notlike '*Only the designated fixed VM fixture root is allowed*') { throw 'Runtime collector did not refuse host execution before work.' }
+    Write-Output 'PASS runtime collector refuses non-designated host before launching apphost or requesting elevation'
     Write-Output 'PASS compiled runner rejects host/non-designated execution before test work'
 } finally {
     if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe }

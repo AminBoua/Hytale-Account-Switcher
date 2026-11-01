@@ -112,3 +112,42 @@ After all actor processes have exited, run from the elevated Admin guest console
 Cleanup verifies exact task names/actions before stopping/removing them, removes only the run's registry entry, exports a fixed list of evidence files to `C:\ProgramData\ModLauncherSecurityVM-Evidence-<id>`, then deletes only the canonical fixture tree. Linked directories are removed as links, never recursively traversed. No account, real shortcut location or arbitrary task is removed. Exported failed runs may lack `summary.json`; never report those as passes. Copy evidence out only after tests stop, then revert/delete the disposable VM/checkpoint, including the evidence export and disposable accounts.
 
 On timeout or interruption, let the bounded workers stop before cleanup. If designation expired, package hashes/ACLs changed, cleanup is blocked, or a sentinel changed, **do not bypass guards or elevate on the host**. Preserve evidence through the hypervisor and revert the VM checkpoint. Cleanup does not relax source/staging ACLs to force progress. No cleanup routine protects against a malicious administrator controlling the entire guest; the disposable checkpoint is the final recovery boundary.
+
+## Runtime bootstrap matrix (mandatory schema 2)
+
+Rebuild the package: schema 1 staging/task-only exports are rejected even with a refreshed source fingerprint. The package contains the unmodified production elevated bootstrap and a harmless self-contained WPF probe. It opens no window, installs nothing, uses no Hytale data, and waits up to four minutes while native modules remain loaded. Runtime.ps1 applies the existing designation, isolation, consent, expiry, package-hash and host-refusal guards before launching apphost or requesting UAC.
+
+Run every row once, using separate consoles in the signed-in disposable accounts. Start attacks first (they wait for the probe), then Begin. Keep the three accounts signed in:
+
+| Mode | Begin console | Attack console | OwnerAttack console | Worker |
+| --- | --- | --- | --- | --- |
+| ordinary | User, standard type 1 | Other, standard type 1 | none | User type 1 |
+| same-user | Admin, filtered type 3 | Other, standard type 1 | Admin, separate filtered type 3 console | Admin full type 2 |
+| alternate-admin | User, standard type 1 | Other, standard type 1 | Admin, separate filtered type 3 console | Admin full type 2 |
+
+Replace MODE with the exact row name, and use only the immutable designated package:
+
+```powershell
+# Other account, first:
+& "$root\bin\Runtime.ps1" -Root $root -Mode MODE -Action Attack
+# Separate unelevated Admin console, elevated rows only:
+& "$root\bin\Runtime.ps1" -Root $root -Mode MODE -Action OwnerAttack
+# Initiating console from the table, last:
+& "$root\bin\Runtime.ps1" -Root $root -Mode MODE -Action Begin
+```
+
+Approve same-user consent or enter the designated Admin credentials for alternate-admin. Never automate the prompt or elevate Begin. Runtime OTS uses an immutable admin-owned harmless probe, independently of the existing staging test's expected rejection of foreign-owned source; neither claims a successful OTS installation.
+
+**Integration boundary:** base 2b13f0b ordinary startup is a direct self-extracting apphost with no ordinary protected bootstrap. That row measures its default cache without redirecting the profile or extraction environment. It deliberately records no successful bootstrap startup-failure cleanup; an unprotected cache or missing enforcement is rejected. This branch does not implement or merge the ordinary-startup packaging fix. Integration must adapt the ordinary launch/probe and explicit contract together to the final production entry point, then exercise the full matrix afresh. Do not replace the false observation with true, omit the row or reuse elevated-only evidence. If final packaging uses persistent loose libraries, revise the contract to measure their actual protected directory and lifecycle rather than claiming ephemeral-cache cleanup.
+
+The fixed contract is **runtime-bootstrap-v1**. Each row requires:
+
+- Worker-channel runtime-ready-MODE.json: run/source, actual probe PID/SID/token, UTC observation, cache SDDL, native DLL hashes/SDDL, descendant-directory SDDL, pre-application extraction inventory, loaded native paths including CoreCLR, and normal Windows profile variables.
+- Initiator-channel runtime-MODE.json: initiator process/token, start/end UTC, worker PID, ready-file hash, exit 23, profile/poison preservation, cache removal after exit and after failed worker startup. Elevated rows call the unchanged production bootstrap with a fresh cache under the protected fixture root and a fake inherited poison-cache sentinel.
+- Other-channel runtime-attack-MODE.json and, for elevated rows, Admin-channel runtime-owner-attack-MODE.json: independent actual token/PID, matching run/mode/worker/hash, timestamp during the worker lifetime, successful equivalent mutation controls in its own scratch directory, and denied write, replace, delete-leaf, rename-directory, insert-file, delete-directory, file WRITE_DAC and directory WRITE_DAC (Windows errors 5/32/33 only).
+
+The filtered owner-token attempt is essential: the elevated creator may own extracted descendants, so its filtered token must not regain implicit WRITE_DAC. The parser separately checks OWNER RIGHTS suppression and captured ACLs. Controls use fake files; attacks target only the harmless probe. Native-library read denial is not required.
+
+This is bounded observation after apphost extraction and WPF initialization, while modules remain loaded, not proof of every extraction-time race or interruption/antivirus condition. Failures/timeouts never become skips. Wait for bounded workers to stop, preserve the failed export and revert the checkpoint. Elevated caches remain within the fixture tree. Ordinary cleanup removes only the previously absent TEMP\.net\RuntimeProbe tree in the disposable User profile, never the shared .net parent.
+
+Run this matrix before Verify. Verify applies the same shared semantic validator as the host release gate; rejected summaries are removed. Cleanup exports the fixed required runtime records with all existing evidence. Failed exports may be incomplete and cannot validate a release. The host-only validator compiles/hashes the probe and checks Runtime.ps1 refusal without running the VM matrix.

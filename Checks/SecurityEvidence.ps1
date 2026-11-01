@@ -1,3 +1,4 @@
+. (Join-Path $PSScriptRoot 'RuntimeEvidence.ps1')
 # Shared by the local build gate and the disposable-VM evidence exporter. No privileged actions.
 function Get-SecurityEnvironment {
     $os = Get-CimInstance Win32_OperatingSystem
@@ -40,6 +41,14 @@ function Get-SecuritySource([string]$Repository) {
 function Get-RequiredVmEvidence($Run) {
     @('run.json','evidence\system-stage.json','system-repair\result.json','limited-repair\result.json',
         'evidence\task-System.xml','evidence\task-Limited.xml','evidence\task-System-completion.json','evidence\task-Limited-completion.json')
+    foreach ($mode in @('ordinary','same-user','alternate-admin')) {
+        $initiator = if ($mode -eq 'same-user') { $Run.AdminSid } else { $Run.UserSid }
+        $worker = if ($mode -eq 'ordinary') { $Run.UserSid } else { $Run.AdminSid }
+        "channels\$initiator\runtime-$mode.json"
+        "channels\$worker\runtime-ready-$mode.json"
+        "channels\$($Run.AttackerSid)\runtime-attack-$mode.json"
+        if ($mode -ne 'ordinary') { "channels\$($Run.AdminSid)\runtime-owner-attack-$mode.json" }
+    }
     foreach ($mode in @('normal','ots')) {
         $sid = if ($mode -eq 'normal') { $Run.AdminSid } else { $Run.UserSid }
         @("evidence\stage-ready-$mode.json","evidence\elevated-$mode.json","channels\$sid\begin-$mode.json","channels\$sid\completed-$mode.json",
@@ -63,7 +72,7 @@ function Test-VmEvidence([string]$Directory, $Source, $Environment) {
             }
         }
         $summary = Read-Evidence 'evidence\summary.json'
-        Require ($summary.Schema -eq 1 -and $summary.Kind -eq 'actual-vm' -and $summary.Success -eq $true) 'Missing successful actual-VM summary (simulations are not evidence).'
+        Require ($summary.Schema -eq 2 -and $summary.Kind -eq 'actual-vm' -and $summary.Success -eq $true) 'Missing successful actual-VM summary (simulations are not evidence).'
         $run = Read-Evidence 'run.json'
         Require ($run.Id -match '^[a-f0-9]{32}$' -and $summary.RunId -eq $run.Id) 'Mismatched VM run identity.'
         foreach ($sid in @($run.AdminSid,$run.UserSid,$run.AttackerSid)) { Require ($sid -match '^S-1-5-21-\d+-\d+-\d+-\d+$') 'Invalid VM actor SID.' }
@@ -81,6 +90,7 @@ function Test-VmEvidence([string]$Directory, $Source, $Environment) {
             Require ($entry.Count -eq 1) "Missing/duplicate evidence: $name"
             Require ((Get-FileHash -LiteralPath (Join-Path $Directory $name) -Algorithm SHA256).Hash -eq $entry[0].Hash) "Evidence hash mismatch: $name"
         }
+        Test-RuntimeEvidence $run $summary
         foreach ($mode in @('normal','ots')) {
             $sid = if ($mode -eq 'normal') { $run.AdminSid } else { $run.UserSid }
             $begin = Read-Evidence "channels\$sid\begin-$mode.json"

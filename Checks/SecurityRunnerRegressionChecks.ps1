@@ -7,7 +7,7 @@ try {
     $checks = Join-Path $root 'Checks'
     $null = New-Item -ItemType Directory -Path $checks -Force
     Copy-Item -LiteralPath (Join-Path $repository 'Build-Installer.ps1') -Destination $root
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'SecurityEvidence.ps1') -Destination $checks
+    foreach ($name in @('SecurityEvidence.ps1','RuntimeEvidence.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $checks }
     $runner = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Run-SecurityChecks.ps1') -Raw
     # Replace only stage selection in the disposable copy; exercise the real runner and build gate.
     $selection = '(?s)\$steps = @\(.*?(?=Push-Location \$repository)'
@@ -48,6 +48,7 @@ exit $Code
         $reports += $newReport[0].FullName
         $report = Get-Content -LiteralPath $newReport[0].FullName -Raw | ConvertFrom-Json
         Check ($report.Checks.Count -eq 3) "$case runs all stages"
+        Check (!$report.SecurityValidated -and $report.VmStatus.Status -eq 'unverified') "$case never claims validation without actual VM evidence"
         $first,$negative,$after = $report.Checks
         $expectedCode = if ($case -eq 'child-failure') {7} else {0}
         Check ($first.ExitCode -eq $expectedCode) "$case preserves child exit code $expectedCode"
