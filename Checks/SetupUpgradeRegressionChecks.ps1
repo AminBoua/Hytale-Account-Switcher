@@ -24,7 +24,7 @@ try {
     Replace-Once 'var programs = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);' 'var programs = SetupUpgradeChecks.Programs;'
     Replace-Once 'var launcherDirectory = Path.GetDirectoryName(IntegrationSafety.OfficialPath)!;' 'var launcherDirectory = Path.GetDirectoryName(SetupUpgradeChecks.OfficialPath)!;'
     Replace-Once 'Assembly.GetExecutingAssembly().GetManifestResourceStream("HytaleAccounts." + name) ?? throw new IOException("Setup resource is missing: " + name);' 'SetupUpgradeChecks.Resource(name);'
-    Replace-Once 'SetupPayload.Permissions());' 'SetupUpgradeChecks.Permissions());'
+    Replace-Once 'SetupPayload.Permissions(), runtime);' 'SetupUpgradeChecks.Permissions(), runtime);'
     # Exercise the real parent ordering too; the elevation boundary can only throw in this fixture.
     Replace-Once 'if (!await IntegrationSafety.VerifyExecutable(IntegrationSafety.OfficialPath))' 'if (!await Task.FromResult(true))'
     Replace-Once 'Process.Start(ElevationStart(' 'SetupUpgradeChecks.StartElevation(ElevationStart('

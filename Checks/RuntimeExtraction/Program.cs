@@ -11,7 +11,7 @@ internal static class Program
     private static int Main(string[] args)
     {
         var root = Environment.GetEnvironmentVariable("DOTNET_BUNDLE_EXTRACT_BASE_DIR")!;
-        var extractedBeforeApplication = Directory.GetFiles(root, "*.dll", SearchOption.AllDirectories);
+        var extractedBeforeApplication = Directory.Exists(root) ? Directory.GetFiles(root, "*.dll", SearchOption.AllDirectories) : [];
         var ownerChecks = new List<string>();
         foreach (var file in extractedBeforeApplication)
         {
@@ -31,7 +31,10 @@ internal static class Program
         var modules = Process.GetCurrentProcess().Modules.Cast<ProcessModule>()
             .Where(module => module.FileName.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             .Select(module => module.FileName).ToArray();
-        File.WriteAllText(args[0], JsonSerializer.Serialize(new { environment, modules, extractedBeforeApplication, ownerChecks, arguments = args.Skip(1).ToArray() }));
+        var wpfModules = Process.GetCurrentProcess().Modules.Cast<ProcessModule>()
+            .Where(module => Path.GetFileName(module.FileName).EndsWith("_cor3.dll", StringComparison.OrdinalIgnoreCase))
+            .Select(module => module.FileName).ToArray();
+        File.WriteAllText(args[0], JsonSerializer.Serialize(new { environment, modules, wpfModules, extractedBeforeApplication, ownerChecks, arguments = args.Skip(1).ToArray() }));
         application.Shutdown();
         return 23;
     }

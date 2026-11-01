@@ -81,6 +81,7 @@ public static class Setup
         var executable = Environment.ProcessPath!;
         using var sourceDirectories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(executable)!, requireTrusted: false);
         using var source = SetupPayload.OpenSource(executable);
+        using var runtime = new SetupPayload.RuntimeSources(Path.GetDirectoryName(executable)!);
         var programs = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         using var parent = new SetupPayload.PinnedDirectories(programs, requireTrusted: true);
         var launcherDirectory = Path.GetDirectoryName(IntegrationSafety.OfficialPath)!;
@@ -98,7 +99,7 @@ public static class Setup
         }
         using var package = SetupPayload.Extract(Path.Combine(programs, "HytaleAccounts-setup-" + Guid.NewGuid().ToString("N")), source,
             Resource,
-            SetupPayload.Permissions());
+            SetupPayload.Permissions(), runtime);
         using var install = Process.Start(InstallStart(package.DirectoryPath, args[1], args[2], args[3])) ?? throw new IOException("Could not start setup.");
         await install.WaitForExitAsync();
         if (install.ExitCode != 0)
@@ -190,9 +191,10 @@ public static class Setup
             return 0;
         }
         if (IsAdministrator) throw new IOException("Open HytaleAccounts-Setup.exe normally so Hytale starts as your Windows user.");
-        // Pin the approved image and its ancestors across UAC and the worker's copy; no loose payload crosses elevation.
+        // Pin the approved image, native sidecars and ancestors across UAC and the worker's copy.
         using var sourceDirectories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(Environment.ProcessPath!)!, requireTrusted: false);
         using var source = SetupPayload.OpenSource(Environment.ProcessPath!);
+        using var runtime = new SetupPayload.RuntimeSources(Path.GetDirectoryName(Environment.ProcessPath!)!);
         if (!await IntegrationSafety.VerifyExecutable(IntegrationSafety.OfficialPath))
             throw new IOException(IntegrationSafety.CompatibilityMessage(IntegrationSafety.OfficialPath));
         // Reuse the embedded installer read-only, before legacy cleanup or any request for elevation.
@@ -201,7 +203,7 @@ public static class Setup
         acl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl,
             InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
         using (var preflight = SetupPayload.Extract(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "HytaleAccounts-preflight-" + Guid.NewGuid().ToString("N")), source, Resource, acl))
+            "HytaleAccounts-preflight-" + Guid.NewGuid().ToString("N")), source, Resource, acl, runtime))
             await IntegrateUser(ShortcutPreflightStart(preflight.DirectoryPath, Environment.GetFolderPath(Environment.SpecialFolder.Programs),
                 Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)));
         // Remove the previous per-user package without elevating user-writable legacy code.

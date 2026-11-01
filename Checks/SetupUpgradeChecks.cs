@@ -41,6 +41,7 @@ public static class SetupUpgradeChecks
         {
             Executable = Path.Combine(root, "download.exe");
             File.WriteAllText(Executable, "non-executed installer fixture");
+            foreach (var name in SetupPayload.RuntimeFiles) File.WriteAllText(Path.Combine(root, name), "non-executed runtime fixture");
             Programs = Path.Combine(root, "program-files");
             OfficialPath = Path.Combine(Programs, "Hypixel Studios", "Hytale Launcher", "hytale-launcher.exe");
             var destination = Path.Combine(Path.GetDirectoryName(OfficialPath)!, ".hytale-accounts-addon");

@@ -9,6 +9,18 @@ namespace HytaleAccounts;
 internal sealed class SetupPayload : IDisposable
 {
     internal static readonly string[] Scripts = ["Install.ps1", "Uninstall.ps1", "InstallerSafety.ps1", "Repair-Integration.ps1", "ShortcutIntegration.ps1", "ShortcutFile.cs"];
+    internal static readonly string[] RuntimeFiles = ["D3DCompiler_47_cor3.dll", "PenImc_cor3.dll", "PresentationNative_cor3.dll", "vcruntime140_cor3.dll", "wpfgfx_cor3.dll", "LICENSE", "THIRD-PARTY-NOTICES.txt"];
+
+    internal sealed class RuntimeSources : IDisposable
+    {
+        internal readonly Dictionary<string, FileStream> Files = [];
+        internal RuntimeSources(string directory)
+        {
+            try { foreach (var name in RuntimeFiles) Files.Add(name, OpenSource(Path.Combine(directory, name))); }
+            catch { Dispose(); throw; }
+        }
+        public void Dispose() { foreach (var file in Files.Values) file.Dispose(); }
+    }
     private static readonly SecurityIdentifier Administrators = new(WellKnownSidType.BuiltinAdministratorsSid, null);
     private static readonly SecurityIdentifier System = new(WellKnownSidType.LocalSystemSid, null);
     private readonly List<FileStream> files = [];
@@ -103,7 +115,8 @@ internal sealed class SetupPayload : IDisposable
         catch { handle.Dispose(); throw; }
     }
 
-    internal static SetupPayload Extract(string path, Stream executable, Func<string, Stream> resource, DirectorySecurity acl)
+    internal static SetupPayload Extract(string path, Stream executable, Func<string, Stream> resource, DirectorySecurity acl,
+        RuntimeSources? runtime = null)
     {
         using var parent = new PinnedDirectories(Path.GetDirectoryName(path)!, requireTrusted: false);
         CreateDirectory(path, acl);
@@ -127,6 +140,8 @@ internal sealed class SetupPayload : IDisposable
                 payload.files.Add(OpenSource(target));
             }
             Write("HytaleAccounts.exe", executable);
+            if (runtime != null)
+                foreach (var (name, input) in runtime.Files) { input.Position = 0; Write(name, input); }
             foreach (var name in Scripts) { using var input = resource(name); Write(name, input); }
             return payload;
         }
@@ -151,7 +166,7 @@ internal sealed class SetupPayload : IDisposable
         try
         {
             foreach (var file in files) file.Dispose();
-            foreach (var name in Scripts.Concat(["HytaleAccounts.exe", "install-error.txt"]))
+            foreach (var name in Scripts.Concat(RuntimeFiles).Concat(["HytaleAccounts.exe", "install-error.txt"]))
             {
                 var path = Path.Combine(DirectoryPath, name);
                 NativeStores.RegularPath(path);

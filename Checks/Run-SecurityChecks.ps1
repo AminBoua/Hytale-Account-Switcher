@@ -26,6 +26,7 @@ foreach ($entry in @(@('native-startup','Checks/NativeStartupRegressionChecks.ps
 if ($RegressionControls) {
     foreach ($entry in @(
         @('CacheEnvironment','Checks/RuntimeExtractionChecks.ps1','FAIL apphost extracts native libraries before application startup'),
+        @('OrdinaryExtraction','Checks/RuntimeExtractionChecks.ps1','FAIL ordinary WPF loads published sidecars instead of cached native libraries'),
         @('InstallModules','Checks/PowerShellModuleRegressionChecks.ps1','FAIL production InstallStart rejects inherited substitute modules'),
         @('UninstallModules','Checks/PowerShellModuleRegressionChecks.ps1','FAIL production uninstall restricts discovery before its first cmdlet'),
         @('PublisherModules','Checks/PowerShellModuleRegressionChecks.ps1','FAIL production VerifyPublisher rejects unsigned bytes'),

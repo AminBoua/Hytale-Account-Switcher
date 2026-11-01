@@ -184,6 +184,9 @@ try {
         $comment = if ($name -like '*.cs') { '//' } else { '#' }
         Add-Content -LiteralPath (Join-Path $package $name) -Value "`r`n$comment OLD addon payload: $name"
     }
+    $runtimeFiles = @('D3DCompiler_47_cor3.dll','PenImc_cor3.dll','PresentationNative_cor3.dll','vcruntime140_cor3.dll','wpfgfx_cor3.dll','LICENSE','THIRD-PARTY-NOTICES.txt')
+    foreach ($name in $runtimeFiles) { Set-Content -LiteralPath (Join-Path $package $name) -Value "OLD non-executed runtime fixture: $name" }
+    $scripts += $runtimeFiles
     Set-Content -LiteralPath (Join-Path $package 'HytaleAccounts.exe') -Value 'OLD non-executed helper fixture'
     # Only the fixture's loaded class has fault hooks; shipped payloads have none.
     $source = Get-Content -LiteralPath (Join-Path $package 'ShortcutFile.cs') -Raw
@@ -392,7 +395,7 @@ try {
     $acl.SetAccessRuleProtection($true, $true)
     Set-Acl -LiteralPath $uninstallPath -AclObject $acl
     foreach ($name in $scripts) {
-        Copy-Item -LiteralPath (Join-Path $repository $name) -Destination (Join-Path $package $name) -Force
+        if ($name -notin $runtimeFiles) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination (Join-Path $package $name) -Force }
         $comment = if ($name -like '*.cs') { '//' } else { '#' }
         Add-Content -LiteralPath (Join-Path $package $name) -Value "`r`n$comment NEW addon payload: $name"
     }
@@ -429,7 +432,7 @@ try {
             Check ((Get-Acl -LiteralPath $path).Sddl -ceq $oldPayload[$name].Permissions) "$point preserves $name permissions"
         }
         $backups = @(Get-ChildItem -LiteralPath $destination -Filter '.upgrade-*.bak' -Force)
-        Check ($backups.Count -eq $(if ($point -eq 'stage') { 6 } else { $replacementNames.Count })) "$point retains flushed previous payload backups"
+        Check ($backups.Count -eq $(if ($point -eq 'stage') { 6 + $runtimeFiles.Count } else { $replacementNames.Count })) "$point retains flushed previous payload backups"
         foreach ($backup in $backups) {
             $name = $backup.Name.Substring(42); $name = $name.Substring(0, $name.Length - 4)
             Check ((Get-FileHash -LiteralPath $backup.FullName).Hash -eq $oldPayload[$name].Hash) "$point retains exact $name recovery bytes"
@@ -487,7 +490,7 @@ try {
                     $probe.Published += Split-Path $path -Leaf
                     if ($path -ne (Join-Path $destination 'Repair-Integration.ps1')) { return }
                     [InstallerWriteProbe]::AfterPublish = $null
-                    Check ($probe.Published[0] -eq 'Install.ps1') 'earlier script publication completed before failure'
+                    Check ($probe.Published[$runtimeFiles.Count] -eq 'Install.ps1' -and (@($probe.Published | Select-Object -First $runtimeFiles.Count) -join ',') -ceq ($runtimeFiles -join ',')) 'earlier script publication completed before failure'
                     Check ('HytaleAccounts.exe' -notin $probe.Published) 'helper remains old until every support file is published'
                     $probe.WriteFaultReached = $true
                     throw 'Controlled payload failure.'
@@ -631,7 +634,7 @@ try {
     Check (@($protected | Where-Object { (Get-FileHash -LiteralPath $_).Hash -ne $hashes[$_] }).Count -eq 0) 'retained file retry preserves Hytale data'
     foreach ($name in $lookalikes) { [IO.File]::Delete((Join-Path $destination $name)) }
     [IO.Directory]::Delete($destination)
-    foreach ($lockedName in @('HytaleAccounts.exe','Repair-Integration.ps1','launcher-baseline.json','shortcuts.new','shortcuts.json')) {
+    foreach ($lockedName in @('PresentationNative_cor3.dll','HytaleAccounts.exe','Repair-Integration.ps1','launcher-baseline.json','shortcuts.new','shortcuts.json')) {
         & (Join-Path $package 'Install.ps1') @options
         & (Join-Path $package 'Install.ps1') @options -UserOnly
         & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
@@ -639,7 +642,7 @@ try {
         $manifest = Join-Path $destination 'shortcuts.json'
         $journal = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
         $recovery = @{}
-        foreach ($name in @('shortcuts.json','shortcuts.new','HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json') + @($journal.Shortcuts | ForEach-Object Backup)) {
+        foreach ($name in $runtimeFiles + @('shortcuts.json','shortcuts.new','HytaleAccounts.exe','Install.ps1','Uninstall.ps1','InstallerSafety.ps1','ShortcutIntegration.ps1','ShortcutFile.cs','Repair-Integration.ps1','launcher-baseline.json') + @($journal.Shortcuts | ForEach-Object Backup)) {
             $path = Join-Path $destination $name
             $recovery[$path] = (Get-FileHash -LiteralPath $path).Hash
         }
