@@ -7,6 +7,12 @@ public partial class App : Application
     private NativeSession? session;
     protected override async void OnStartup(StartupEventArgs e)
     {
+        if (e.Args.Length == 1 && e.Args[0] is "--repair-integration" or "--repair-integration-user")
+        {
+            base.OnStartup(e); ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            Shutdown(await RepairWorker.Run(e.Args[0] == "--repair-integration-user"));
+            return;
+        }
         if (e.Args.Contains(Setup.ElevatedMode))
         {
             base.OnStartup(e); ShutdownMode = ShutdownMode.OnExplicitShutdown;

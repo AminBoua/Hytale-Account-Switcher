@@ -6,4 +6,5 @@
   <ItemGroup><Compile Include="AccountStorageChecks.cs"/></ItemGroup>
   <ItemGroup><Compile Include="UninstallFinalizationChecks.cs"/></ItemGroup>
   <ItemGroup><Compile Include="RuntimePackageChecks.cs"/></ItemGroup>
+  <ItemGroup><Compile Include="RepairWorkerChecks.cs"/></ItemGroup>
 </Project>

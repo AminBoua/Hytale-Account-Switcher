@@ -45,16 +45,27 @@ if (!$UserOnly -and (Test-Path -LiteralPath $RegistryPath)) {
 }
 if (!$UserOnly) {
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $action = New-ScheduledTaskAction -Execute $powershell -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '"')
+    $legacyArguments = ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '"')
+    $action = New-ScheduledTaskAction -Execute $installed -Argument '--repair-integration'
     $repairTask = Get-ScheduledTask -TaskName 'HytaleAccounts-Repair' -ErrorAction SilentlyContinue
-    if ($repairTask -and (@($repairTask.Actions).Count -ne 1 -or $repairTask.Actions[0].Execute -cne $powershell -or $repairTask.Actions[0].Arguments -cne $action.Arguments)) { throw 'Another task owns the shortcut repair entry; preserved.' }
+    if ($repairTask -and (@($repairTask.Actions).Count -ne 1 -or !(($repairTask.Actions[0].Execute -ceq $powershell -and $repairTask.Actions[0].Arguments -ceq $legacyArguments) -or ($repairTask.Actions[0].Execute -ceq $installed -and $repairTask.Actions[0].Arguments -ceq $action.Arguments)))) { throw 'Another task owns the shortcut repair entry; preserved.' }
+    $existingTask = $null
     if ($UserSid) {
         $sid = [Security.Principal.SecurityIdentifier]::new($UserSid)
         if (!$sid.IsAccountSid()) { throw 'Invalid shortcut user SID.' }
-        $userAction = New-ScheduledTaskAction -Execute $powershell -Argument ($action.Arguments + ' -UserOnly')
+        $userAction = New-ScheduledTaskAction -Execute $installed -Argument '--repair-integration-user'
         $userTaskName = 'HytaleAccounts-Repair-' + $sid.Value
         $existingTask = Get-ScheduledTask -TaskName $userTaskName -ErrorAction SilentlyContinue
-        if ($existingTask -and (@($existingTask.Actions).Count -ne 1 -or $existingTask.Actions[0].Execute -cne $powershell -or $existingTask.Actions[0].Arguments -cne $userAction.Arguments)) { throw 'Another task owns the user shortcut repair entry; preserved.' }
+        if ($existingTask -and (@($existingTask.Actions).Count -ne 1 -or !(($existingTask.Actions[0].Execute -ceq $powershell -and $existingTask.Actions[0].Arguments -ceq ($legacyArguments + ' -UserOnly')) -or ($existingTask.Actions[0].Execute -ceq $installed -and $existingTask.Actions[0].Arguments -ceq $userAction.Arguments)))) { throw 'Another task owns the user shortcut repair entry; preserved.' }
+    }
+    # Stop validated legacy and current workers before replacing their payload.
+    foreach ($task in @($repairTask, $existingTask) | Where-Object { $_ }) {
+        Disable-ScheduledTask -TaskName $task.TaskName | Out-Null
+        Stop-ScheduledTask -TaskName $task.TaskName
+        for ($attempt = 0; (Get-ScheduledTask -TaskName $task.TaskName).State -eq 'Running'; $attempt++) {
+            if ($attempt -ge 50) { throw 'Shortcut repair is still stopping; retry installation.' }
+            Start-Sleep -Milliseconds 100
+        }
     }
     Stop-InstalledLauncher $installed -IncludeOfficial
 }
@@ -171,14 +182,20 @@ if ($UserOnly) {
     if (!$records.Count -and !@($machineJournal.Shortcuts | Where-Object Path).Count) { throw 'No Hytale launcher shortcut was found. Reinstall the official launcher first.' }
     return
 }
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
-$settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 0
 Register-ScheduledTask -TaskName 'HytaleAccounts-Repair' -Action $action -Trigger $trigger -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
 if ($UserSid) {
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $sid.Value
     $principal = New-ScheduledTaskPrincipal -UserId $sid.Value -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskName $userTaskName -Action $userAction -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 }
 Assert-LauncherSnapshot $official $before
+# The first repair must not race the installer's exclusive journal lock.
+$journalLock.Dispose()
+$journalLock = $null
+Start-ScheduledTask -TaskName 'HytaleAccounts-Repair'
+if ($UserSid) { Start-ScheduledTask -TaskName $userTaskName }
 Write-Output 'Installed. Official launcher bytes and permissions preserved.'
 } catch {
     if ($UserOnly) { throw }
