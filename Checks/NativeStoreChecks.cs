@@ -61,6 +61,8 @@ if (safe || args.Contains("--bridge-auth"))
     await BridgeLimitChecks.Run(Check);
 }
 if (args.Contains("--bridge-auth")) { await BridgeShutdownChecks.Run(Check); return; }
+if (safe || args.Contains("--repair-worker")) await RepairWorkerChecks.Run(Check);
+if (args.Contains("--repair-worker")) return;
 if (safe || args.Contains("--setup")) await SetupChecks.Run(Check);
 if (args.Contains("--setup")) return;
 StorageSafetyChecks.Run(Check);

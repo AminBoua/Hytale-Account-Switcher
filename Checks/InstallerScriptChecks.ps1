@@ -11,13 +11,15 @@ $oldModules = $env:PSModulePath
 Import-Module ScheduledTasks
 $global:HytaleFixtureTasks = @{}
 function Register-ScheduledTask { param($TaskName,$Action,$Trigger,$Settings,$User,$RunLevel,$Principal,[switch]$Force)
-    Check ($Settings.Hidden -and $Action.Arguments -like '*-WindowStyle Hidden*') 'repair runs invisibly'
+    Check ($Settings.Hidden -and $Action.Execute -like '*\HytaleAccounts.exe' -and $Action.Arguments -in @('--repair-integration','--repair-integration-user')) 'repair uses the GUI worker'
+    Check (!$Trigger.Repetition.Interval -and $Settings.RestartCount -eq 0 -and $Settings.ExecutionTimeLimit -eq 'PT0S') 'repair has no scheduled failure relaunch loop'
     if ($Principal) { Check ($Principal.RunLevel -eq 'Limited' -and $Principal.LogonType -eq 'Interactive') 'user shortcut repair has a limited interactive token' }
     else { Check ($User -eq 'SYSTEM') 'common shortcut repair uses SYSTEM' }
     $global:HytaleFixtureTasks[$TaskName] = [pscustomobject]@{ TaskName = $TaskName; Actions = @($Action); State = 'Ready' }
 }
 function Get-ScheduledTask { param($TaskName,$ErrorAction) @($global:HytaleFixtureTasks.Values | Where-Object TaskName -like $TaskName) }
 function Disable-ScheduledTask { param($TaskName) }
+function Start-ScheduledTask { param($TaskName) }
 function Stop-ScheduledTask { param($TaskName) }
 function Unregister-ScheduledTask { param($TaskName,$Confirm) $global:HytaleFixtureTasks.Remove($TaskName) }
 function Get-CimInstance { param($ClassName,$Filter) } # Fixture payloads never have running processes.
@@ -123,7 +125,7 @@ Import-Module ScheduledTasks
 $global:HytaleFixtureTasks = @{}
 foreach ($task in $config.Tasks) { $global:HytaleFixtureTasks[$task.TaskName] = $task }
 '@
-    foreach ($name in @('Check','Register-ScheduledTask','Get-ScheduledTask','Disable-ScheduledTask','Stop-ScheduledTask','Unregister-ScheduledTask','Get-CimInstance')) {
+    foreach ($name in @('Check','Register-ScheduledTask','Get-ScheduledTask','Disable-ScheduledTask','Start-ScheduledTask','Stop-ScheduledTask','Unregister-ScheduledTask','Get-CimInstance')) {
         $childSource += "`r`nfunction $name {" + (Get-Item -LiteralPath "function:$name").Definition + "`r`n}`r`n"
     }
     $childSource += @'
