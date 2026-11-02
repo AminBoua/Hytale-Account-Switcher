@@ -19,7 +19,8 @@ $destination = Join-Path (Split-Path $official) '.hytale-accounts-addon'
 $installed = Join-Path $destination 'HytaleAccounts.exe'
 . (Join-Path $PSScriptRoot 'ShortcutIntegration.ps1')
 $state = if ($UserOnly) { Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration' } else { $destination }
-$scanRoots = if ($UserOnly) { @($DesktopDirectory, $ProgramsDirectory) } else { @($CommonDesktopDirectory, $CommonProgramsDirectory) }
+$userShortcutRoots = Get-UserShortcutRoots $DesktopDirectory $ProgramsDirectory
+$scanRoots = if ($UserOnly) { $userShortcutRoots } else { @($CommonDesktopDirectory, $CommonProgramsDirectory) }
 $roots = $scanRoots
 $repairRoots = $scanRoots
 $ownerSid = $UserSid

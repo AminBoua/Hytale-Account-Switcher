@@ -46,6 +46,8 @@ if (safe || args.Contains("--account-storage")) await AccountStorageChecks.Run(C
 if (args.Contains("--account-storage")) return;
 if (safe || args.Contains("--logging")) await LoggingChecks.Run(Check);
 if (args.Contains("--logging")) return;
+if (safe || args.Contains("--multi-instance")) await NativeMultiInstanceChecks.Run(Check);
+if (args.Contains("--multi-instance")) return;
 if (safe || args.Contains("--native-adapter")) NativeAdapterChecks.Run(Check);
 if (args.Contains("--native-adapter")) return;
 if (safe || args.Contains("--native-exit")) await NativeExitChecks.Run(Check);

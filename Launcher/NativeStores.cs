@@ -20,12 +20,15 @@ public sealed class NativeStores
     public string HytaleRoot { get; }
     public string Root => Path.Combine(HytaleRoot, "Accounts");
     private string Metadata => Path.Combine(Root, "native-stores.json");
+    private readonly Func<string, Process[]> processLookup;
     public NativeCatalog Catalog { get; }
     private readonly HashSet<string> pending = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> pendingFiles = new(StringComparer.OrdinalIgnoreCase);
     public bool IsPending(NativeStore store) => pending.Contains(store.Folder);
-    public NativeStores(string? root = null)
+    public NativeStores(string? root = null) : this(root, Process.GetProcessesByName) { }
+    internal NativeStores(string? root, Func<string, Process[]> processLookup)
     {
+        this.processLookup = processLookup ?? throw new ArgumentNullException(nameof(processLookup));
         HytaleRoot = Path.GetFullPath(root ?? OfficialRoot());
         RegularPath(Root);
         PrivateFiles.SecureTree(Root);
@@ -289,18 +292,20 @@ public sealed class NativeStores
         RequireIdle();
         ActivateCore(store, restoreSnapshot: false);
     }
+    internal void ActivateForLaunch(NativeStore store)
+    {
+        RequireNoLauncher();
+        ActivateCore(store, restoreSnapshot: false);
+    }
     // Caller has acknowledged native Shutdown, which pauses refresh without revoking login.
     internal void ActivatePaused(NativeStore store, Process owner)
     {
-        var processes = Process.GetProcessesByName("hytale-launcher");
+        var processes = processLookup("hytale-launcher");
         try
         {
             if (owner.HasExited || processes.Any(p => p.Id != owner.Id)) throw new IOException("Native launcher ownership changed; switch cancelled.");
         }
         finally { foreach (var process in processes) process.Dispose(); }
-        var games = Process.GetProcessesByName("HytaleClient");
-        try { if (games.Length != 0) throw new IOException("Close the game before switching accounts."); }
-        finally { foreach (var game in games) game.Dispose(); }
         ActivateCore(store, restoreSnapshot: true);
     }
     private void ActivateCore(NativeStore store, bool restoreSnapshot)
@@ -343,7 +348,7 @@ public sealed class NativeStores
     }
     public async Task<(ProcessStartInfo Start, string Hash, string UpdateBase)> PrepareIntegrated(NativeStore store, LocalAccountBridge bridge)
     {
-        RequireIdle();
+        RequireNoLauncher();
         var original = IntegrationSafety.OfficialPath;
         using var installedDirectories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(original)!, requireTrusted: false);
         using var installed = SetupPayload.OpenSource(original);
@@ -379,7 +384,7 @@ public sealed class NativeStores
             AtomicWrite(executable, bytes, privateFile: true);
             var start = IntegrationSafety.StartInfo(executable);
             start.Environment["HYTALE_LAUNCHER_NO_SELF_UPDATE"] = "1";
-            Activate(store);
+            ActivateForLaunch(store);
             return (start, Hash(bytes), updateBase);
         }
         catch
@@ -454,14 +459,20 @@ public sealed class NativeStores
             System.Globalization.DateTimeStyles.None, out var date) &&
         DateOnly.TryParseExact(previous?.Split('-')[0], "yyyy.MM.dd", System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.None, out var old) && date > old;
+    internal void RequireNoLauncher() =>
+        RequireNoProcess(processLookup, "hytale-launcher", "Close the native launcher before opening another account window.");
+    internal void RequireNoGame() =>
+        RequireNoProcess(processLookup, "HytaleClient", "Close the game before adding an account, logging out, or restarting after a launcher update.");
     public static void RequireIdle()
     {
-        foreach (var name in new[] { "hytale-launcher", "HytaleClient" })
-        {
-            var processes = Process.GetProcessesByName(name);
-            try { if (processes.Length != 0) throw new IOException("Close the native launcher and game before switching accounts."); }
-            finally { foreach (var process in processes) process.Dispose(); }
-        }
+        RequireNoProcess(Process.GetProcessesByName, "hytale-launcher", "Close the native launcher and game before changing launcher integration.");
+        RequireNoProcess(Process.GetProcessesByName, "HytaleClient", "Close the native launcher and game before changing launcher integration.");
+    }
+    private static void RequireNoProcess(Func<string, Process[]> processLookup, string name, string message)
+    {
+        var processes = processLookup(name);
+        try { if (processes.Length != 0) throw new IOException(message); }
+        finally { foreach (var process in processes) process.Dispose(); }
     }
     internal static byte[] ReadFile(string path)
     {
