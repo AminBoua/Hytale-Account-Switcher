@@ -64,12 +64,14 @@ under `dist/uninstall-diagnostic/` for execution output.
 
 ## Integration and limits
 
-No scheduled-task implementation change is required by this token fix. The other
-branch must preserve or jointly update the uninstall task-action contract:
+No scheduled-task implementation change is required by this token fix alone. Main
+now jointly updates uninstall validation for the GUI repair worker and these legacy actions:
 `HytaleAccounts-Repair` and `HytaleAccounts-Repair-S-1-*`, system PowerShell,
 `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File
 "<destination>\Repair-Integration.ps1"`, with ` -UserOnly` for user tasks.
-Changed names/actions need matching validation/removal in `Uninstall.ps1`.
+Current GUI actions use the installed `HytaleAccounts.exe` with exactly
+`--repair-integration` or `--repair-integration-user`. Both task scopes stop before
+launcher shutdown and journal access; foreign actions are rejected before task mutation.
 Recurring repair must respect the journal lock and stop when its journal is gone;
 it must not recreate user integration after finalization. Real task permissions
 and registration remain owned by the other branch and were mocked in these tests.

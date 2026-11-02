@@ -68,3 +68,41 @@ foreach ($mode in @('new','legacy','current','foreign-machine','foreign-user','e
     Check (!$heldJournal.CanWrite -and $null -eq $journalLock) 'installer releases journal before launching repair'
     Check ($tasks.Count -eq 2 -and $events[$events.Count-2] -eq 'start:HytaleAccounts-Repair' -and $events[$events.Count-1] -eq "start:$userName") "$mode preserves task names and starts repair immediately"
 }
+
+# Exercise uninstall's production task preflight independently of journals and payload deletion.
+$source = Get-Content (Join-Path (Split-Path $PSScriptRoot) 'Uninstall.ps1') -Raw
+$ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+Check (!$errors.Count) 'uninstaller parses'
+$block = $ast.Find({ param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text.Contains('$repairTasks =') }, $true)
+Check ($null -ne $block) 'uninstall task preflight found'
+$preflight = [scriptblock]::Create($block.Extent.Text)
+function Get-ScheduledTask { param($TaskName,$ErrorAction) @($tasks.Values | Where-Object TaskName -like $TaskName) }
+function Stop-ScheduledTask { param($TaskName) $events.Add("stop:$TaskName"); if (!$stuck) { $tasks[$TaskName].State = 'Ready' } }
+function Start-Sleep { param($Milliseconds) $script:waits++ }
+foreach ($mode in @('legacy','current','foreign-machine','foreign-user','extra-action','stuck-machine','stuck-user')) {
+    $tasks = @{}; $events = [Collections.Generic.List[string]]::new(); $waits = 0
+    $stuck = $mode -like 'stuck-*'
+    foreach ($name in @('HytaleAccounts-Repair',$userName)) {
+        $user = $name -eq $userName
+        $exe = $installed; $arguments = if ($user) { '--repair-integration-user' } else { '--repair-integration' }
+        if ($mode -eq 'legacy') {
+            $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '"'
+            if ($user) { $arguments += ' -UserOnly' }
+        }
+        if (($mode -eq 'foreign-machine' -and !$user) -or ($mode -eq 'foreign-user' -and $user)) { $arguments += ' --foreign' }
+        $actions = @([pscustomobject]@{Execute=$exe;Arguments=$arguments})
+        if ($mode -eq 'extra-action' -and $user) { $actions += $actions[0] }
+        $state = if (!$stuck -or ($mode -eq 'stuck-user' -and $user) -or ($mode -eq 'stuck-machine' -and !$user)) { 'Running' } else { 'Ready' }
+        $tasks[$name] = [pscustomobject]@{TaskName=$name;Actions=$actions;State=$state}
+    }
+    $failure = $null
+    try { . $preflight } catch { $failure = $_ }
+    if ($mode -like 'foreign-*' -or $mode -eq 'extra-action') {
+        Check ($failure -and $failure.Exception.Message -eq 'Shortcut repair task changed; files preserved.' -and !$events.Count) "uninstall $mode rejected before any task or launcher mutation"
+    } elseif ($stuck) {
+        Check ($failure -and $failure.Exception.Message -like 'Shortcut repair is still stopping*' -and $waits -eq 50 -and !$events.Contains('launcher')) "uninstall $mode bounded wait preserves payload"
+    } else {
+        Check (!$failure -and $events.Count -eq 5 -and $events[4] -eq 'launcher' -and !@($tasks.Values | Where-Object State -eq 'Running').Count) "uninstall $mode stops both workers before launcher and journal access"
+    }
+}

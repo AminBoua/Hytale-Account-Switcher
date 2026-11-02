@@ -307,9 +307,13 @@ public static class SetupUpgradeChecks
         Import-Module ScheduledTasks
         function Get-CimInstance { param($ClassName,$Filter) }
         function Get-ScheduledTask { param($TaskName,$ErrorAction) }
+        $script:fixtureTaskNames = @()
+        function Start-ScheduledTask { param($TaskName) if ($TaskName -notin $script:fixtureTaskNames) { throw 'Cannot start an unregistered fixture task.' } }
         function Register-ScheduledTask {
             param($TaskName,$Action,$Trigger,$Settings,$User,$RunLevel,$Principal,[switch]$Force)
-            if (!$Settings.Hidden -or $Action.Arguments -notlike '*-WindowStyle Hidden*') { throw 'Visible fixture repair task.' }
+            if (!$Settings.Hidden -or $Action.Execute -cne $installed -or $Action.Arguments -cne $(if ($Principal) { '--repair-integration-user' } else { '--repair-integration' })) { throw 'Visible or incorrect fixture repair task.' }
+            if ($Trigger.Repetition.Interval -or $Settings.RestartCount -ne 0 -or $Settings.ExecutionTimeLimit -ne 'PT0S') { throw 'Fixture repair task can relaunch after failure.' }
+            $script:fixtureTaskNames += $TaskName
         }
         """;
 

@@ -22,6 +22,7 @@ function Register-ScheduledTask { param($TaskName,$Action,$Trigger,$Settings,$Us
 }
 function Get-ScheduledTask { param($TaskName,$ErrorAction) @($global:HytaleFixtureTasks.Values | Where-Object TaskName -like $TaskName) }
 function Disable-ScheduledTask { param($TaskName) }
+function Start-ScheduledTask { param($TaskName) if (!$global:HytaleFixtureTasks.ContainsKey($TaskName)) { throw 'Cannot start an unregistered fixture task.' } }
 function Stop-ScheduledTask { param($TaskName) }
 function Unregister-ScheduledTask { param($TaskName,$Confirm) $global:HytaleFixtureTasks.Remove($TaskName) }
 function Get-CimInstance { param($ClassName,$Filter) }

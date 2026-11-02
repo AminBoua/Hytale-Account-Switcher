@@ -28,7 +28,28 @@ try {
         $callerSid = if ($UserOnly) { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } else { $UserSid }
         if ($machineJournal.UserSid -and $machineJournal.UserSid -ne $callerSid) { throw 'Remove the addon from the Windows account that installed it so its shortcuts can be restored.' }
     }
-    if (!$UserOnly) { Stop-InstalledLauncher $installed }
+    if (!$UserOnly) {
+        $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $legacyArguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '"'
+        $repairTasks = @(Get-ScheduledTask -TaskName 'HytaleAccounts-Repair' -ErrorAction SilentlyContinue) + @(Get-ScheduledTask -TaskName 'HytaleAccounts-Repair-S-1-*' -ErrorAction SilentlyContinue)
+        # Validate every action before stopping either scope; never operate on a foreign task.
+        foreach ($task in $repairTasks) {
+            $userTask = $task.TaskName -ne 'HytaleAccounts-Repair'
+            $legacy = $legacyArguments
+            $arguments = '--repair-integration'
+            if ($userTask) { $legacy += ' -UserOnly'; $arguments = '--repair-integration-user' }
+            if (@($task.Actions).Count -ne 1 -or !(($task.Actions[0].Execute -ceq $powershell -and $task.Actions[0].Arguments -ceq $legacy) -or ($task.Actions[0].Execute -ceq $installed -and $task.Actions[0].Arguments -ceq $arguments))) { throw 'Shortcut repair task changed; files preserved.' }
+        }
+        foreach ($task in $repairTasks) {
+            Disable-ScheduledTask -TaskName $task.TaskName | Out-Null
+            Stop-ScheduledTask -TaskName $task.TaskName
+            for ($attempt = 0; (Get-ScheduledTask -TaskName $task.TaskName).State -eq 'Running'; $attempt++) {
+                if ($attempt -ge 50) { throw 'Shortcut repair is still stopping; retry removal. Files preserved.' }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        Stop-InstalledLauncher $installed
+    }
     $before = if (Test-Path -LiteralPath $official) { Get-LauncherSnapshot $official } else { $null }
     $shell = New-Object -ComObject WScript.Shell
     $state = if ($UserOnly) { Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration' } else { $destination }
@@ -44,27 +65,7 @@ try {
     foreach ($record in $records) { Assert-ShortcutRecord $record $roots }
     Assert-ShortcutIdentities $records
     if (!$UserOnly) {
-    $repairTask = Get-ScheduledTask -TaskName 'HytaleAccounts-Repair' -ErrorAction SilentlyContinue
-    if ($repairTask) {
-        $expected = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '"'
-        if (@($repairTask.Actions).Count -ne 1 -or $repairTask.Actions[0].Execute -cne (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -or $repairTask.Actions[0].Arguments -cne $expected) { throw 'Shortcut repair task changed; files preserved.' }
-        Disable-ScheduledTask -TaskName 'HytaleAccounts-Repair' | Out-Null
-        Stop-ScheduledTask -TaskName 'HytaleAccounts-Repair'
-        for ($attempt = 0; (Get-ScheduledTask -TaskName 'HytaleAccounts-Repair').State -eq 'Running'; $attempt++) {
-            if ($attempt -ge 50) { throw 'Shortcut repair is still stopping; retry removal. Files preserved.' }
-            Start-Sleep -Milliseconds 100
-        }
-        Unregister-ScheduledTask -TaskName 'HytaleAccounts-Repair' -Confirm:$false
-    }
-    # Only remove tasks whose executable and arguments still match this installation.
-    foreach ($task in @(Get-ScheduledTask -TaskName 'HytaleAccounts-Repair-S-1-*' -ErrorAction SilentlyContinue)) {
-        $expectedUser = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $destination 'Repair-Integration.ps1') + '" -UserOnly'
-        $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -cne $powershell -or $task.Actions[0].Arguments -cne $expectedUser) { throw 'User shortcut repair task changed; files preserved.' }
-        Disable-ScheduledTask -TaskName $task.TaskName | Out-Null
-        Stop-ScheduledTask -TaskName $task.TaskName
-        Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false
-    }
+        foreach ($task in $repairTasks) { Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false }
     }
     foreach ($record in $records) { Update-Shortcut $record.Path Remove $record }
     foreach ($folder in $roots) {

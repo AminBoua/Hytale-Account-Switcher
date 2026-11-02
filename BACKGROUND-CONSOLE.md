@@ -12,19 +12,16 @@ SYSTEM starts at boot, the limited Interactive user task at that user's logon; i
 
 Each pass pins the trusted installed directory and validates/holds the executable and all imported repair sources. It uses protected system module discovery and retains the normal Windows profile. Failure diagnostics are created with private, exclusive file creation at the task identity's LocalApplicationData/HytaleAccounts/repair-error-<guid>.txt (SYSTEM uses its own profile). Failure to write diagnostics still yields nonzero Task Scheduler status.
 
-## Required integration on the uninstall branch
+## Integration on main
 
-Do not ship the combined change until these changes are made:
+Main now accepts exactly one legacy PowerShell or current GUI worker action for each repair scope. Uninstall validates all actions before changing any task, then disables/stops and waits for both scopes before stopping the installed launcher or opening the journal. Task removal remains after authorized user finalization and journal validation. Foreign actions and bounded stop failures preserve the payload.
 
-1. Uninstall.ps1 task validation must accept exactly one action matching either the existing legacy system PowerShell command or the new installed `<destination>\HytaleAccounts.exe` action. Machine arguments must equal `--repair-integration`; per-user arguments must equal `--repair-integration-user`. Keep exact executable/argument comparisons and foreign-task rejection, including legacy support.
-2. Validate all owned repair task actions, then disable/stop and wait for BOTH scopes before `Stop-InstalledLauncher $installed` and before acquiring the shortcut journal. A resident repair worker is now an HytaleAccounts.exe process and cannot be closed with CloseMainWindow. Retain bounded waits and failure reporting; do not treat an arbitrary same-name process as an owned task.
-3. Keep task removal in the existing authorized uninstall handoff/finalization lifecycle. No Setup.cs or payload-list change is required: RepairWorker.cs compiles into the already packaged executable. Diagnostics live outside the installation directory, not in the payload deletion list.
-4. Run InstallerScriptChecks.ps1 in full after integration. Its mocked registration/start behavior has been updated; no real scheduled task or shortcut is used.
+RepairWorker.cs is compiled into the existing WinExe. SetupPayload.Scripts, embedded script resources, installer publication and uninstall deletion lists already include every required script; no new payload is needed. Upgrade fixtures retain legacy-action migration coverage. RepairTaskChecks.ps1 additionally exercises uninstall's production task block for legacy/current actions, foreign/additional actions and either worker failing to stop.
 
 ## Validation
 
 Passed: `dotnet run --project Checks -- --repair-worker`, `dotnet run --project Checks -- --setup`, Windows PowerShell `Checks/RepairTaskChecks.ps1`, and `Checks/ShortcutRaceChecks.ps1`.
 
-The installer fixture passed missing/unrelated shortcut preflight and ordinary installation, then stopped at the expected old uninstall validation: `Shortcut repair task changed; files preserved.` The remaining full installer scenarios require the integration above.
+Before integration, the worker branch installer fixture passed missing/unrelated shortcut preflight and ordinary installation, then stopped at the expected old uninstall validation: `Shortcut repair task changed; files preserved.` The integrated installer and setup-upgrade fixtures now pass. Finalization and setup-upgrade fixtures also intercept the new task-start call, and upgrade assertions enforce the GUI-worker action and absence of scheduled failure restarts.
 
 The real child-process fixture checks GetConsoleWindow()==0 for both repair scopes. Actual Task Scheduler desktop/window visibility was NOT visually tested, and installed tasks and real shortcuts were not changed. The source establishes the console-allocation path; no live installed task/process trace was collected. SYSTEM execution and real boot/logon triggers require disposable Windows integration testing.
