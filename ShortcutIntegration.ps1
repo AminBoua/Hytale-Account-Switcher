@@ -13,6 +13,15 @@ function Get-ShortcutHash([byte[]]$Bytes) {
     $hash = [Security.Cryptography.SHA256]::Create()
     try { [BitConverter]::ToString($hash.ComputeHash($Bytes)) } finally { $hash.Dispose() }
 }
+function Get-UserShortcutRoots([string]$Desktop, [string]$Programs) {
+    $roots = @()
+    if ($Desktop) {
+        $item = Get-Item -LiteralPath $Desktop -Force -ErrorAction SilentlyContinue
+        if (!$item -or !($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $roots += $Desktop }
+    }
+    if ($Programs) { $roots += $Programs }
+    return ,@($roots | Select-Object -Unique)
+}
 function Open-ShortcutJournal([string]$State) {
     Assert-RegularPath $State
     New-Item -ItemType Directory -Path $State -Force | Out-Null
@@ -67,7 +76,7 @@ function Assert-LauncherShortcut {
     $found = @()
     foreach ($scope in @(
         @{ Roots = @($CommonDesktopDirectory, $CommonProgramsDirectory); State = $destination },
-        @{ Roots = @($DesktopDirectory, $ProgramsDirectory); State = (Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration') }
+        @{ Roots = (Get-UserShortcutRoots $DesktopDirectory $ProgramsDirectory); State = (Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration') }
     )) {
         $state = $scope.State
         $manifest = Join-Path $state 'shortcuts.json'

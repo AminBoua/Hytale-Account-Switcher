@@ -58,7 +58,8 @@ try {
     }
     Write-Output 'PASS runtime evidence collector, contract, production bootstrap and harmless single-file probe are hashed package inputs'
     Write-Output 'PASS package hashes and validation-only executable'
-    $process = Start-Process -FilePath (Join-Path $fixture 'Checks.exe') -ArgumentList @('identity','C:\Windows') -WindowStyle Hidden -Wait -PassThru `
+    $dotnet = (Get-Command dotnet -ErrorAction Stop).Source
+    $process = Start-Process -FilePath $dotnet -ArgumentList @('exec',(Join-Path $fixture 'Checks.dll'),'identity','C:\Windows') -WindowStyle Hidden -Wait -PassThru `
         -RedirectStandardError (Join-Path $fixture 'guard-error.txt') -RedirectStandardOutput (Join-Path $fixture 'guard-output.txt')
     if ($process.ExitCode -eq 0 -or (Get-Content -LiteralPath (Join-Path $fixture 'guard-error.txt') -Raw) -notlike '*VM guard refused execution*Only the designated fixed VM fixture root is allowed*') { throw 'Compiled guard refusal was not established.' }
     $process = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"' + (Join-Path $fixture 'Runtime.ps1') + '"'),'-Root','C:\Windows','-Mode','same-user','-Action','Worker') -WindowStyle Hidden -Wait -PassThru -RedirectStandardError (Join-Path $fixture 'runtime-refusal.txt')

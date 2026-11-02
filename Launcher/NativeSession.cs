@@ -137,7 +137,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
     public async Task<bool> AddAccount()
     {
         if (busy || pendingLogin is not null || !IsOpen || active is null || !verifiedSession) return false;
-        RequireNoGame();
+        stores.RequireNoGame();
         stores.Capture(active);
         pendingLogin = stores.CreatePending();
         // Native authentication may replace account.dat before its completion is acknowledged.
@@ -192,7 +192,6 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         busy = true; message = "Opening " + store.Label + "…"; await Publish();
         try
         {
-            RequireNoGame();
             await Stop();
             stopped = true;
             var authenticated = await Start(store, commit);
@@ -282,7 +281,6 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         await Publish();
         try
         {
-            RequireNoGame();
             if (previous is null) throw new IOException("No active native account.");
             attempted = true;
             await RestoreSession(store, commit);
@@ -322,7 +320,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         message = "Logging out " + target.Label + "…"; await Publish();
         try
         {
-            RequireNoGame();
+            stores.RequireNoGame();
             if (!IsOpen || !verifiedSession || active?.Folder != target.Folder) throw new IOException("Only the verified current native account can be logged out.");
             requested = true;
             verifiedSession = false;
@@ -381,15 +379,9 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
         }
         finally { logoutRequest = null; logoutResult = null; holdLogin = IsOpen && holdLogin && !verifiedSession; busy = false; await Publish(); }
     }
-    private static void RequireNoGame()
-    {
-        var games = Process.GetProcessesByName("HytaleClient");
-        try { if (games.Length != 0) throw new IOException("Close the game before switching accounts."); }
-        finally { foreach (var game in games) game.Dispose(); }
-    }
     private async Task<bool> Start(NativeStore store, bool commit)
     {
-        NativeStores.RequireIdle();
+        stores.RequireNoLauncher();
         active = store; verifiedSession = false;
         nativeName = null; ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         var signal = ready;
@@ -491,7 +483,7 @@ public sealed class NativeSession(NativeStores stores, Dispatcher dispatcher)
                 var restarted = updates.FirstOrDefault(p => p.MainWindowHandle != IntPtr.Zero);
                 if (restarted is not null && await stores.PreserveLauncherUpdate(runImage, runHash, updateBase))
                 {
-                    RequireNoGame();
+                    stores.RequireNoGame();
                     restarted.CloseMainWindow();
                     await restarted.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
                     return true;

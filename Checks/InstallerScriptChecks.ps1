@@ -261,6 +261,31 @@ try {
         Check ((Get-FileHash -LiteralPath $path).Hash -eq $original -and !(Test-Path -LiteralPath $destination) -and !(Test-Path -LiteralPath $registry) -and !$global:HytaleFixtureTasks.Count) "single-location fixture restores its shortcut and removes fixture installation state"
         [IO.File]::Delete($path)
     }
+    $redirectedDesktop = Join-Path $root 'redirected-desktop'
+    $redirectedContent = Join-Path $root 'redirected-content'
+    [IO.Directory]::CreateDirectory($redirectedContent) | Out-Null
+    New-Item -ItemType Junction -Path $redirectedDesktop -Target $redirectedContent | Out-Null
+    $redirectedShortcut = Join-Path $redirectedContent 'Hytale Launcher.lnk'
+    $link = $shell.CreateShortcut($redirectedShortcut); $link.TargetPath = $official; $link.Save()
+    $redirectedHash = (Get-FileHash -LiteralPath $redirectedShortcut).Hash
+    $programsShortcut = Join-Path $programs 'Hytale Launcher.lnk'
+    $link = $shell.CreateShortcut($programsShortcut); $link.TargetPath = $official; $link.Save()
+    $programsHash = (Get-FileHash -LiteralPath $programsShortcut).Hash
+    $regularOptions = $options.Clone()
+    $userState = Join-Path $env:LOCALAPPDATA 'HytaleAccounts\ShortcutIntegration'
+    $options.DesktopDirectory = $redirectedDesktop
+    & (Join-Path $package 'Install.ps1') @options -PreflightOnly
+    & (Join-Path $package 'Install.ps1') @options -UserOnly
+    $redirectedJournal = Get-Content -LiteralPath (Join-Path $userState 'shortcuts.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Check ($redirectedJournal.Roots -notcontains $redirectedDesktop) 'redirected Desktop is excluded from user shortcut roots'
+    Check ((Get-FileHash -LiteralPath $redirectedShortcut).Hash -eq $redirectedHash) 'redirected Desktop shortcut bytes remain untouched'
+    Check ($shell.CreateShortcut($programsShortcut).TargetPath -eq (Join-Path $destination 'HytaleAccounts.exe')) 'Programs shortcut integrates while redirected Desktop is skipped'
+    & (Join-Path $package 'Uninstall.ps1') @options -UserOnly
+    Check ((Get-FileHash -LiteralPath $programsShortcut).Hash -eq $programsHash) 'user uninstall restores Programs shortcut after redirected Desktop was skipped'
+    [IO.File]::Delete($redirectedShortcut); [IO.File]::Delete($programsShortcut)
+    [IO.Directory]::Delete($redirectedDesktop)
+    [IO.Directory]::Delete($redirectedContent)
+    $options = $regularOptions
     $shortcutPath = Join-Path $programs ('Hytale Launch' + [char]0xE9 + 'r.lnk')
     $previous = $shell.CreateShortcut($shortcutPath); $previous.TargetPath = $official
     $previous.Hotkey = 'CTRL+ALT+H'; $previous.WindowStyle = 7; $previous.Description = 'Original Hytale shortcut'; $previous.Save()
