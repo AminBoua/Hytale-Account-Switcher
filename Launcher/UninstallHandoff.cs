@@ -10,7 +10,7 @@ namespace HytaleAccounts;
 
 internal static class UninstallHandoff
 {
-    // Use only the caller's linked token, never another logged-on user's token.
+    // The linked token identifies the user; only their matching desktop primary token can launch.
     internal static void Start(string destination)
     {
         using var current = WindowsIdentity.GetCurrent();
@@ -24,16 +24,24 @@ internal static class UninstallHandoff
         if (shell == IntPtr.Zero || shellPid == 0)
             throw new IOException("Cannot identify your Windows desktop; files preserved.");
         using var desktop = Process.GetProcessById((int)shellPid);
-        if (!OpenProcessToken(desktop.Handle, 8, out var shellToken)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        using (shellToken)
+        if (!OpenProcessToken(desktop.Handle, 0xA, out var shellToken)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        using var shellLifetime = shellToken; // TOKEN_QUERY | TOKEN_DUPLICATE
         using (var shellUser = new WindowsIdentity(shellToken.DangerousGetHandle()))
         {
             if (session == 0 || desktop.SessionId != session || user.User != current.User || shellUser.User != current.User ||
                 new WindowsPrincipal(user).IsInRole(WindowsBuiltInRole.Administrator) ||
+                new WindowsPrincipal(shellUser).IsInRole(WindowsBuiltInRole.Administrator) ||
+                !GetTokenInformation(shellToken, 8, out int tokenType, sizeof(int), out _) || tokenType != 1 ||
+                !GetTokenInformation(shellToken, 12, out int shellSession, sizeof(int), out _) || shellSession != session ||
+                !GetTokenInformation(shellToken, 18, out int shellElevation, sizeof(int), out _) || shellElevation != 3 ||
                 !GetTokenInformation(linked, 12, out int tokenSession, sizeof(int), out _) || tokenSession != session ||
                 !GetTokenInformation(linked, 18, out int elevation, sizeof(int), out _) || elevation != 3)
                 throw new IOException("Removal requires the same Windows user and unelevated desktop session; files preserved.");
         }
+        // TokenLinkedToken can be identification-only; duplicate the validated desktop primary token for launch.
+        if (!DuplicateTokenEx(shellToken, 0x02000000, IntPtr.Zero, 2, 1, out var primary))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        using var launchToken = primary;
         using var directories = new SetupPayload.PinnedDirectories(destination, requireTrusted: true, forMutation: true);
         var files = new List<FileStream>();
         try
@@ -47,12 +55,12 @@ internal static class UninstallHandoff
             using (var journal = JsonDocument.Parse(files[^1]))
                 if (!journal.RootElement.TryGetProperty("UserSid", out var owner) || owner.GetString() != current.User!.Value)
                     throw new IOException("Cannot confirm the installing Windows user; files preserved.");
-            if (!CreateEnvironmentBlock(out var environment, linked, false)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (!CreateEnvironmentBlock(out var environment, launchToken, false)) throw new Win32Exception(Marshal.GetLastWin32Error());
             try
             {
                 var executable = Path.Combine(destination, "HytaleAccounts.exe");
                 var startup = new StartupInfo { Size = Marshal.SizeOf<StartupInfo>(), Desktop = @"winsta0\default", Flags = 1, ShowWindow = 0 };
-                if (!CreateProcessWithTokenW(linked, 1, executable, new StringBuilder("\"" + executable + "\" --uninstall"),
+                if (!CreateProcessWithTokenW(launchToken, 1, executable, new StringBuilder("\"" + executable + "\" --uninstall"),
                     0x08000400, environment, Environment.SystemDirectory, ref startup, out var process))
                     throw new Win32Exception(Marshal.GetLastWin32Error());
                 CloseHandle(process.Thread); CloseHandle(process.Process);
@@ -79,6 +87,8 @@ internal static class UninstallHandoff
     private static extern bool GetTokenInformation(SafeAccessTokenHandle token, int kind, out int value, int size, out int returned);
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern bool OpenProcessToken(IntPtr process, int access, out SafeAccessTokenHandle token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool DuplicateTokenEx(SafeAccessTokenHandle token, uint access, IntPtr attributes, int level, int type, out SafeAccessTokenHandle copy);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool CreateProcessWithTokenW(SafeAccessTokenHandle token, int logonFlags, string application, StringBuilder command,
         int flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInformation process);
