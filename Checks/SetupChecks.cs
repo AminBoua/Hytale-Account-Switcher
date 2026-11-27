@@ -1,270 +1,307 @@
 using System.ComponentModel;
-using System.Diagnostics;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
+using System.Security.Cryptography;
 using System.Security.Principal;
-using System.Text;
-using HytaleAccounts;
+using System.Text.Json;
+
+namespace HytaleAccounts.Checks;
 
 internal static class SetupChecks
 {
-    public static async Task Run(Action<bool, string> check)
+    internal static void Run()
     {
-        void Reject(Action action, string message)
-        {
-            try { action(); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception) { check(true, message); return; }
-            throw new Exception(message);
-        }
-        var acl = SetupPayload.Permissions();
-        SetupPayload.RequireTrusted(acl);
-        var rules = acl.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>().ToArray();
-        check(acl.AreAccessRulesProtected && acl.GetOwner(typeof(SecurityIdentifier))!.Value == "S-1-5-32-544" &&
-            rules.Length == 2 && rules.All(r => (r.IdentityReference.Value is "S-1-5-18" or "S-1-5-32-544") &&
-                r.FileSystemRights == FileSystemRights.FullControl && r.InheritanceFlags == (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit)),
-            "production staging grants only Administrators/SYSTEM access and inheritance, with Administrators ownership");
-        foreach (var rights in new[] { FileSystemRights.WriteData, FileSystemRights.DeleteSubdirectoriesAndFiles, FileSystemRights.Delete,
-            FileSystemRights.ChangePermissions, FileSystemRights.TakeOwnership, FileSystemRights.WriteAttributes })
-        {
-            var broad = SetupPayload.Permissions();
-            broad.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), rights, AccessControlType.Allow));
-            Reject(() => SetupPayload.RequireTrusted(broad), "unprivileged installer mutation permissions rejected: " + rights);
-        }
-        var genericWrite = new DirectorySecurity(); genericWrite.SetSecurityDescriptorSddlForm("O:BAG:BAD:(A;;GW;;;BU)");
-        Reject(() => SetupPayload.RequireTrusted(genericWrite), "generic write permission rejected");
-        var append = new FileSecurity(); append.SetSecurityDescriptorSddlForm("O:BAG:BAD:(A;;0x4;;;BU)");
-        Reject(() => SetupPayload.RequireTrusted(append), "append-only mutation of installed payload rejected");
-        var user = WindowsIdentity.GetCurrent().User!;
-        var foreignOwner = SetupPayload.Permissions(); foreignOwner.SetOwner(user);
-        Reject(() => SetupPayload.RequireTrusted(foreignOwner), "user-owned installer paths rejected despite restrictive DACL");
-        var nullDacl = new DirectorySecurity(); nullDacl.SetSecurityDescriptorSddlForm("O:BAG:BAD:NO_ACCESS_CONTROL");
-        Reject(() => SetupPayload.RequireTrusted(nullDacl), "null DACL rejected");
-        try { await Setup.RunElevated([Setup.ElevatedMode]); throw new Exception("Malformed worker accepted"); }
-        catch (IOException) { check(true, "malformed worker rejected before staging"); }
-        if (!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
-        {
-            try { await Setup.RunElevated([Setup.ElevatedMode, @"C:\", @"C:\", user.Value]); throw new Exception("Unelevated worker accepted"); }
-            catch (IOException) { check(true, "unelevated worker refused without requesting elevation"); }
-        }
+        var hash = new string('a', 64);
+        var files = new[] { new Deployment.PayloadFile(Deployment.Executable, hash), new("LICENSE", hash), new("THIRD-PARTY-NOTICES.txt", hash) };
+        var payload = new Deployment.Payload("0.1.5", files);
+        if (Deployment.ParsePayload(JsonSerializer.SerializeToUtf8Bytes(payload)).Files.Length != 3)
+            throw new IOException("Setup did not read the complete package manifest.");
+        Reject(payload with { Files = [.. files.Take(2), new("../hytale-launcher.exe", hash)] });
+        Reject(payload with { Files = [.. files.Take(2), files[0]] });
+        Reject(payload with { Files = [.. files.Take(2), files[2] with { Sha256 = "0" }] });
 
-        var root = SecurityFixture.Create("setup check-");
-        // Fixtures use the current user; no admin token or protected system files are needed.
-        var fixtureAcl = new DirectorySecurity(); fixtureAcl.SetOwner(user); fixtureAcl.SetAccessRuleProtection(true, false);
-        fixtureAcl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
-        var stage = Path.Combine(root, "stage");
-        var executable = Path.Combine(root, "download.exe");
-        File.WriteAllText(executable, "synthetic installer image");
-        foreach (var name in SetupPayload.RuntimeFiles) File.WriteAllText(Path.Combine(root, name), "synthetic runtime " + name);
-        const string script = "param([string]$ProgramsDirectory,[string]$DesktopDirectory)\n$ErrorActionPreference='Stop'\n" +
-            "Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'HytaleAccounts.exe') -Destination (Join-Path $ProgramsDirectory 'installed.bin')\n" +
-            "Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'InstallerSafety.ps1') -Destination (Join-Path $DesktopDirectory 'installed-script.bin')\n" +
-            "[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'install-error.txt'), 'synthetic script ran')\n";
-        Stream Resource(string name) => new MemoryStream(Encoding.UTF8.GetBytes(name == "Install.ps1" ? script : "embedded synthetic " + name));
-        void Cleanup(string path)
-        {
-            var full = Path.GetFullPath(path);
-            if (full != root && !full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new IOException("Fixture cleanup escaped root.");
-            var attributes = File.GetAttributes(full);
-            if ((attributes & FileAttributes.Directory) == 0) { File.Delete(full); return; }
-            if ((attributes & FileAttributes.ReparsePoint) == 0)
-                foreach (var child in Directory.EnumerateFileSystemEntries(full)) Cleanup(child);
-            Directory.Delete(full);
-        }
+        var prefix = ".upgrade-" + Guid.NewGuid().ToString("N") + "-";
+        if (!Deployment.IsUpgradeArtifact(prefix + Deployment.Executable + ".bak", [Deployment.Executable]) ||
+            Deployment.IsUpgradeArtifact(prefix + "hytale-launcher.exe.bak", [Deployment.Executable]))
+            throw new IOException("Setup did not restrict upgrade cleanup to owned bundle files.");
+        Console.WriteLine("PASS setup package validation and upgrade cleanup ownership");
+        CheckShortcutPermissions();
+        CheckInheritedShortcutDelete();
+        CheckMachineShortcutBackupPermissions();
+        CheckRegistration();
+        CheckRemovalRetry();
+        if (Environment.GetEnvironmentVariable("HYTALE_MACHINE_SETUP_CHECKS") == "1") CheckMachineUpgrade();
+    }
+
+    private static void CheckRegistration()
+    {
+        const string directory = @"C:\Program Files\Hytale Setup Fixture\.hytale-accounts-addon";
+        var executable = Path.Combine(directory, Deployment.Executable);
+        var command = $"\"{executable}\" --uninstall";
+        Require(Deployment.OwnsRegistration(directory, executable, directory.ToUpperInvariant(), command),
+            "Setup rejected the owned registration.");
+        Require(!Deployment.OwnsRegistration(directory, executable, directory + "-foreign", command) &&
+            !Deployment.OwnsRegistration(directory, executable, directory, command + " --extra") &&
+            !Deployment.OwnsRegistration(directory, executable, directory, "%" + command) &&
+            !Deployment.OwnsRegistration(directory, executable, directory, null), "Setup accepted an unproven registration.");
+        Console.WriteLine("PASS setup registration ownership");
+    }
+
+    private static void CheckRemovalRetry()
+    {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "hytale-removal-check-" + Guid.NewGuid().ToString("N"));
+        WindowsPermissions.CreatePrivateDirectory(root);
+        var names = new[] { Deployment.Manifest, Deployment.Executable };
+        var paths = names.Select(name => Path.Combine(root, name)).ToArray();
         try
         {
-            var attempt = Guid.NewGuid().ToString("N");
-            using (var signal = Setup.RemovalEvent(attempt, "confirmed"))
-            {
-                Reject(() => EventWaitHandleAcl.OpenExisting("Local\\HytaleAccounts-Uninstall-" + attempt + "-confirmed", EventWaitHandleRights.Modify).Dispose(),
-                    "another handle cannot forge finalization, even as the event owner");
-                Reject(() => EventWaitHandleAcl.OpenExisting("Local\\HytaleAccounts-Uninstall-" + attempt + "-confirmed", EventWaitHandleRights.ChangePermissions).Dispose(),
-                    "event owner cannot grant itself confirmation rights");
-                using var reader = EventWaitHandleAcl.OpenExisting("Local\\HytaleAccounts-Uninstall-" + attempt + "-confirmed", EventWaitHandleRights.Synchronize);
-                check(!reader.WaitOne(0), "confirmation starts unsignaled");
-                signal.Set();
-                check(reader.WaitOne(0), "only the original confirmation handle signals success");
-                Reject(() => Setup.RemovalEvent(attempt, "confirmed").Dispose(), "an existing removal attempt cannot be adopted");
-            }
-            File.WriteAllText(Path.Combine(root, "Uninstall.ps1"), "non-executed removal fixture");
-            File.WriteAllText(Path.Combine(root, "ShortcutIntegration.ps1"), "non-executed integration fixture");
-            foreach (var failure in new Exception[] { new Win32Exception(1223), new IOException("Could not start uninstall.") })
-            {
-                var phases = new List<string>();
-                Task Integrate(ProcessStartInfo start)
-                {
-                    check(!start.UseShellExecute && start.CreateNoWindow && start.ArgumentList.Contains("-UserOnly"), "uninstall recovery remains unelevated and hidden");
-                    if (start.ArgumentList.Contains(Path.Combine(root, "Uninstall.ps1")))
-                    {
-                        check(start.ArgumentList.Contains("-KeepJournal"), "pre-elevation removal retains restoration records");
-                        phases.Add("prepare");
-                    }
-                    else { check(start.ArgumentList.Contains(Path.Combine(root, "Install.ps1")), "failed elevation restores existing user integration"); phases.Add("recover"); }
-                    return Task.CompletedTask;
-                }
-                try
-                {
-                    await Setup.Remove(root, Integrate, start =>
-                    {
-                        check(phases.SequenceEqual(["prepare"]), "synthetic start failure occurs after the per-user phase");
-                        check(start.UseShellExecute && start.Verb == "runas" && start.WindowStyle == ProcessWindowStyle.Hidden &&
-                            start.ArgumentList.Contains(Environment.ProcessId.ToString()) && start.ArgumentList.Contains(user.Value),
-                            "removal uses hidden elevation and waits for the initiating process");
-                        phases.Add("start"); throw failure;
-                    });
-                    throw new Exception("Synthetic removal failure was ignored.");
-                }
-                catch (Exception ex) when (ReferenceEquals(ex, failure)) { }
-                check(phases.SequenceEqual(["prepare", "start", "recover"]), "cancellation/start failure recovers before returning the original error");
-            }
-            var cancelled = new Win32Exception(1223);
-            var recoveryFailure = new IOException("Synthetic recovery failure.");
+            foreach (var path in paths) File.WriteAllBytes(path, [1, 2]);
+            var denied = new Win32Exception(5);
+            var failure = WindowsFiles.Error(root, denied);
+            Expect(failure, () => Deployment.DeleteFiles(root, names, () => throw failure));
+            Require(paths.All(path => File.ReadAllBytes(path).AsSpan().SequenceEqual(new byte[] { 1, 2 })),
+                "Failed removal lost the uninstall target or manifest.");
+            Deployment.DeleteFiles(root, names);
+            Require(paths.All(path => !File.Exists(path)), "Removal retry left payload files.");
+        }
+        finally { Directory.Delete(root, recursive: true); }
+        Console.WriteLine("PASS removal retains files until commit and permits retry");
+    }
+
+    private static void CheckMachineUpgrade()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        Require(new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator),
+            "Machine setup checks require an elevated disposable Windows fixture.");
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "HytaleAccounts-check-" + Guid.NewGuid().ToString("N"));
+        var acl = new DirectorySecurity();
+        acl.SetSecurityDescriptorSddlForm("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)");
+        FileSystemAclExtensions.CreateDirectory(acl, root);
+        try
+        {
+            var live = Directory.CreateDirectory(Path.Combine(root, "live")).FullName;
+            var source = Directory.CreateDirectory(Path.Combine(root, "source")).FullName;
+            using var pin = new WindowsFiles.DirectoryPin(live, machine: true, forMutation: true);
+            var names = WritePayload(live, "0.1.5", 5, "Retired.dll");
+            var incoming = WritePayload(source, "0.1.6", 6, "New.dll");
+            var prefix = ".upgrade-" + Guid.NewGuid().ToString("N") + "-";
+            var empty = Path.Combine(live, prefix + Deployment.Executable + ".new");
+            File.WriteAllBytes(empty, [9]);
+            var emptyAcl = new FileSecurity();
+            emptyAcl.SetSecurityDescriptorSddlForm("O:BAD:P");
+            new FileInfo(empty).SetAccessControl(emptyAcl);
             try
             {
-                await Setup.Remove(root, start => start.ArgumentList.Contains("-KeepJournal") ? Task.CompletedTask : Task.FromException(recoveryFailure), _ => throw cancelled);
-                throw new Exception("Recovery failure was ignored.");
+                using var file = WindowsFiles.OpenOwned(empty);
+                throw new IOException("The historical artifact allowed a generic open.");
             }
-            catch (AggregateException ex)
-            {
-                check(ex.InnerExceptions.SequenceEqual(new Exception[] { cancelled, recoveryFailure }), "failed immediate recovery reports both errors and leaves retained state for background repair");
-            }
-            var successfulPhases = new List<string>();
-            await Setup.Remove(root, start =>
-            {
-                check(start.ArgumentList.Contains(Path.Combine(root, "Uninstall.ps1")), "successful removal only invokes user uninstall");
-                successfulPhases.Add(start.ArgumentList.Contains("-KeepJournal") ? "prepare" : "finalize");
-                return Task.CompletedTask;
-            }, start =>
-            {
-                successfulPhases.Add("start");
-                var removalAttempt = start.ArgumentList[start.ArgumentList.IndexOf("-RemovalAttempt") + 1];
-                _ = Task.Run(() =>
-                {
-                    using var confirmed = EventWaitHandleAcl.OpenExisting("Local\\HytaleAccounts-Uninstall-" + removalAttempt + "-confirmed", EventWaitHandleRights.Synchronize);
-                    using var received = EventWaitHandleAcl.OpenExisting("Local\\HytaleAccounts-Uninstall-" + removalAttempt + "-received", EventWaitHandleRights.Modify);
-                    if (confirmed.WaitOne(TimeSpan.FromSeconds(10))) received.Set();
-                });
-            });
-            check(successfulPhases.SequenceEqual(["prepare", "start", "finalize"]), "successful start finalizes user restoration before the parent exits");
+            catch (IOException error) when (error.InnerException is Win32Exception { NativeErrorCode: 5 }) { }
+            Require(Deployment.RecoverPayload(pin, "0.1.5").GetAwaiter().GetResult()?.Version == "0.1.5",
+                "Setup rejected the valid payload.");
+            Deployment.CleanUpgradeArtifacts(pin, names);
+            Require(!File.Exists(empty), "Same-version repair left the historical artifact.");
 
-            using (var directories = new SetupPayload.PinnedDirectories(root, false))
-            using (var source = SetupPayload.OpenSource(executable))
-            using (var runtime = new SetupPayload.RuntimeSources(root))
+            var linked = Path.Combine(live, prefix + "LICENSE.new");
+            var license = Path.Combine(live, "LICENSE");
+            if (!CreateHardLink(linked, license, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            try
             {
-                foreach (var name in SetupPayload.RuntimeFiles)
-                    Reject(() => File.WriteAllText(Path.Combine(root, name), "substituted"), "runtime source overwrite blocked across elevation: " + name);
-                using (var directoryWriter = OpenDirectory(root, 0x40000000, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero))
-                    check(directoryWriter.IsInvalid && Marshal.GetLastWin32Error() == 32,
-                        "pinned directory denies write handles needed for in-place reparse conversion");
-                Reject(() => File.WriteAllText(executable, "substituted"), "source overwrite blocked during elevation/copy");
-                Reject(() => File.Move(executable, executable + ".moved"), "source replacement blocked");
-                Reject(() => Directory.Move(root, root + "-moved"), "source ancestor rename blocked");
-                File.WriteAllText(Path.Combine(root, "Install.ps1"), "throw 'untrusted loose script'");
-                using (var package = SetupPayload.Extract(stage, source, Resource, fixtureAcl, runtime))
-                {
-                    foreach (var name in SetupPayload.Scripts.Concat(SetupPayload.RuntimeFiles).Concat(["HytaleAccounts.exe"]))
-                    {
-                        var payload = Path.Combine(stage, name);
-                        Reject(() => File.WriteAllText(payload, "substituted"), "payload overwrite blocked: " + name);
-                        Reject(() => File.Delete(payload), "payload replacement blocked: " + name);
-                    }
-                    var hostilePath = Path.Combine(root, "quote's & $path", "end\\");
-                    var elevation = Setup.ElevationStart(executable, hostilePath, root);
-                    var command = Encoding.Unicode.GetString(Convert.FromBase64String(elevation.ArgumentList[^1]));
-                    check(elevation.FileName == Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe") &&
-                        elevation.Verb == "runas" && elevation.UseShellExecute && elevation.WindowStyle == ProcessWindowStyle.Hidden &&
-                        elevation.WorkingDirectory == Environment.SystemDirectory && elevation.ArgumentList[^2] == "-EncodedCommand" &&
-                        command.EndsWith("Invoke-ElevatedRuntime '" + executable.Replace("'", "''") + "' '" + hostilePath.Replace("'", "''") + "' '" + root.Replace("'", "''") + "' '" + user.Value + "'"),
-                        "UAC targets system PowerShell bootstrap before apphost, with literal encoded shortcut paths");
-                    var start = Setup.InstallStart(stage, root, root);
-                    check(!start.UseShellExecute && start.CreateNoWindow && start.Verb == "" && start.WindowStyle == ProcessWindowStyle.Hidden &&
-                        start.WorkingDirectory == stage && start.ArgumentList.Contains(Path.Combine(stage, "Install.ps1")) &&
-                        start.Environment["PSModulePath"] == Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "Modules"),
-                        "PowerShell runs hidden with staged scripts and system modules, without runas");
-                    var preflight = Setup.ShortcutPreflightStart(stage, root, root);
-                    check(!preflight.UseShellExecute && preflight.Verb == "" && preflight.CreateNoWindow &&
-                        preflight.RedirectStandardError && preflight.ArgumentList.Contains("-PreflightOnly") &&
-                        !preflight.ArgumentList.Contains("-UserOnly") && preflight.ArgumentList.Contains(Path.Combine(stage, "Install.ps1")),
-                        "shortcut preflight uses the embedded installer unelevated and hidden, preserving errors for setup");
-                    using var child = Process.Start(start)!;
-                    await child.WaitForExitAsync();
-                    check(child.ExitCode == 0 && File.ReadAllText(Path.Combine(root, "installed.bin")) == "synthetic installer image" &&
-                        File.ReadAllText(Path.Combine(root, "installed-script.bin")) == "embedded synthetic InstallerSafety.ps1" &&
-                        File.ReadAllText(Path.Combine(stage, "install-error.txt")) == "synthetic script ran",
-                        "synthetic execution/installation consumes locked payloads, ignoring loose scripts");
-                    foreach (var remove in new[] { false, true })
-                    {
-                        var userStart = Setup.UserIntegrationStart(root, remove);
-                        check(!userStart.UseShellExecute && userStart.Verb == "" && userStart.CreateNoWindow &&
-                            userStart.ArgumentList.Contains("-UserOnly") && userStart.ArgumentList.Contains(Path.Combine(root, remove ? "Uninstall.ps1" : "Install.ps1")),
-                            "per-user shortcut phase inherits unelevated token: " + (remove ? "removal" : "installation"));
-                    }
-                    var launcher = Setup.LauncherStart(root);
-                    check(!launcher.UseShellExecute && launcher.Verb == "" && launcher.CreateNoWindow &&
-                        new[] { "APPDATA", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP" }.All(k => launcher.Environment[k] == Environment.GetEnvironmentVariable(k)),
-                        "launcher inherits parent token/profile without environment overrides");
-                }
-                check(!Directory.Exists(stage), "staging and diagnostics cleaned after success");
+                Deployment.CleanUpgradeArtifacts(pin, names);
+                throw new IOException("Setup removed a hard-linked artifact.");
             }
-            var sidecar = Path.Combine(root, SetupPayload.RuntimeFiles[0]);
-            var originalAcl = new FileInfo(sidecar).GetAccessControl();
-            var foreignAcl = new FileInfo(sidecar).GetAccessControl();
-            foreignAcl.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), FileSystemRights.Modify, AccessControlType.Allow));
-            new FileInfo(sidecar).SetAccessControl(foreignAcl);
-            Reject(() => { using var runtime = new SetupPayload.RuntimeSources(root); }, "foreign-writable runtime source rejected before elevation/staging");
-            new FileInfo(sidecar).SetAccessControl(originalAcl);
-            File.Delete(sidecar);
-            Reject(() => { using var runtime = new SetupPayload.RuntimeSources(root); }, "incomplete runtime package rejected");
-            File.WriteAllText(sidecar, "synthetic runtime restored");
-            Directory.CreateDirectory(stage);
-            File.WriteAllText(Path.Combine(stage, "foreign.txt"), "preserve");
-            using (var source = SetupPayload.OpenSource(executable))
-                Reject(() => SetupPayload.Extract(stage, source, Resource, fixtureAcl), "pre-existing staging rejected without adoption/cleanup");
-            check(File.ReadAllText(Path.Combine(stage, "foreign.txt")) == "preserve", "pre-existing contents preserved");
-            Cleanup(stage);
-            using (var source = SetupPayload.OpenSource(executable))
-                Reject(() => SetupPayload.Extract(stage, source, _ => throw new IOException("missing resource fixture"), fixtureAcl), "missing embedded resource fails closed");
-            check(!Directory.Exists(stage), "partial extraction cleaned without execution");
-            using (var source = new ProbeStream(() =>
-            {
-                Reject(() => Directory.Move(stage, stage + "-moved"), "empty staging directory is pinned before the first payload bytes");
-                using var writer = OpenDirectory(stage, 0x40000000, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
-                check(writer.IsInvalid && Marshal.GetLastWin32Error() == 32, "empty staging cannot acquire a reparse writer during extraction");
-            }))
-            using (var package = SetupPayload.Extract(stage, source, Resource, fixtureAcl))
-                check(File.ReadAllText(Path.Combine(stage, "HytaleAccounts.exe")) == "synthetic probe", "pinned extraction completes normally");
-            using (var source = SetupPayload.OpenSource(executable))
-            using (var package = SetupPayload.Extract(stage, source,
-                name => new MemoryStream(Encoding.UTF8.GetBytes(name == "Install.ps1" ? "exit 23" : "unused synthetic resource")), fixtureAcl))
-            {
-                using var child = Process.Start(Setup.InstallStart(stage, root, root))!;
-                await child.WaitForExitAsync();
-                check(child.ExitCode == 23, "synthetic script failure preserves the nonzero exit status");
-            }
-            check(!Directory.Exists(stage), "staging cleaned after synthetic script failure");
-            Directory.CreateDirectory(stage);
-            var link = Path.Combine(root, "link");
-            var junction = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe")) { UseShellExecute = false, CreateNoWindow = true };
-            junction.Arguments = $"/c mklink /J \"{link}\" \"{stage}\"";
-            using (var child = Process.Start(junction)!) { await child.WaitForExitAsync(); check(child.ExitCode == 0, "synthetic junction created"); }
-            Reject(() => { using var pinned = new SetupPayload.PinnedDirectories(link, false); }, "linked source/staging ancestors rejected");
-            using (var source = SetupPayload.OpenSource(executable))
-                Reject(() => SetupPayload.Extract(link, source, Resource, fixtureAcl), "preplanted staging junction rejected");
-            var hardlink = Path.Combine(root, "hardlink.exe");
-            if (!CreateHardLink(hardlink, executable, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            Reject(() => { using var input = SetupPayload.OpenSource(executable); }, "hard-linked executable payload rejected");
+            catch (IOException error) when (error.Message.Contains("unexpected file type", StringComparison.Ordinal)) { }
+            Require(File.Exists(linked) && File.Exists(license), "Setup changed a hard-linked artifact.");
+            File.Delete(linked);
+
+            var failure = WindowsFiles.Error(live, new Win32Exception(5));
+            Expect(failure, () => Deployment.Publish(pin, incoming, ["Retired.dll"], name => WindowsFiles.Open(Path.Combine(source, name)),
+                () => Task.FromException(failure)).GetAwaiter().GetResult());
+            Require(Deployment.ReadPayload(live).Version == "0.1.5" && !File.Exists(Path.Combine(live, "New.dll")),
+                "A failed setup commit did not recover the previous payload.");
+
+            var backup = Path.Combine(live, prefix + "LICENSE.bak");
+            File.Copy(license, backup);
+            File.Copy(Path.Combine(source, "LICENSE"), license, overwrite: true);
+            Require(Deployment.RecoverPayload(pin, "0.1.5").GetAwaiter().GetResult()?.Version == "0.1.5" &&
+                Deployment.ReadPayload(live).Version == "0.1.5" && File.Exists(backup),
+                "Setup did not recover the interrupted payload.");
+            Deployment.CleanUpgradeArtifacts(pin, names);
+
+            foreach (var name in names) File.Move(Path.Combine(live, name), Path.Combine(live, prefix + name + ".bak"));
+            foreach (var name in incoming) File.Copy(Path.Combine(source, name), Path.Combine(live, name));
+            Require(Deployment.RecoverPayload(pin, "0.1.5").GetAwaiter().GetResult()?.Version == "0.1.5" &&
+                Deployment.ReadPayload(live).Version == "0.1.5" && !File.Exists(Path.Combine(live, "New.dll")),
+                "Setup did not recover the registered payload after an interruption.");
         }
-        finally { Cleanup(root); }
+        finally { Directory.Delete(root, recursive: true); }
+        Console.WriteLine("PASS checked historical cleanup, interrupted setup and rollback");
     }
-    private sealed class ProbeStream(Action probe) : MemoryStream(Encoding.UTF8.GetBytes("synthetic probe"))
+
+    private static string[] WritePayload(string root, string version, byte content, string sidecar)
     {
-        public override void CopyTo(Stream destination, int bufferSize) { probe(); base.CopyTo(destination, bufferSize); }
+        var files = new[] { Deployment.Executable, "LICENSE", "THIRD-PARTY-NOTICES.txt", sidecar }.Select(name =>
+        {
+            byte[] bytes = [content];
+            File.WriteAllBytes(Path.Combine(root, name), bytes);
+            return new Deployment.PayloadFile(name, Convert.ToHexStringLower(SHA256.HashData(bytes)));
+        }).ToArray();
+        File.WriteAllBytes(Path.Combine(root, Deployment.Manifest), JsonSerializer.SerializeToUtf8Bytes(new Deployment.Payload(version, files)));
+        return files.Select(file => file.Name).Where(name => name != Deployment.Executable).Append(Deployment.Manifest).Append(Deployment.Executable).ToArray();
     }
+
+    private static void Expect(Exception expected, Action action)
+    {
+        try { action(); }
+        catch (Exception error) when (error == expected) { return; }
+        throw new IOException("Setup did not report the original failure.");
+    }
+
+    private static void Require(bool condition, string message)
+    {
+        if (!condition) throw new IOException(message);
+    }
+
     [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreateHardLink(string path, string existing, IntPtr security);
-    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle OpenDirectory(string path, uint access, uint share,
-        IntPtr security, uint mode, uint flags, IntPtr template);
+    private static extern bool CreateHardLink(string path, string target, IntPtr reserved);
+
+    private static void CheckMachineShortcutBackupPermissions()
+    {
+        const string fixture = "machine shortcut backup fixture";
+        var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var acl = WindowsPermissions.MachineShortcutBackupAcl();
+        WindowsPermissions.RequireMachine(acl, fixture);
+        if (!Equals(acl.GetOwner(typeof(SecurityIdentifier)), administrators) || !acl.AreAccessRulesProtected)
+            throw new IOException("The backup needs an Administrators owner and a protected ACL.");
+
+        var rules = acl.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
+            .OfType<FileSystemAccessRule>().ToArray();
+        bool Allows(SecurityIdentifier sid, FileSystemRights rights) => rules.Any(rule =>
+            Equals(rule.IdentityReference, sid) && rule.AccessControlType == AccessControlType.Allow && rule.FileSystemRights == rights);
+        if (rules.Length != 3 || !Allows(system, FileSystemRights.FullControl) || !Allows(administrators, FileSystemRights.FullControl) ||
+            !Allows(users, FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize))
+            throw new IOException("The backup ACL must give standard users read access and reserve writes for SYSTEM and Administrators.");
+
+        var oldAcl = WindowsPermissions.PrivateAcl<FileSecurity>();
+        oldAcl.SetOwner(administrators);
+        RejectMutation(fixture, () => WindowsPermissions.RequireMachine(oldAcl, fixture));
+        Console.WriteLine("PASS machine shortcut backup owner and access rules");
+    }
+
+    private static void CheckInheritedShortcutDelete()
+    {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "hytale-shortcut-delete-check-" + Guid.NewGuid().ToString("N"));
+        WindowsPermissions.CreatePrivateDirectory(root);
+        try
+        {
+            var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+            var parent = new DirectoryInfo(root);
+            var acl = parent.GetAccessControl();
+            acl.AddAccessRule(new FileSystemAccessRule(users, FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles,
+                InheritanceFlags.ObjectInherit, PropagationFlags.InheritOnly, AccessControlType.Allow));
+            parent.SetAccessControl(acl);
+
+            var shortcut = Path.Combine(root, "Hytale Launcher.lnk");
+            File.WriteAllBytes(shortcut, [1]);
+            RejectMutation(shortcut, () => { using var file = WindowsFiles.OpenOwned(shortcut); });
+            using (var file = WindowsFiles.OpenMachineShortcut(shortcut)) file.Write([2]);
+            using (var file = WindowsFiles.OpenMachineShortcut(shortcut))
+            {
+                if (!file.Read().AsSpan().SequenceEqual(new byte[] { 2 }))
+                    throw new IOException("Setup did not update the machine shortcut.");
+                file.Write([1]);
+            }
+            if (!File.ReadAllBytes(shortcut).AsSpan().SequenceEqual(new byte[] { 1 }))
+                throw new IOException("Setup did not restore the machine shortcut.");
+
+            var info = new FileInfo(shortcut);
+            var fileAcl = info.GetAccessControl();
+            var explicitDelete = new FileSystemAccessRule(users, FileSystemRights.Delete, AccessControlType.Allow);
+            fileAcl.AddAccessRule(explicitDelete);
+            info.SetAccessControl(fileAcl);
+            RejectMutation(shortcut, () => { using var file = WindowsFiles.OpenMachineShortcut(shortcut); });
+            fileAcl.RemoveAccessRuleSpecific(explicitDelete);
+            info.SetAccessControl(fileAcl);
+
+            foreach (var right in new[] { FileSystemRights.CreateFiles, FileSystemRights.DeleteSubdirectoriesAndFiles })
+            {
+                var replacement = new FileSystemAccessRule(users, right, AccessControlType.Allow);
+                acl.AddAccessRule(replacement);
+                parent.SetAccessControl(acl);
+                RejectMutation(root, () => { using var file = WindowsFiles.OpenMachineShortcut(shortcut); });
+                acl.RemoveAccessRuleSpecific(replacement);
+                parent.SetAccessControl(acl);
+            }
+
+            acl.AddAccessRule(new FileSystemAccessRule(users, FileSystemRights.WriteAttributes,
+                InheritanceFlags.ObjectInherit, PropagationFlags.InheritOnly, AccessControlType.Allow));
+            parent.SetAccessControl(acl);
+            RejectMutation(shortcut, () => { using var file = WindowsFiles.OpenMachineShortcut(shortcut); });
+        }
+        finally { Directory.Delete(root, recursive: true); }
+        Console.WriteLine("PASS machine shortcut update and restoration with inherited delete rights");
+    }
+
+    private static void CheckShortcutPermissions()
+    {
+        const string programDataAcl = "O:SYG:SYD:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;0x116;;;BU)";
+        var descriptor = new DirectorySecurity();
+        descriptor.SetSecurityDescriptorSddlForm(programDataAcl);
+        WindowsPermissions.RequireMachine(descriptor, "ProgramData fixture", ancestor: true);
+
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "hytale-shortcut-acl-check-" + Guid.NewGuid().ToString("N"));
+        WindowsPermissions.CreatePrivateDirectory(root);
+        try
+        {
+            var child = Path.Combine(root, "protected");
+            WindowsPermissions.CreatePrivateDirectory(child);
+            var shortcut = Path.Combine(child, "Hytale Launcher.lnk");
+            File.WriteAllBytes(shortcut, [1]);
+            var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+            var directory = new DirectoryInfo(root);
+            var acl = directory.GetAccessControl();
+            acl.AddAccessRule(new FileSystemAccessRule(users, (FileSystemRights)0x116,
+                InheritanceFlags.ContainerInherit, PropagationFlags.None, AccessControlType.Allow));
+            directory.SetAccessControl(acl);
+
+            using (var file = WindowsFiles.OpenOwned(shortcut)) file.Write([2]);
+            if (!File.ReadAllBytes(shortcut).AsSpan().SequenceEqual(new byte[] { 2 }))
+                throw new IOException("Setup could not update a protected shortcut.");
+            RejectMutation(root, () => { using var pin = new WindowsFiles.DirectoryPin(root); });
+
+            var shortcutInfo = new FileInfo(shortcut);
+            var fileAcl = shortcutInfo.GetAccessControl();
+            var fileRule = new FileSystemAccessRule(users, FileSystemRights.WriteAttributes, AccessControlType.Allow);
+            fileAcl.AddAccessRule(fileRule);
+            shortcutInfo.SetAccessControl(fileAcl);
+            RejectMutation(shortcut, () => { using var file = WindowsFiles.OpenOwned(shortcut); });
+            fileAcl.RemoveAccessRuleSpecific(fileRule);
+            shortcutInfo.SetAccessControl(fileAcl);
+
+            acl.AddAccessRule(new FileSystemAccessRule(users, FileSystemRights.DeleteSubdirectoriesAndFiles, AccessControlType.Allow));
+            directory.SetAccessControl(acl);
+            RejectMutation(root, () => { using var file = WindowsFiles.OpenOwned(shortcut); });
+        }
+        finally { Directory.Delete(root, recursive: true); }
+        Console.WriteLine("PASS setup shortcut permissions for ancestors, leaves and files");
+    }
+
+    private static void RejectMutation(string path, Action open)
+    {
+        try { open(); }
+        catch (IOException error) when (error.Message.StartsWith($"Unsafe mutation permissions on '{path}'", StringComparison.Ordinal)) { return; }
+        throw new IOException($"Setup accepted unsafe permissions on '{path}'.");
+    }
+
+    private static void Reject(Deployment.Payload payload)
+    {
+        try { _ = Deployment.ParsePayload(JsonSerializer.SerializeToUtf8Bytes(payload)); }
+        catch (IOException) { return; }
+        throw new IOException("Setup accepted an invalid package manifest.");
+    }
 }

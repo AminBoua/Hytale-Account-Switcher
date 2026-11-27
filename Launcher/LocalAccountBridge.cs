@@ -7,7 +7,7 @@ using System.Text.Json;
 
 namespace HytaleAccounts;
 
-public sealed class LocalAccountBridge : IAsyncDisposable
+internal sealed class LocalAccountBridge : IAsyncDisposable
 {
     public const string Origin = "http://wails.localhost";
     private readonly HttpListener listener = new();
@@ -134,7 +134,10 @@ public sealed class LocalAccountBridge : IAsyncDisposable
         }
     }
     private static async Task Write(HttpListenerResponse response, byte[] data, CancellationToken ct)
-    { response.ContentLength64 = data.Length; await response.OutputStream.WriteAsync(data, ct); }
+    {
+        response.ContentLength64 = data.Length;
+        await response.OutputStream.WriteAsync(data.AsMemory(), ct).AsTask().WaitAsync(ct);
+    }
     public async ValueTask DisposeAsync()
     {
         if (disposed) return;
