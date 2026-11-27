@@ -7,10 +7,12 @@ Add and switch Hytale accounts in the existing launcher window. The addon keeps 
 1. Install the official Hytale Launcher in its standard Program Files location.
 2. Close Hytale and the launcher.
 3. Compare the ZIP SHA-256 with the hash from the same build.
-4. Extract the complete ZIP.
-5. Open **HytaleAccounts-Setup.exe** from your normal Windows desktop.
+4. Right-click the ZIP and select **Extract All**.
+5. Open **HytaleAccounts-Setup.exe** from the extracted folder as your normal Windows user.
 6. Approve the Windows setup prompt.
 7. Use the existing Hytale Launcher entry.
+
+**Setup fails if you run the EXE from inside the ZIP because it needs the other files in the extracted folder.**
 
 After sign-in, open the profile dropdown. Select **Add account** to open Hytale sign-in in your default browser. Use **Cancel login** to return to the previous account. Select a saved account to switch in the same launcher window. Close the game before changing accounts.
 
