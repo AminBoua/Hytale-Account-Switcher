@@ -2,6 +2,8 @@
 
 Add and switch Hytale accounts in the existing launcher window. The addon keeps the existing Hytale Launcher shortcuts and Windows search entry. Hytale controls sign-in, logout, and Play.
 
+![Switching between two saved accounts in the Hytale Launcher](https://yourimageshare.com/ib/RlQVH8vG2F.gif)
+
 ## Install and use
 
 1. Install the official Hytale Launcher in its standard Program Files location.
