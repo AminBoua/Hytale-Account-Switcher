@@ -10,6 +10,7 @@
   const url = new URL(document.currentScript.src);
   const capability = url.pathname.split('/')[1];
   let state, user, pending = false, signature = '', reported = '', loginSince = 0, loginOpened = '', loginCompleted = '';
+  let reportedReadyRequest, readinessEvent, loginFailure;
   let logoutResult, sessionResult, sessionReloaded, updating = false;
   let nativeWork, userLoad, uncertain = false;
   let signInRetryAt = 0, signInRetryDelay = 250;
@@ -62,12 +63,20 @@
     if (!current()) throw withdrawn;
     return result;
   }
+  function unavailable(action) {
+    if (action === 'cancel') return !state?.login;
+    return !state || state.busy || state.login ||
+      (action === 'add' && (!state.profile || state.holdLogin || state.signInRecovery));
+  }
   async function command(action, store) {
-    if (!state || ((state.busy || state.login) && action !== 'cancel') || pending) return;
+    if (pending || unavailable(action)) return;
     const loginRequest = state.login;
+    const requestId = state.readyRequest;
+    if (action !== 'cancel' && requestId && state.profile && user?.getUserProfile?.uuid !== state.profile) return;
     pending = action; commandVersion++;
     if (action === 'cancel') { loginCompleted = ''; reported = ''; }
-    try { await request('command', { action, ...(store ? { store } : {}), ...(action === 'cancel' ? { loginRequest } : {}) }); }
+    try { await request('command', { action, ...(store ? { store } : {}),
+      ...(action === 'cancel' ? { loginRequest } : requestId ? { request: requestId } : {}) }); }
     catch (error) { alert(error.message); }
     finally {
       // Discard polls started before this command; never allow Play against stale switch state.
@@ -107,7 +116,7 @@
       item.className = 'hy-dropdown__item'; item.dataset.nativeStore = id;
       scopes.forEach(name => item.setAttribute(name, ''));
       item.setAttribute('role', 'option'); item.setAttribute('aria-selected', String(id === state.active));
-      const disabled = (state.busy || !!state.login) && action !== 'cancel';
+      const disabled = !!unavailable(action);
       item.setAttribute('aria-disabled', String(disabled)); item.tabIndex = disabled ? -1 : 0;
       item.title = state.message;
       const text = document.createElement('span'); text.textContent = label; item.append(text);
@@ -116,7 +125,7 @@
       item.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') activate(event); });
       list.append(item);
     }
-    state.stores.filter(store => !store.signedOut).forEach(store => row(store.label, store.id, 'select'));
+    state.stores.forEach(store => row(store.label, store.id, 'select'));
     row(state.login ? 'Cancel login' : 'Add account', '', state.login ? 'cancel' : 'add');
     // Verified Play retains its native handler; settings has its own independent control.
   }
@@ -132,9 +141,16 @@
       if (sessionResult?.request !== state.session?.request) sessionResult = null;
       if (logoutResult?.request !== state.logout) logoutResult = null;
       const loginRequest = state.login;
+      if (loginFailure?.request !== loginRequest) loginFailure = null;
+      const readyRequest = state.readyRequest;
+      if (readyRequest !== reportedReadyRequest) { reported = ''; loginSince = 0; reportedReadyRequest = readyRequest; }
+      if (readinessEvent && !state.busy) {
+        if (readinessEvent === readyRequest && !loginRequest && !state.profile && !state.holdLogin) reported = '';
+        readinessEvent = null;
+      }
       const sessionRequest = state.session?.request, logoutRequest = state.logout;
       const current = () => version === commandVersion && state?.login === loginRequest &&
-        state?.session?.request === sessionRequest && state?.logout === logoutRequest;
+        state?.session?.request === sessionRequest && state?.logout === logoutRequest && state?.readyRequest === readyRequest;
       const confirmCurrent = async () => {
         const latest = await request('state');
         if (version !== commandVersion) return false;
@@ -148,7 +164,11 @@
       if (!listening && window.runtime?.EventsOn) {
         for (const event of ['reload', 'profile_changed'])
           window.runtime.EventsOn(event, () => {
-            if (pending !== 'cancel' && state?.login && loginOpened === state.login) { loginCompleted = loginOpened; reported = ''; wake(); }
+            if (pending !== 'cancel' && state?.login && loginOpened === state.login && loginFailure?.request !== state.login) { loginCompleted = loginOpened; reported = ''; wake(); }
+            else if (!pending && state?.readyRequest && !state.login && !state.profile && !state.holdLogin) {
+              readinessEvent = state.readyRequest;
+              wake();
+            }
           });
         listening = true;
       }
@@ -219,24 +239,31 @@
         }
         return;
       }
-      if (loginRequest && loginOpened !== loginRequest) {
+      if (loginRequest && !loginFailure && loginOpened !== loginRequest) {
         loginCompleted = '';
         try {
           const authorization = new URL(await native(() => window.go.account.Service.GenerateOauthURL()));
           if (!await confirmCurrent()) return;
-          if (authorization.protocol !== 'https:' || authorization.hostname !== 'oauth.accounts.hytale.com') throw new Error('Invalid native login URL.');
+          if (authorization.origin !== 'https://oauth.accounts.hytale.com' || authorization.username || authorization.password)
+            throw new Error('Invalid native login URL.');
           authorization.searchParams.set('prompt', 'login');
           loginOpened = loginRequest;
           await native(() => window.runtime.BrowserOpenURL(authorization.href));
         } catch {
-          if (current()) { await request('command', { action: 'login-failed', loginRequest }); wake(); }
-          return;
+          if (!current()) return;
+          loginFailure = { request: loginRequest, reported: false };
         }
       }
       if (!current()) return;
-      if (loginRequest && location.pathname.startsWith('/error')) {
-        await request('command', { action: 'login-failed', loginRequest });
-        wake();
+      if (loginRequest && !loginFailure && location.pathname.startsWith('/error'))
+        loginFailure = { request: loginRequest, reported: false };
+      if (loginFailure) {
+        if (!loginFailure.reported && !state.busy) {
+          const failure = loginFailure;
+          await request('command', { action: 'login-failed', loginRequest });
+          failure.reported = true;
+          wake();
+        }
         return;
       }
       if (!user) return;
@@ -251,8 +278,18 @@
       if (!profile && document.querySelector('.login__container')) loginSince ||= Date.now();
       else loginSince = 0;
       const identity = profile || 'signed-out';
-      if ((!loginRequest || loginCompleted === loginRequest) && reported !== identity && (profile || (loginSince && Date.now() - loginSince >= 3000))) {
+      if ((!Object.hasOwn(state, 'readyRequest') || readyRequest || loginRequest) &&
+          (!readyRequest || profile !== state.profile) &&
+          (!readyRequest || !state.busy || state.holdLogin || loginRequest) &&
+          (!loginRequest || loginCompleted === loginRequest) && reported !== identity && (profile || (loginSince && Date.now() - loginSince >= 3000))) {
+        if (readyRequest && !loginRequest) {
+          const loggedIn = await native(() => window.go.account.Service.IsUserLoggedIn());
+          if (loggedIn !== !!profile) return;
+          if (loggedIn && (await native(() => window.go.user.Service.GetUserProfile()))?.uuid !== profile) return;
+          if (!await confirmCurrent()) return;
+        }
         await request('command', { action: 'ready', profile: profile ?? null, username: user.getUserProfile?.username ?? null,
+          ...(readyRequest ? { readyRequest } : {}),
           ...(loginRequest ? { loginRequest } : {}) });
         if (current()) reported = identity;
         wake();
@@ -262,7 +299,7 @@
     finally {
       updating = false;
       // Keep the idle poll quiet; advance native transitions without one-second gaps.
-      if (pending || state?.busy || state?.session || state?.logout || sessionResult || logoutResult) {
+      if (pending || state?.busy || state?.session || state?.logout || sessionResult || logoutResult || (loginFailure && !loginFailure.reported)) {
         clearTimeout(fastUpdate);
         fastUpdate = setTimeout(update, 25);
       } else if (state?.signInRecovery && !nativeWork && !userLoad) {

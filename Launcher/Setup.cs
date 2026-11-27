@@ -1,233 +1,218 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Reflection;
-using System.Security.AccessControl;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace HytaleAccounts;
 
-public static class Setup
+internal static class Setup
 {
-    internal static EventWaitHandle RemovalEvent(string attempt, string phase, bool acknowledge = false)
+    internal const string ApplyUser = "--apply-user-shortcuts";
+    internal const string RestoreUser = "--restore-user-shortcuts";
+    private const string InstallWorker = "--install-elevated";
+    private const string UninstallWorker = "--uninstall-elevated";
+    private static string Sid => WindowsIdentity.GetCurrent().User!.Value;
+    private static bool Elevated => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+
+    internal static async Task<int> RunAsync(string[] args)
     {
-        var security = new EventWaitHandleSecurity();
-        security.SetAccessRuleProtection(true, false);
-        // OWNER RIGHTS removes the owner's implicit WRITE_DAC; only the original handle can confirm.
-        foreach (var sid in new[] { "S-1-3-4", WindowsIdentity.GetCurrent().User!.Value, "S-1-5-32-544", "S-1-5-18" })
-            security.AddAccessRule(new EventWaitHandleAccessRule(new SecurityIdentifier(sid),
-                EventWaitHandleRights.Synchronize | (acknowledge ? EventWaitHandleRights.Modify : 0), AccessControlType.Allow));
-        var signal = EventWaitHandleAcl.Create(false, EventResetMode.ManualReset,
-            "Local\\HytaleAccounts-Uninstall-" + attempt + "-" + phase, out var created, security);
-        if (!created) { signal.Dispose(); throw new IOException("Removal confirmation already exists."); }
-        return signal;
-    }
-
-    internal const string ElevatedMode = "--install-elevated";
-    private static bool IsAdministrator => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
-
-    internal static ProcessStartInfo ElevationStart(string executable, string programs, string desktop)
-    {
-        using var resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("HytaleAccounts.ElevatedRuntime.ps1")
-            ?? throw new IOException("The protected runtime bootstrap is missing.");
-        using var reader = new StreamReader(resource);
-        var command = reader.ReadToEnd() + "\nInvoke-ElevatedRuntime " + string.Join(" ",
-            new[] { executable, programs, desktop, WindowsIdentity.GetCurrent().User!.Value }.Select(value => "'" + value.Replace("'", "''") + "'"));
-        // Elevate system PowerShell first: managed startup cannot protect libraries already loaded by apphost.
-        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"))
-        { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Environment.SystemDirectory };
-        foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-EncodedCommand",
-            Convert.ToBase64String(Encoding.Unicode.GetBytes(command)) }) start.ArgumentList.Add(arg);
-        return start;
-    }
-
-    internal static ProcessStartInfo InstallStart(string package, string programs, string desktop, string? userSid = null)
-    {
-        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"))
-        { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = package };
-        foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File",
-            Path.Combine(package, "Install.ps1"), "-ProgramsDirectory", programs, "-DesktopDirectory", desktop }) start.ArgumentList.Add(arg);
-        if (userSid != null) { start.ArgumentList.Add("-UserSid"); start.ArgumentList.Add(userSid); }
-        // PowerShell must resolve modules and system paths only from protected system locations.
-        start.Environment["PSModulePath"] = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "Modules");
-        start.Environment["ProgramFiles"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-        start.Environment["SystemRoot"] = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-        return start;
-    }
-
-    internal static ProcessStartInfo LauncherStart(string destination) =>
-        new(Path.Combine(destination, "HytaleAccounts.exe")) { UseShellExecute = false, CreateNoWindow = true };
-
-    internal static ProcessStartInfo ShortcutPreflightStart(string package, string programs, string desktop)
-    {
-        var start = InstallStart(package, programs, desktop);
-        start.ArgumentList.Add("-PreflightOnly");
-        start.RedirectStandardError = true;
-        return start;
-    }
-
-    private static Stream Resource(string name) =>
-        Assembly.GetExecutingAssembly().GetManifestResourceStream("HytaleAccounts." + name) ?? throw new IOException("Setup resource is missing: " + name);
-
-    internal static async Task RunElevated(string[] args)
-    {
-        if (args.Length != 4 || args[0] != ElevatedMode || !IsAdministrator)
-            throw new IOException("The installer worker requires administrator elevation and two shortcut locations and a user SID.");
-        foreach (var path in args.Skip(1).Take(2))
+        if (args is [] or ["--install"])
         {
-            if (!Path.IsPathFullyQualified(path)) throw new IOException("Invalid shortcut location.");
-            NativeStores.RegularPath(path);
+            return await InstallAsync();
         }
-        if (!new SecurityIdentifier(args[3]).IsAccountSid()) throw new IOException("Invalid shortcut user SID.");
-        var executable = Environment.ProcessPath!;
-        using var sourceDirectories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(executable)!, requireTrusted: false);
-        using var source = SetupPayload.OpenSource(executable);
-        using var runtime = new SetupPayload.RuntimeSources(Path.GetDirectoryName(executable)!);
-        var programs = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-        using var parent = new SetupPayload.PinnedDirectories(programs, requireTrusted: true);
-        var launcherDirectory = Path.GetDirectoryName(IntegrationSafety.OfficialPath)!;
-        using var installation = new SetupPayload.PinnedDirectories(launcherDirectory, requireTrusted: true);
-        var destination = Path.Combine(launcherDirectory, ".hytale-accounts-addon");
-        NativeStores.RegularPath(destination);
-        // Journal File.Replace needs directory write sharing; a read-sharing pin causes Win32 error 1175 on upgrades.
-        using var existing = Directory.Exists(destination) ? new SetupPayload.PinnedDirectories(destination, requireTrusted: true, forMutation: true) : null;
-        if (existing != null)
+        if (args is ["--uninstall"])
         {
-            foreach (var path in Directory.EnumerateFileSystemEntries(destination))
+            RequireInstalled();
+            Deployment.ValidateRemoval(Sid);
+            if (Elevated) { using var desktop = StartOnDesktop(Deployment.Installed, "--uninstall", Sid); }
+            else
             {
-                using var file = SetupPayload.OpenSource(path);
-                SetupPayload.RequireTrusted(file.GetAccessControl());
+                using var package = new Deployment.PackageSources(Deployment.Destination, download: false);
+                using var worker = StartElevated(UninstallWorker, download: false, package.ManifestHash);
             }
-        }
-        using var package = SetupPayload.Extract(Path.Combine(programs, "HytaleAccounts-setup-" + Guid.NewGuid().ToString("N")), source,
-            Resource,
-            SetupPayload.Permissions(), runtime);
-        using var install = Process.Start(InstallStart(package.DirectoryPath, args[1], args[2], args[3])) ?? throw new IOException("Could not start setup.");
-        await install.WaitForExitAsync();
-        if (install.ExitCode != 0)
-        {
-            var error = Path.Combine(package.DirectoryPath, "install-error.txt");
-            NativeStores.RegularPath(error);
-            throw new IOException("Installation failed. " + (File.Exists(error) ? File.ReadAllText(error) : $"Installer exited with code {install.ExitCode}."));
-        }
-    }
-
-    internal static ProcessStartInfo UserIntegrationStart(string destination, bool uninstall)
-    {
-        var start = InstallStart(destination, Environment.GetFolderPath(Environment.SpecialFolder.Programs),
-            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
-        if (uninstall) start.ArgumentList[start.ArgumentList.IndexOf(Path.Combine(destination, "Install.ps1"))] = Path.Combine(destination, "Uninstall.ps1");
-        start.ArgumentList.Add("-UserOnly");
-        start.RedirectStandardError = true;
-        return start;
-    }
-
-    private static async Task IntegrateUser(ProcessStartInfo start)
-    {
-        using var process = Process.Start(start) ?? throw new IOException("Could not update your shortcuts.");
-        var error = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        if (process.ExitCode != 0) throw new IOException("Could not update your shortcuts. " + await error);
-    }
-
-    internal static async Task Remove(string destination, Func<ProcessStartInfo, Task> integrateUser, Action<ProcessStartInfo> startRemoval)
-    {
-        var powershell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
-        // Uninstall.ps1 restricts module discovery itself because runas cannot use a custom child environment.
-        var start = new ProcessStartInfo(powershell) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
-        foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File" }) start.ArgumentList.Add(arg);
-        var script = Path.Combine(destination, "Uninstall.ps1");
-        NativeStores.RegularPath(script);
-        if (!File.Exists(script)) throw new IOException("The addon is not installed.");
-        start.ArgumentList.Add(script);
-        start.ArgumentList.Add("-UserSid");
-        start.ArgumentList.Add(WindowsIdentity.GetCurrent().User!.Value);
-        start.ArgumentList.Add("-WaitForPid");
-        start.ArgumentList.Add(Environment.ProcessId.ToString());
-        var attempt = Guid.NewGuid().ToString("N");
-        using var confirmed = RemovalEvent(attempt, "confirmed");
-        using var received = RemovalEvent(attempt, "received", acknowledge: true);
-        start.ArgumentList.Add("-RemovalAttempt");
-        start.ArgumentList.Add(attempt);
-        start.ArgumentList.Add("-Interactive");
-        // Older installations have only the machine journal; their guarded removal handles migration.
-        var userIntegration = File.Exists(Path.Combine(destination, "ShortcutIntegration.ps1"));
-        try
-        {
-            if (userIntegration)
-            {
-                var prepare = UserIntegrationStart(destination, uninstall: true);
-                prepare.ArgumentList.Add("-KeepJournal");
-                await integrateUser(prepare);
-            }
-            // The separate hidden process waits for this executable to exit before removing it.
-            startRemoval(start);
-        }
-        catch (Exception failure)
-        {
-            if (userIntegration)
-            {
-                try { await integrateUser(UserIntegrationStart(destination, uninstall: false)); }
-                catch (Exception recovery) { throw new AggregateException("Uninstall did not start and shortcut recovery failed. The restoration journal was retained for repair.", failure, recovery); }
-            }
-            throw;
-        }
-        // Repair can run while UAC is open; restore again under the journal lock before deleting state.
-        if (userIntegration) await integrateUser(UserIntegrationStart(destination, uninstall: true));
-        confirmed.Set();
-        // Keep confirmation alive until the worker has opened and consumed it, even on a fast parent exit.
-        if (!await Task.Run(() => received.WaitOne(TimeSpan.FromSeconds(30))))
-            throw new IOException("Uninstall did not acknowledge shortcut finalization. Files were preserved; retry removal.");
-    }
-
-    public static async Task<int> Run(bool uninstall)
-    {
-        var destination = Path.Combine(Path.GetDirectoryName(IntegrationSafety.OfficialPath)!, ".hytale-accounts-addon");
-        if (uninstall)
-        {
-            if (IsAdministrator) { UninstallHandoff.Start(destination); return 0; }
-            await Remove(destination, IntegrateUser, start =>
-            {
-                using var removal = Process.Start(start) ?? throw new IOException("Could not start uninstall.");
-            });
             return 0;
         }
-        if (IsAdministrator) throw new IOException("Open HytaleAccounts-Setup.exe normally so Hytale starts as your Windows user.");
-        // Pin the approved image, native sidecars and ancestors across UAC and the worker's copy.
-        using var sourceDirectories = new SetupPayload.PinnedDirectories(Path.GetDirectoryName(Environment.ProcessPath!)!, requireTrusted: false);
-        using var source = SetupPayload.OpenSource(Environment.ProcessPath!);
-        using var runtime = new SetupPayload.RuntimeSources(Path.GetDirectoryName(Environment.ProcessPath!)!);
-        if (!await IntegrationSafety.VerifyExecutable(IntegrationSafety.OfficialPath))
-            throw new IOException(IntegrationSafety.CompatibilityMessage(IntegrationSafety.OfficialPath));
-        // Reuse the embedded installer read-only, before legacy cleanup or any request for elevation.
-        var user = WindowsIdentity.GetCurrent().User!;
-        var acl = new DirectorySecurity(); acl.SetOwner(user); acl.SetAccessRuleProtection(true, false);
-        acl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
-        using (var preflight = SetupPayload.Extract(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "HytaleAccounts-preflight-" + Guid.NewGuid().ToString("N")), source, Resource, acl, runtime))
-            await IntegrateUser(ShortcutPreflightStart(preflight.DirectoryPath, Environment.GetFolderPath(Environment.SpecialFolder.Programs),
-                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)));
-        // Remove the previous per-user package without elevating user-writable legacy code.
-        var legacy = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HytaleAccounts", "NativeLauncher", "HytaleAccounts.exe");
-        NativeStores.RegularPath(legacy);
-        if (File.Exists(legacy))
+        if (args is [InstallWorker or UninstallWorker, var user] && Elevated && user == Sid && new SecurityIdentifier(user).IsAccountSid())
         {
-            var cleanup = new ProcessStartInfo(legacy) { UseShellExecute = false, CreateNoWindow = true };
-            cleanup.ArgumentList.Add("--uninstall");
-            using var old = Process.Start(cleanup) ?? throw new IOException("Could not remove the previous addon package.");
-            await old.WaitForExitAsync();
-            for (var attempt = 0; File.Exists(legacy) && attempt < 150; attempt++) await Task.Delay(200);
-            if (File.Exists(legacy)) throw new IOException("The previous addon could not be removed. Close Hytale and try again.");
+            if (args[0] == InstallWorker) await Deployment.InstallAsync(user);
+            else await Deployment.RemoveAsync(user);
+            return 0;
         }
-        using var worker = Process.Start(ElevationStart(Environment.ProcessPath!,
-            Environment.GetFolderPath(Environment.SpecialFolder.Programs), Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)))
-            ?? throw new IOException("Could not start setup.");
+        if (args is [ApplyUser or RestoreUser] && !Elevated)
+        {
+            using var stage = Deployment.PinStage();
+            var restore = args[0] == RestoreUser;
+            using var shortcuts = new Shortcuts(Shortcuts.UserState, Shortcuts.Roots(machine: false), Sid, machine: false, writable: true, create: true);
+            shortcuts.Apply(Sid, restore);
+            if (restore) shortcuts.Clean();
+            return 0;
+        }
+        if (args is [Deployment.Repair or Deployment.UserRepair])
+        {
+            RequireInstalled();
+            await RepairAsync(args[0] == Deployment.Repair);
+            return 0;
+        }
+        throw new IOException("Unrecognized or unauthorized setup command.");
+    }
+
+    private static async Task<int> InstallAsync()
+    {
+        if (Elevated) throw new IOException("Open Hytale Accounts Setup normally from your Windows desktop.");
+        bool download = !string.Equals(Environment.ProcessPath, Deployment.Installed, StringComparison.OrdinalIgnoreCase);
+        var source = Path.GetDirectoryName(Environment.ProcessPath!)!;
+        if (download && !string.Equals(Path.GetFileName(Environment.ProcessPath), Deployment.SetupName, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Open the HytaleAccounts-Setup.exe file from the complete release package.");
+        await LauncherImage.ValidateOfficialAsync();
+        using (var common = new Shortcuts(Deployment.Destination, Shortcuts.Roots(machine: true), Sid, machine: true, writable: false))
+        using (var personal = new Shortcuts(Shortcuts.UserState, Shortcuts.Roots(machine: false), Sid, machine: false, writable: false))
+            if (!common.HasLaunchLink() && !personal.HasLaunchLink())
+                throw new IOException("No original Hytale launcher shortcut was found. Reinstall the official launcher and retry setup.");
+        using var package = new Deployment.PackageSources(source, download);
+        using var worker = StartElevated(InstallWorker, download, package.ManifestHash);
         await worker.WaitForExitAsync();
-        if (worker.ExitCode == 125) throw new IOException("Could not prepare the protected installer runtime. Check Program Files permissions and retry setup normally.");
-        if (worker.ExitCode != 0) return worker.ExitCode; // The worker already displayed the setup error.
-        await IntegrateUser(UserIntegrationStart(destination, uninstall: false));
-        using var launcher = Process.Start(LauncherStart(destination))
-            ?? throw new IOException("Installed successfully, but the launcher could not open. Use your usual Hytale Launcher shortcut.");
+        var failedOperation = worker.ExitCode switch
+        {
+            125 => "check the Windows user and setup command",
+            126 => "check the setup source directory",
+            127 => "create a protected setup directory",
+            128 => "copy and verify the setup files",
+            129 => "run the protected setup worker",
+            _ => null
+        };
+        if (failedOperation is not null)
+            throw new IOException($"Setup could not {failedOperation} (setup code {worker.ExitCode}).");
+        if (worker.ExitCode != 0) return worker.ExitCode;
+        using var launcher = Process.Start(StartInfo(Deployment.Installed)) ?? throw new IOException("Open Hytale using your usual shortcut.");
         return 0;
     }
+
+    private static Process StartElevated(string mode, bool download, string manifestHash)
+    {
+        string source = Path.GetDirectoryName(Environment.ProcessPath!)!;
+        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("HytaleAccounts.Elevation.ps1")
+            ?? throw new IOException("The protected setup bootstrap is missing.");
+        using var reader = new StreamReader(stream);
+        var values = new[] { source, download ? Deployment.SetupName : Deployment.Executable, manifestHash, mode, Sid };
+        var command = reader.ReadToEnd() + "\nInvoke-AddonWorker " + string.Join(' ', values.Select(value => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'"));
+        var start = StartInfo(Deployment.PowerShell);
+        start.UseShellExecute = true;
+        start.Verb = "runas";
+        foreach (var argument in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(command)) })
+            start.ArgumentList.Add(argument);
+        return Process.Start(start) ?? throw new IOException("Could not start the elevated setup bootstrap.");
+    }
+
+    private static ProcessStartInfo StartInfo(string executable) => new(executable)
+    {
+        UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Environment.SystemDirectory
+    };
+
+    private static void RequireInstalled()
+    {
+        if (!string.Equals(Environment.ProcessPath, Deployment.Installed, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("This command must run from the installed addon.");
+    }
+
+    private static async Task RepairAsync(bool machine)
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        if (machine ? !identity.IsSystem : Elevated) throw new IOException("The shortcut repair account does not match its scope.");
+        var state = machine ? Deployment.Destination : Shortcuts.UserState;
+        using var installation = new WindowsFiles.DirectoryPin(Deployment.Destination, machine: true, forMutation: true);
+        while (WindowsFiles.FileExists(Deployment.Installed))
+        {
+            var journal = Shortcuts.ReadJournal(state, machine);
+            if (journal is not null && WindowsFiles.FileExists(LauncherImage.OfficialPath))
+            {
+                var sid = machine ? journal.UserSid ?? throw new IOException("The machine shortcut journal has no owner.") : Sid;
+                using var links = new Shortcuts(state, Shortcuts.Roots(machine), sid, machine, writable: true);
+                links.Apply(sid, restore: false);
+            }
+            await Task.Delay(TimeSpan.FromMinutes(1));
+        }
+    }
+
+    internal static async Task RunOnDesktopAsync(string path, string mode, string sid)
+    {
+        using var process = StartOnDesktop(path, mode, sid);
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0) throw new IOException("The desktop shortcut operation failed. Its recovery journal was preserved.");
+    }
+
+    private static Process StartOnDesktop(string executable, string mode, string sid)
+    {
+        using var current = WindowsIdentity.GetCurrent();
+        if (current.User!.Value != sid || !GetTokenInformation(current.AccessToken, 19, out IntPtr linkedHandle, IntPtr.Size, out _))
+            throw new IOException("Setup requires the installing user's Windows desktop session.");
+        using var linked = new SafeAccessTokenHandle(linkedHandle);
+        using var user = new WindowsIdentity(linked.DangerousGetHandle());
+        using var caller = Process.GetCurrentProcess();
+        var session = caller.SessionId;
+        var shell = GetShellWindow();
+        GetWindowThreadProcessId(shell, out var shellPid);
+        if (shell == IntPtr.Zero || shellPid == 0) throw new IOException("Could not identify your Windows desktop.");
+        using var desktop = Process.GetProcessById((int)shellPid);
+        if (!OpenProcessToken(desktop.Handle, 0xA, out var shellToken)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        using var shellLifetime = shellToken;
+        using var shellUser = new WindowsIdentity(shellToken.DangerousGetHandle());
+        if (session == 0 || desktop.SessionId != session || user.User != current.User || shellUser.User != current.User ||
+            new WindowsPrincipal(user).IsInRole(WindowsBuiltInRole.Administrator) || new WindowsPrincipal(shellUser).IsInRole(WindowsBuiltInRole.Administrator) ||
+            !TokenEquals(shellToken, 8, 1) || !TokenEquals(shellToken, 12, session) || !TokenEquals(shellToken, 18, 3) ||
+            !TokenEquals(linked, 12, session) || !TokenEquals(linked, 18, 3))
+            throw new IOException("Setup requires the same Windows user and unelevated desktop session.");
+        if (!DuplicateTokenEx(shellToken, 0x02000000, IntPtr.Zero, 2, 1, out var primary)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        using var launchToken = primary;
+        using var directory = new WindowsFiles.DirectoryPin(Path.GetDirectoryName(executable)!, machine: true);
+        if (!CreateEnvironmentBlock(out var environment, launchToken, false)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            var startup = new StartupInfo { Size = Marshal.SizeOf<StartupInfo>(), Desktop = @"winsta0\default", Flags = 1 };
+            if (!CreateProcessWithTokenW(launchToken, 1, executable, new StringBuilder($"\"{executable}\" {mode}"),
+                0x08000400, environment, Environment.SystemDirectory, ref startup, out var process)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            using var handle = new SafeProcessHandle(process.Process, ownsHandle: true);
+            CloseHandle(process.Thread);
+            return Process.GetProcessById(process.ProcessId);
+        }
+        finally { DestroyEnvironmentBlock(environment); }
+    }
+
+    private static bool TokenEquals(SafeAccessTokenHandle token, int kind, int expected) =>
+        GetTokenInformation(token, kind, out int actual, sizeof(int), out _) && actual == expected;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public int Size;
+        public string? Reserved, Desktop, Title;
+        public int X, Y, XSize, YSize, XCountChars, YCountChars, FillAttribute, Flags;
+        public short ShowWindow, ReservedSize;
+        public IntPtr ReservedBytes, Input, Output, Error;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation { public IntPtr Process, Thread; public int ProcessId, ThreadId; }
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(SafeAccessTokenHandle token, int kind, out IntPtr value, int size, out int returned);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(SafeAccessTokenHandle token, int kind, out int value, int size, out int returned);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, int access, out SafeAccessTokenHandle token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool DuplicateTokenEx(SafeAccessTokenHandle token, uint access, IntPtr attributes, int level, int type, out SafeAccessTokenHandle copy);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcessWithTokenW(SafeAccessTokenHandle token, int logonFlags, string application, StringBuilder command,
+        int flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInformation process);
+    [DllImport("userenv.dll", SetLastError = true)]
+    private static extern bool CreateEnvironmentBlock(out IntPtr environment, SafeAccessTokenHandle token, bool inherit);
+    [DllImport("userenv.dll")]
+    private static extern bool DestroyEnvironmentBlock(IntPtr environment);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetShellWindow();
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
 }

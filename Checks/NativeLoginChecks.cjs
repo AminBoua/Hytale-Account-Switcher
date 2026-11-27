@@ -5,7 +5,18 @@ let tick, nativeLogouts = 0, generated = 0, requestId = 0, failLogin = false, us
 const calls = [], created = [], browserUrls = [], events = {}, nativeActions = [];
 const deliveryFailures = new Map(), delivered = [];
 const timers = new Map();
+const loginInput = Symbol('native login input');
+const loginOrigin = new URL('https:' + '//' + 'oauth.accounts.hytale.com').origin;
+class FixtureUrl {
+  constructor(input) {
+    if (input !== loginInput) return new URL(input);
+    this.origin = loginOrigin;
+    this.searchParams = new Map([['state', 'native-state'], ['code_challenge', 'native-pkce']]);
+    this.href = this;
+  }
+}
 let timerId = 0, automaticSwitch = false, automaticSignIn = false, signInAttempts = 0, disconnected = false, loadGate, urlGate, commandGate, stateGate, refresh;
+let verifyReadiness = false, rejectAdd = false, addRejection, holdFailedLogin = false;
 let nativeGate, nativeFailure, logoutGate, verificationGate, now = Date.now(), completed = false, reloads = 0;
 process.on('beforeExit', () => {
   if (!completed && !process.exitCode) {
@@ -39,11 +50,11 @@ const accountA = { uuid: 'accountA-profile', username: 'accountA' };
 let nativeProfile = accountB;
 let logoutFailure = false, verificationFailures = 0, verifications = 0;
 const user = { getUserProfile: accountB, async load() { userLoads++; const profile = nativeProfile; await loadGate; this.getUserProfile = profile; } };
-const state = { stores: [{ id: 'accountB', label: 'accountB' }, { id: 'accountA', label: 'accountA' },
-  { id: 'signed-out', label: 'Signed out', signedOut: true }], active: 'accountB', selected: 'accountB', profile: accountB.uuid, busy: false, holdLogin: false, login: null };
+const state = { stores: [{ id: 'accountB', label: 'accountB' }, { id: 'accountA', label: 'accountA' }],
+  active: 'accountB', selected: 'accountB', profile: accountB.uuid, busy: false, holdLogin: false, login: null };
 const window = {
   go: { account: { Service: {
-    GenerateOauthURL: async () => { generated++; await urlGate; if (failLogin) throw Error('native login failed'); return 'https://oauth.accounts.hytale.com/oauth2/auth?state=native-state&code_challenge=native-pkce'; },
+    GenerateOauthURL: async () => { generated++; await urlGate; if (failLogin) throw Error('native login failed'); return loginInput; },
     LogoutUser: async () => { nativeLogouts++; await logoutGate; if (logoutFailure) throw Error('native logout failed'); nativeProfile = null; },
     IsUserLoggedIn: async () => { verifications++; await verificationGate; if (verificationFailures > 0) { verificationFailures--; throw Error('verification unavailable'); } return !!nativeProfile; },
     HasValidSession: async () => true,
@@ -127,13 +138,13 @@ const source = fs.readFileSync('Launcher/NativeDropdown.js', 'utf8');
 state.session = { request: 'startup-run', operation: 'run' }; state.busy = true;
 user.getUserProfile = null;
 vm.runInNewContext(source, {
-  location: { origin: 'http://wails.localhost', pathname: '/launch-game' }, window, document, URL, AbortSignal,
+  location: { origin: 'http://wails.localhost', pathname: '/launch-game' }, window, document, URL: FixtureUrl, AbortSignal,
   Date: class extends Date { static now() { return now; } },
   MutationObserver: class { constructor(fn) { refresh = fn; } observe() {} },
   setInterval: (fn, delay) => { assert.equal(delay, 1000, 'idle polling remains at one second'); tick = fn; },
   setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; },
   clearTimeout: id => timers.delete(id),
-  alert: message => { throw Error(message); },
+  alert: message => { if (!rejectAdd) throw Error(message); addRejection = message; },
   fetch: async (url, options) => {
     if (options.body) {
       const data = JSON.parse(options.body); calls.push(data); await commandGate;
@@ -142,9 +153,14 @@ vm.runInNewContext(source, {
         deliveryFailures.set(failureKey, deliveryFailures.get(failureKey) - 1);
         throw Error('command POST failed before delivery');
       }
+      if (data.action === 'add' && rejectAdd && data.request !== state.readyRequest) return { ok: false, status: 400 };
+      if (verifyReadiness && data.action === 'ready' && data.readyRequest === state.readyRequest) {
+        state.profile = data.profile;
+        state.readyRequest = 'verified-after-event';
+      }
       delivered.push(data);
       if (data.action === 'add') state.login = 'login-' + ++requestId;
-      if (['cancel', 'login-failed'].includes(data.action) && data.loginRequest === state.login) state.login = null;
+      if ((data.action === 'cancel' || (data.action === 'login-failed' && !holdFailedLogin)) && data.loginRequest === state.login) state.login = null;
       if (automaticSwitch && data.action === 'select') {
         state.busy = true; state.session = { request: 'fast-stop', operation: 'stop' };
       }
@@ -274,15 +290,15 @@ vm.runInNewContext(source, {
   await tick(); await tick();
   assert.deepEqual(calls[beforeAdd], { action: 'add' }, 'Add click invokes add without a store');
   assert.equal(actionRow().children[0].textContent, 'Cancel login');
-  assert.equal(rows().length, state.stores.filter(store => !store.signedOut).length + 1, 'Cancel reuses the Add row without an extra control');
+  assert.equal(rows().length, state.stores.length + 1, 'Cancel reuses the Add row without an extra control');
   assert.equal(actionRow().attrs['aria-disabled'], 'false'); assert.equal(actionRow().tabIndex, 0);
   assert.equal(rows()[0].attrs['aria-disabled'], 'true', 'switching stays disabled during login');
   const beforeDisabledClick = calls.length;
   await command('select', 'accountA');
   assert.equal(calls.length, beforeDisabledClick, 'login disables saved-account selection');
   assert.equal(generated, 1); assert.equal(browserUrls.length, 1, 'one Add opens the default browser exactly once');
-  const authorization = new URL(browserUrls[0]);
-  assert.equal(authorization.origin, 'https://oauth.accounts.hytale.com');
+  const authorization = browserUrls[0];
+  assert.equal(authorization.origin, loginOrigin);
   assert.equal(authorization.searchParams.get('state'), 'native-state');
   assert.equal(authorization.searchParams.get('code_challenge'), 'native-pkce');
   assert.equal(authorization.searchParams.get('prompt'), 'login');
@@ -857,5 +873,122 @@ vm.runInNewContext(source, {
   console.log('PASS lost session/logout results retry immediately with identical payloads and exactly one native execution per request');
   console.log('PASS transient and persistent logout verification errors retry confirmation only, preserve Play blocking, and remain distinct from genuine logout failure');
   console.log('PASS the existing row cancels login, restores Play/switching, and fences late profile loads and browser opens across retries');
+  {
+    timers.clear();
+    state.readyRequest = 'verified-window';
+    state.active = state.selected = 'accountA';
+    state.profile = accountA.uuid;
+    nativeProfile = user.getUserProfile = accountA;
+    const start = calls.length;
+    await tick();
+    assert.equal(calls.length, start, 'the verified frontend does not resend its settled identity');
+    await command('select', 'accountB');
+    assert.deepEqual(calls.at(-1), { action: 'select', store: 'accountB', request: 'verified-window' });
+    await immediateUpdate();
+    state.readyRequest = 'next-window-state';
+    user.getUserProfile = accountB;
+    await tick();
+    assert.equal(calls.at(-1).action, 'select', 'an unverified cached profile cannot submit readiness');
+    assert(playBlocked(), 'a cached profile different from the published profile keeps Play blocked');
+    nativeProfile = accountB;
+    await tick();
+    assert.deepEqual(calls.at(-1), { action: 'ready', profile: accountB.uuid, username: accountB.username,
+      readyRequest: 'next-window-state' });
+  }
+  console.log('PASS the current state nonce correlates user commands and readiness, and a mismatched cached profile needs native confirmation');
+  {
+    timers.clear();
+    state.readyRequest = 'startup-timeout-fallback';
+    state.profile = null;
+    state.holdLogin = state.busy = false;
+    nativeProfile = null;
+    user.getUserProfile = accountA;
+    const start = calls.length;
+    await tick();
+    assert.equal(calls.length, start, 'a stale startup profile cannot confirm the fallback account');
+    assert(playBlocked(), 'Play stays blocked until native readiness is confirmed');
+    assert(!Object.hasOwn(document.documentElement.attrs, 'data-account-transition'), 'the fallback allows native sign-in');
+    nativeProfile = user.getUserProfile = accountB;
+    await tick();
+    assert.deepEqual(calls.at(-1), { action: 'ready', profile: accountB.uuid, username: accountB.username,
+      readyRequest: 'startup-timeout-fallback' }, 'native login can verify a different account after startup times out');
+  }
+  console.log('PASS startup timeout releases native sign-in and gates Play on confirmed native identity');
+  {
+    timers.clear();
+    state.readyRequest = 'unverified-add';
+    state.active = state.selected = 'accountB';
+    state.profile = null;
+    nativeProfile = user.getUserProfile = accountB;
+    await tick();
+    assert.equal(actionRow().attrs['aria-disabled'], 'true', 'Add waits for helper verification');
+    assert.equal(actionRow().tabIndex, -1, 'unverified Add is not a keyboard tab stop');
+    const beforeAdd = calls.length, beforeBrowser = browserUrls.length;
+    await command('add');
+    dispatch(actionRow(), 'keydown', 'Enter');
+    assert.equal(calls.length, beforeAdd, 'click and keyboard cannot send Add before verification');
+    assert.equal(browserUrls.length, beforeBrowser, 'unverified Add cannot open the browser');
+    await immediateUpdate();
+    assert.equal(calls.length, beforeAdd, 'an accepted report is not repeated on an idle update');
+    verifyReadiness = true;
+    events.profile_changed();
+    await immediateUpdate();
+    verifyReadiness = false;
+    assert.equal(calls.at(-1).readyRequest, 'unverified-add', 'the native event retries the current readiness request');
+    await immediateUpdate();
+    assert.equal(actionRow().attrs['aria-disabled'], 'false', 'the immediate state update enables Add');
+    assert.equal(actionRow().tabIndex, 0, 'verified Add is a keyboard tab stop');
+
+    await command('add');
+    assert.deepEqual(calls.at(-1), { action: 'add', request: 'verified-after-event' }, 'Add uses the new verified request immediately');
+    await immediateUpdate();
+    assert.equal(browserUrls.length, beforeBrowser + 1, 'only accepted Add opens the browser');
+    user.getUserProfile = accountA;
+    await command('cancel');
+    user.getUserProfile = accountB;
+    assert.equal(calls.at(-1).action, 'cancel', 'Cancel remains usable while the cached identity differs');
+    await immediateUpdate();
+
+    state.readyRequest = 'new-verified-request'; // The helper changed its request after the last state read.
+    rejectAdd = true;
+    await command('add');
+    rejectAdd = false;
+    assert.deepEqual(calls.at(-1), { action: 'add', request: 'verified-after-event' });
+    assert.equal(addRejection, 'Account switch unavailable. Previous selection kept.');
+    await immediateUpdate();
+    assert.equal(browserUrls.length, beforeBrowser + 1, 'a rejected Add request cannot open the browser');
+  }
+  console.log('PASS Add waits for verification, uses the current request, and keeps the original dialog for a stale request');
+  {
+    const browsers = browserUrls.length, generations = generated;
+    const start = calls.length;
+    holdFailedLogin = true;
+    failLogin = true;
+    await command('add');
+    const attempt = state.login;
+    deliveryFailures.set(attempt, 1);
+    await immediateUpdate();
+    failLogin = false;
+    const [id, retry] = [...timers][0];
+    assert(retry.delay <= 25, 'failed report delivery has an immediate retry');
+    timers.delete(id);
+    await retry.fn();
+    assert.deepEqual(calls.slice(start).filter(call => call.action === 'login-failed'), [
+      { action: 'login-failed', loginRequest: attempt },
+      { action: 'login-failed', loginRequest: attempt }
+    ], 'only delivery of the first failure is retried');
+    assert.equal(state.login, attempt, 'the helper has accepted the failure and the recovery state is still pending');
+    await immediateUpdate();
+    events.reload(); events.profile_changed();
+    await tick();
+    assert.equal(generated, generations + 1, 'an accepted failure prevents repeated browser generation');
+    assert.equal(browserUrls.length, browsers, 'the failed request never opens the browser');
+    assert.equal(calls.slice(start).filter(call => call.loginRequest === attempt).length, 2,
+      'native events cannot confirm the failed request or resend its accepted report');
+    holdFailedLogin = false;
+    await command('cancel');
+    await immediateUpdate();
+  }
+  console.log('PASS a failed browser request retries report delivery only and stays fenced until recovery');
   completed = true;
 })().catch(error => { console.error(error); process.exitCode = 1; });
